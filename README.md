@@ -1,12 +1,18 @@
-# Official repository for [Flexible Diffusion Modeling of Long Videos](https://arxiv.org/abs/2205.11495)
+# Forked from [official repository](https://github.com/plai-group/flexible-video-diffusion-modeling) for [Flexible Diffusion Modeling of Long Videos](https://arxiv.org/abs/2205.11495)
 
-![A 30 second clip from a video sampled on CARLA Town01.](https://www.cs.ubc.ca/~wsgh/fdm/video_arrays/carla-part-of-long-sample.gif)
+# Edit summary
 
-This codebase is based off that of [Improved Denoising Diffusion Probabilistic Models](https://arxiv.org/abs/2102.09672) with the modifications to create a video model as described in [Flexible Diffusion Modeling of Long Videos](https://arxiv.org/abs/2205.11495).
+## Added features:
+- latent diffusion
 
+## Added dependencies:
+- diffusers
+- transformers
+
+# Full overview
 # Usage
 
-Tested with Python 3.10 in a conda environment. We require the Python packages `mpi4py torch torchvision wandb blobfile tqdm moviepy imageio` as well as the command line tool `ffmpeg`. This repository itself should also be installed by running
+Tested with Python 3.10 in a conda environment. We require the Python packages `mpi4py torch torchvision wandb blobfile tqdm moviepy imageio diffusers` as well as the command line tool `ffmpeg`. This repository itself should also be installed by running
 ```
 pip install -e .
 ```

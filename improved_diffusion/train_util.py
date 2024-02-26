@@ -47,6 +47,7 @@ class TrainLoop:
         save_interval,
         resume_checkpoint,
         use_fp16,
+        diffusion_space,
         fp16_scale_growth,
         schedule_sampler,
         weight_decay,
@@ -73,6 +74,7 @@ class TrainLoop:
         self.resume_checkpoint = resume_checkpoint
         self.use_fp16 = use_fp16
         self.fp16_scale_growth = fp16_scale_growth
+        self.diffusion_space = diffusion_space
         self.schedule_sampler = schedule_sampler or UniformSampler(diffusion)
         self.weight_decay = weight_decay
         self.lr_anneal_steps = lr_anneal_steps
@@ -106,6 +108,8 @@ class TrainLoop:
             self.ema_params = [
                 copy.deepcopy(self.master_params) for _ in range(len(self.ema_rate))
             ]
+
+        self.setup_encoder()
 
         if th.cuda.is_available():
             self.use_ddp = True
@@ -267,7 +271,7 @@ class TrainLoop:
             self.optimize_normal()
         self.log_step()
         logger.logkv("timing/step_time", time() - t0)
-
+    
     def forward_backward(self):
         zero_grad(self.model_params)
         batch1 = next(self.data)[0]
@@ -283,6 +287,9 @@ class TrainLoop:
 
             last_batch = (i + self.microbatch) >= batch1.shape[0]
             t, weights = self.schedule_sampler.sample(micro.shape[0], dist_util.dev())
+
+            # encode micro to latent space
+            micro = self.encode(micro)
 
             compute_losses = functools.partial(
                 self.diffusion.training_losses,
@@ -338,6 +345,48 @@ class TrainLoop:
         self.opt.step()
         for rate, params in zip(self.ema_rate, self.ema_params):
             update_ema(params, self.master_params, rate=rate)
+    
+    def setup_encoder(self):
+        if self.diffusion_space == "pixel":
+            return
+        elif self.diffusion_space == "latent":
+            print('Loading VAE encoder.')
+            from diffusers import StableVideoDiffusionPipeline
+            self.encoder_dtype, variant = th.float16, "fp16"
+            pipe = StableVideoDiffusionPipeline.from_pretrained(
+                "stabilityai/stable-video-diffusion-img2vid",
+                torch_dtype=self.encoder_dtype, variant=variant 
+            )
+            pipe.enable_model_cpu_offload()
+            self.image_processor = pipe.image_processor
+            self.vae = pipe.vae
+            del self.vae.decoder
+            del pipe
+            for p in self.vae.parameters():
+                p.requires_grad = False
+            print('Loaded encoder.')
+        elif self.diffusion_space == "wavelet":
+            raise NotImplementedError
+        else:
+            raise ValueError(f"Unknown diffusion space: {self.diffusion_space}")
+    
+    def encode(self, video):
+        if self.diffusion_space == "pixel":
+            return video
+        elif self.diffusion_space == "latent":
+            original_dtype = video.dtype
+            print('video should be normalized to [-1, 1]', video.min(), video.max())
+            video = self.image_processor.preprocess(video*2-1)  # processor expects [0, 1] range
+            video = video.to(self.encoder_dtype).cuda()
+            def encode_chunk():
+                dist = self.vae.encode(video).latent_dist
+                return dist.mean + th.randn_like(dist.std) * dist.std
+            chunk_size = 8
+            return th.cat(
+                [encode_chunk(video[i:i+chunk_size]) for i in range(0, video.shape[0], chunk_size)]
+            )
+        elif self.diffusion_space == "wavelet":
+            raise NotImplementedError
 
     def _log_grad_norm(self):
         sqsum = 0.0

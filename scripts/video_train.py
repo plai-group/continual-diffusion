@@ -74,7 +74,14 @@ def main():
     default_T = video_length
     default_image_size = default_image_size_dict[args.dataset]
     args.T = default_T if args.T == -1 else args.T
-    args.image_size = default_image_size
+    args.image_size = {
+        "pixel": default_image_size,
+        "latent": default_image_size // 8,
+    }[args.diffusion_space]
+    args.channels = {
+        "pixel": args.num_channels,
+        "latent": 4,
+    }[args.diffusion_space]
 
     dist_util.setup_dist()
     resume = bool(args.resume_id)
@@ -109,6 +116,7 @@ def main():
         resume_checkpoint=args.resume_checkpoint,
         use_fp16=args.use_fp16,
         fp16_scale_growth=args.fp16_scale_growth,
+        diffusion_space=args.diffusion_space,
         schedule_sampler=schedule_sampler,
         weight_decay=args.weight_decay,
         lr_anneal_steps=args.lr_anneal_steps,
@@ -134,6 +142,7 @@ def create_argparser():
         resume_checkpoint="",
         use_fp16=False,
         fp16_scale_growth=1e-3,
+        diffusion_space="pixel",
         resume_id='',  # set this to a previous run's wandb id to resume training
         num_workers=-1,
         pad_with_random_frames=True,

@@ -113,6 +113,7 @@ class GaussianDiffusion:
     :param rescale_timesteps: if True, pass floating point timesteps into the
                               model so that they are always scaled like in the
                               original paper (0 to 1000).
+    :param enc_dec_model: optional encoder-decoder model for use in latent diffusion.
     """
 
     def __init__(
@@ -123,6 +124,7 @@ class GaussianDiffusion:
         model_var_type,
         loss_type,
         rescale_timesteps=False,
+        diffusion_space="pixel",
     ):
         self.model_mean_type = model_mean_type
         self.model_var_type = model_var_type
@@ -167,6 +169,10 @@ class GaussianDiffusion:
             * np.sqrt(alphas)
             / (1.0 - self.alphas_cumprod)
         )
+
+        self.diffusion_space = diffusion_space
+        self.original_dtype = None
+        self.setup_enc_dec()
 
     def q_mean_variance(self, x_start, t):
         """
@@ -455,7 +461,7 @@ class GaussianDiffusion:
                             reshaped = reshaped / reshaped.mean() * attn_layer.mean()  # renormalise
                         attns[tag] = attns[tag] + reshaped/(self.num_timesteps/4)
             final = sample
-        return final["sample"], attns
+        return self.decode(final["sample"]), attns
 
     def p_sample_loop_progressive(
         self,
@@ -873,6 +879,68 @@ class GaussianDiffusion:
             model=model, x_start=x_start, clip_denoised=clip_denoised,
             model_kwargs=model_kwargs, latent_mask=latent_mask,
             t_seq=list(range(self.num_timesteps))[::-1])
+
+    def setup_enc_dec(self):
+        if self.diffusion_space == "pixel":
+            return
+        elif self.diffusion_space == "latent":
+            print('Loading VAE encoder and decoder.')
+            from diffusers import StableVideoDiffusionPipeline
+            self.enc_dec_dtype, variant = th.float16, "fp16"
+            pipe = StableVideoDiffusionPipeline.from_pretrained(
+                "stabilityai/stable-video-diffusion-img2vid",
+                torch_dtype=self.enc_dec_dtype, variant=variant 
+            )
+            pipe.enable_model_cpu_offload()
+            self.image_processor = pipe.image_processor
+            self.vae = pipe.vae
+            del pipe
+            for p in self.vae.parameters():
+                p.requires_grad = False
+            print('Loaded encoder and decoder.')
+        elif self.diffusion_space == "wavelet":
+            raise NotImplementedError
+        else:
+            raise ValueError(f"Unknown diffusion space: {self.diffusion_space}")
+
+    @th.no_grad()
+    def encode(self, video):
+        if self.diffusion_space == "pixel":
+            return video
+        elif self.diffusion_space == "latent":
+            self.original_dtype = video.dtype
+            print('video should be normalized to [-1, 1]', video.min(), video.max())
+            print(self.image_processor)
+            original_shape = video.shape
+            video = self.image_processor.preprocess((video.flatten(0, 1)+1)/2)
+            video = video.to(self.enc_dec_dtype).cuda()  # shape: <n_timesteps x n_channels x height x width>
+            def encode_chunk(chunk):
+                dist = self.vae.encode(chunk).latent_dist
+                return dist.mean + th.randn_like(dist.std) * dist.std
+            chunk_size = 10
+            result = th.cat([encode_chunk(video[i:i+chunk_size]) for i in range(0, video.shape[0], chunk_size)])
+            # breakpoint()
+            # print(original_shape)
+            # print(result.shape)
+            # print(f"{(original_shape[0], original_shape[1], result.shape[-3], result.shape[-2], result.shape[-1])}")
+            return result.reshape(original_shape[0], original_shape[1], result.shape[-3], result.shape[-2], result.shape[-1])
+        elif self.diffusion_space == "wavelet":
+            raise NotImplementedError
+
+    # Make the decode method based on the above method that decodes the video.
+    @th.no_grad()
+    def decode(self, video):
+        if self.diffusion_space == "pixel":
+            return video
+        elif self.diffusion_space == "latent":
+            def decode_chunk():
+                return self.vae.decode(video)
+            chunk_size = 8
+            return th.cat(
+                [decode_chunk(video[i:i+chunk_size]) for i in range(0, video.shape[0], chunk_size)]
+            ).to(self.original_dtype)
+        elif self.diffusion_space == "wavelet":
+            raise NotImplementedError
 
 
 def _extract_into_tensor(arr, timesteps, broadcast_shape):

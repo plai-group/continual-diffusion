@@ -91,6 +91,7 @@ class TrainLoop:
         self.master_params = self.model_params
         self.lg_loss_scale = INITIAL_LOG_LOSS_SCALE
         self.sync_cuda = th.cuda.is_available()
+        self.original_dtype = None
 
         self._load_and_sync_parameters()
         if self.use_fp16:
@@ -108,8 +109,6 @@ class TrainLoop:
             self.ema_params = [
                 copy.deepcopy(self.master_params) for _ in range(len(self.ema_rate))
             ]
-
-        self.setup_encoder()
 
         if th.cuda.is_available():
             self.use_ddp = True
@@ -345,48 +344,6 @@ class TrainLoop:
         self.opt.step()
         for rate, params in zip(self.ema_rate, self.ema_params):
             update_ema(params, self.master_params, rate=rate)
-    
-    def setup_encoder(self):
-        if self.diffusion_space == "pixel":
-            return
-        elif self.diffusion_space == "latent":
-            print('Loading VAE encoder.')
-            from diffusers import StableVideoDiffusionPipeline
-            self.encoder_dtype, variant = th.float16, "fp16"
-            pipe = StableVideoDiffusionPipeline.from_pretrained(
-                "stabilityai/stable-video-diffusion-img2vid",
-                torch_dtype=self.encoder_dtype, variant=variant 
-            )
-            pipe.enable_model_cpu_offload()
-            self.image_processor = pipe.image_processor
-            self.vae = pipe.vae
-            del self.vae.decoder
-            del pipe
-            for p in self.vae.parameters():
-                p.requires_grad = False
-            print('Loaded encoder.')
-        elif self.diffusion_space == "wavelet":
-            raise NotImplementedError
-        else:
-            raise ValueError(f"Unknown diffusion space: {self.diffusion_space}")
-    
-    def encode(self, video):
-        if self.diffusion_space == "pixel":
-            return video
-        elif self.diffusion_space == "latent":
-            original_dtype = video.dtype
-            print('video should be normalized to [-1, 1]', video.min(), video.max())
-            video = self.image_processor.preprocess(video*2-1)  # processor expects [0, 1] range
-            video = video.to(self.encoder_dtype).cuda()
-            def encode_chunk():
-                dist = self.vae.encode(video).latent_dist
-                return dist.mean + th.randn_like(dist.std) * dist.std
-            chunk_size = 8
-            return th.cat(
-                [encode_chunk(video[i:i+chunk_size]) for i in range(0, video.shape[0], chunk_size)]
-            )
-        elif self.diffusion_space == "wavelet":
-            raise NotImplementedError
 
     def _log_grad_norm(self):
         sqsum = 0.0
@@ -456,6 +413,9 @@ class TrainLoop:
             return make_master_params(params)
         else:
             return params
+
+    def encode(self, video):
+        return self.diffusion.encode(video)
 
     @rng_decorator(seed=0)
     def log_samples(self):

@@ -12,6 +12,7 @@ def model_and_diffusion_defaults():
     """
     return dict(
         image_size=64,
+        in_channels=3,
         num_channels=128,
         num_res_blocks=2,
         num_heads=4,
@@ -22,6 +23,7 @@ def model_and_diffusion_defaults():
         sigma_small=False,
         class_cond=False,
         diffusion_steps=1000,
+        diffusion_space="pixel",
         noise_schedule="linear",
         timestep_respacing="",
         use_kl=False,
@@ -39,6 +41,7 @@ def create_model_and_diffusion(
     class_cond,
     learn_sigma,
     sigma_small,
+    in_channels,
     num_channels,
     num_res_blocks,
     num_heads,
@@ -46,6 +49,7 @@ def create_model_and_diffusion(
     attention_resolutions,
     dropout,
     diffusion_steps,
+    diffusion_space,
     noise_schedule,
     timestep_respacing,
     use_kl,
@@ -58,6 +62,7 @@ def create_model_and_diffusion(
 ):
     model = create_model(
         image_size,
+        in_channels,
         num_channels,
         num_res_blocks,
         learn_sigma=learn_sigma,
@@ -80,12 +85,14 @@ def create_model_and_diffusion(
         rescale_timesteps=rescale_timesteps,
         rescale_learned_sigmas=rescale_learned_sigmas,
         timestep_respacing=timestep_respacing,
+        diffusion_space=diffusion_space,
     )
     return model, diffusion
 
 
 def create_model(
     image_size,
+    in_channels,
     num_channels,
     num_res_blocks,
     learn_sigma,
@@ -114,9 +121,9 @@ def create_model(
         attention_ds.append(image_size // int(res))
 
     return UNetVideoModel(
-        in_channels=3,
+        in_channels=in_channels,
         model_channels=num_channels,
-        out_channels=(3 if not learn_sigma else 6),
+        out_channels=(in_channels if not learn_sigma else in_channels*2),
         num_res_blocks=num_res_blocks,
         attention_resolutions=tuple(attention_ds),
         image_size=image_size,
@@ -141,6 +148,7 @@ def create_gaussian_diffusion(
     rescale_timesteps=False,
     rescale_learned_sigmas=False,
     timestep_respacing="",
+    diffusion_space="pixel",
 ):
     betas = gd.get_named_beta_schedule(noise_schedule, steps)
     if use_kl:
@@ -168,6 +176,7 @@ def create_gaussian_diffusion(
         ),
         loss_type=loss_type,
         rescale_timesteps=rescale_timesteps,
+        diffusion_space=diffusion_space,
     )
 
 

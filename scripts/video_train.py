@@ -78,8 +78,8 @@ def main():
         "pixel": default_image_size,
         "latent": default_image_size // 8,
     }[args.diffusion_space]
-    args.channels = {
-        "pixel": args.num_channels,
+    args.in_channels = {
+        "pixel": 3,
         "latent": 4,
     }[args.diffusion_space]
 

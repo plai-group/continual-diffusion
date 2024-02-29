@@ -55,6 +55,7 @@ class TrainLoop:
         sample_interval,
         pad_with_random_frames,
         max_frames,
+        enc_dec_chunk_size,
         args,
     ):
         self.args = args
@@ -80,8 +81,10 @@ class TrainLoop:
         self.lr_anneal_steps = lr_anneal_steps
         self.sample_interval = sample_interval
         self.pad_with_random_frames = pad_with_random_frames
+        self.enc_dec_chunk_size = enc_dec_chunk_size
         with RNG(0):
-            self.vis_batch = next(self.data)[0][:2]
+            vis_batch = next(self.data)[0][:2]
+            self.vis_batch = self.encode(vis_batch).to(vis_batch.device)
         self.max_frames = max_frames
 
         self.step = 0
@@ -91,6 +94,7 @@ class TrainLoop:
         self.master_params = self.model_params
         self.lg_loss_scale = INITIAL_LOG_LOSS_SCALE
         self.sync_cuda = th.cuda.is_available()
+        self.original_dtype = None
 
         self._load_and_sync_parameters()
         if self.use_fp16:
@@ -108,8 +112,6 @@ class TrainLoop:
             self.ema_params = [
                 copy.deepcopy(self.master_params) for _ in range(len(self.ema_rate))
             ]
-
-        self.setup_encoder()
 
         if th.cuda.is_available():
             self.use_ddp = True
@@ -207,7 +209,7 @@ class TrainLoop:
                 set_values = set_masks[k]
                 n_set = min(len(set_values), len(masks[k]))
                 masks[k][:n_set] = set_values[:n_set]
-        any_mask = (masks['obs'] + masks['latent']).clip(max=1)
+        any_mask = (masks['obs'] + masks['latent']).to(th.float32).clip(max=1).to(masks['obs'].dtype)
         if not gather:
             return batch1, masks['obs'], masks['latent']
         batch, (obs_mask, latent_mask), frame_indices =\
@@ -277,8 +279,8 @@ class TrainLoop:
         batch1 = next(self.data)[0]
         batch2 = next(self.data)[0] if self.pad_with_random_frames else None
         for i in range(0, batch1.shape[0], self.microbatch):
-            micro1 = batch1[i : i + self.microbatch]
-            micro2 = batch2[i:i + self.microbatch] if batch2 is not None else None
+            micro1 = self.encode(batch1[i : i + self.microbatch]).to(batch1.device)
+            micro2 = self.encode(batch2[i : i + self.microbatch]).to(batch2.device) if batch2 is not None else None
             micro, frame_indices, obs_mask, latent_mask = self.sample_all_masks(micro1, micro2)
             micro = micro.to(dist_util.dev())
             frame_indices = frame_indices.to(dist_util.dev())
@@ -289,7 +291,7 @@ class TrainLoop:
             t, weights = self.schedule_sampler.sample(micro.shape[0], dist_util.dev())
 
             # encode micro to latent space
-            micro = self.encode(micro)
+            # micro = self.encode(micro)
 
             compute_losses = functools.partial(
                 self.diffusion.training_losses,
@@ -345,48 +347,6 @@ class TrainLoop:
         self.opt.step()
         for rate, params in zip(self.ema_rate, self.ema_params):
             update_ema(params, self.master_params, rate=rate)
-    
-    def setup_encoder(self):
-        if self.diffusion_space == "pixel":
-            return
-        elif self.diffusion_space == "latent":
-            print('Loading VAE encoder.')
-            from diffusers import StableVideoDiffusionPipeline
-            self.encoder_dtype, variant = th.float16, "fp16"
-            pipe = StableVideoDiffusionPipeline.from_pretrained(
-                "stabilityai/stable-video-diffusion-img2vid",
-                torch_dtype=self.encoder_dtype, variant=variant 
-            )
-            pipe.enable_model_cpu_offload()
-            self.image_processor = pipe.image_processor
-            self.vae = pipe.vae
-            del self.vae.decoder
-            del pipe
-            for p in self.vae.parameters():
-                p.requires_grad = False
-            print('Loaded encoder.')
-        elif self.diffusion_space == "wavelet":
-            raise NotImplementedError
-        else:
-            raise ValueError(f"Unknown diffusion space: {self.diffusion_space}")
-    
-    def encode(self, video):
-        if self.diffusion_space == "pixel":
-            return video
-        elif self.diffusion_space == "latent":
-            original_dtype = video.dtype
-            print('video should be normalized to [-1, 1]', video.min(), video.max())
-            video = self.image_processor.preprocess(video*2-1)  # processor expects [0, 1] range
-            video = video.to(self.encoder_dtype).cuda()
-            def encode_chunk():
-                dist = self.vae.encode(video).latent_dist
-                return dist.mean + th.randn_like(dist.std) * dist.std
-            chunk_size = 8
-            return th.cat(
-                [encode_chunk(video[i:i+chunk_size]) for i in range(0, video.shape[0], chunk_size)]
-            )
-        elif self.diffusion_space == "wavelet":
-            raise NotImplementedError
 
     def _log_grad_norm(self):
         sqsum = 0.0
@@ -457,6 +417,12 @@ class TrainLoop:
         else:
             return params
 
+    def encode(self, video):
+        return self.diffusion.encode(video, chunk_size=self.enc_dec_chunk_size)
+
+    def decode(self, video):
+        return self.diffusion.decode(video, chunk_size=self.enc_dec_chunk_size)
+
     @rng_decorator(seed=0)
     def log_samples(self):
         if dist.get_rank() == 0:
@@ -491,8 +457,9 @@ class TrainLoop:
                     'latent_mask': latent_mask.to(dist_util.dev())},
                 latent_mask=latent_mask,
                 return_attn_weights=True,
+                return_decoded=False,
             )
-            samples = samples.cpu() * latent_mask + batch * obs_mask
+            samples = self.decode(samples.cpu() * latent_mask + batch * obs_mask)
             _mark_as_observed(samples[:, :n_obs])
             samples = ((samples + 1) * 127.5).clamp(0, 255).to(th.uint8).cpu().numpy()
             for i, video in enumerate(samples):

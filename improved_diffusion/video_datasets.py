@@ -14,18 +14,21 @@ video_data_paths_dict = {
     "minerl":       "datasets/minerl_navigate-torch",
     "mazes_cwvae":  "datasets/gqn_mazes-torch",
     "carla_no_traffic": "datasets/carla/no-traffic",
+    "carla_no_traffic_2x": "datasets/carla/no-traffic",
 }
 
 default_T_dict = {
     "minerl":       500,
     "mazes_cwvae":  300,
     "carla_no_traffic": 1000,
+    "carla_no_traffic_2x": 1000,
 }
 
 default_image_size_dict = {
     "minerl":       64,
     "mazes_cwvae":  64,
     "carla_no_traffic": 128,
+    "carla_no_traffic_2x": 256,
 }
 
 
@@ -42,6 +45,8 @@ def load_data(dataset_name, batch_size, T=None, deterministic=False, num_workers
         dataset = GQNMazesDataset(data_path, shard=shard, num_shards=num_shards, T=T)
     elif dataset_name == "carla_no_traffic":
         dataset = CarlaDataset(train=True, path=data_path, shard=shard, num_shards=num_shards, T=T)
+    elif dataset_name == "carla_no_traffic_2x":
+        dataset = Carla2xDataset(train=True, path=data_path, shard=shard, num_shards=num_shards, T=T)
     else:
         raise Exception("no dataset", dataset_name)
     if return_dataset:
@@ -75,6 +80,8 @@ def get_test_dataset(dataset_name, T=None):
         dataset = GQNMazesDataset(data_path, shard=0, num_shards=1, T=T)
     elif dataset_name == "carla_no_traffic":
         dataset = CarlaDataset(train=False, path=data_path, shard=0, num_shards=1, T=T)
+    elif dataset_name == "carla_no_traffic_2x":
+        dataset = Carla2xDataset(train=False, path=data_path, shard=0, num_shards=1, T=T)
     else:
         raise Exception("no dataset", dataset_name)
     dataset.set_test()
@@ -189,6 +196,12 @@ class CarlaDataset(BaseDataset):
 
     def __len__(self):
         return len(self.fnames)
+
+
+class Carla2xDataset(CarlaDataset):
+    def postprocess_video(self, video):
+        result = -1 + 2 * (video.permute(0, 3, 1, 2).float()/255)
+        return th.nn.functional.interpolate(result, scale_factor=2)
 
 
 class GQNMazesDataset(BaseDataset):

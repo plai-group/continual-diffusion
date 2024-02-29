@@ -123,6 +123,7 @@ def main():
         sample_interval=args.sample_interval,
         pad_with_random_frames=args.pad_with_random_frames,
         max_frames=args.max_frames,
+        enc_dec_chunk_size=args.enc_dec_chunk_size,
         args=args,
     ).run_loop()
 
@@ -147,6 +148,7 @@ def create_argparser():
         num_workers=-1,
         pad_with_random_frames=True,
         max_frames=20,
+        enc_dec_chunk_size=20,
         T=-1,
         sample_interval=50000,
     )

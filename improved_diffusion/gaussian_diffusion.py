@@ -113,7 +113,7 @@ class GaussianDiffusion:
     :param rescale_timesteps: if True, pass floating point timesteps into the
                               model so that they are always scaled like in the
                               original paper (0 to 1000).
-    :param enc_dec_model: optional encoder-decoder model for use in latent diffusion.
+    :param diffusion_space: what space to perform diffusion in.
     """
 
     def __init__(
@@ -406,6 +406,7 @@ class GaussianDiffusion:
         progress=False,
         latent_mask=None,
         return_attn_weights=False,
+        return_decoded=True,
     ):
         """
         Generate samples from the model.
@@ -461,7 +462,7 @@ class GaussianDiffusion:
                             reshaped = reshaped / reshaped.mean() * attn_layer.mean()  # renormalise
                         attns[tag] = attns[tag] + reshaped/(self.num_timesteps/4)
             final = sample
-        return self.decode(final["sample"]), attns
+        return self.decode(final["sample"]) if return_decoded else final["sample"], attns
 
     def p_sample_loop_progressive(
         self,
@@ -904,41 +905,34 @@ class GaussianDiffusion:
             raise ValueError(f"Unknown diffusion space: {self.diffusion_space}")
 
     @th.no_grad()
-    def encode(self, video):
+    def encode(self, video, chunk_size=10):
         if self.diffusion_space == "pixel":
             return video
         elif self.diffusion_space == "latent":
             self.original_dtype = video.dtype
-            print('video should be normalized to [-1, 1]', video.min(), video.max())
-            print(self.image_processor)
-            original_shape = video.shape
-            video = self.image_processor.preprocess((video.flatten(0, 1)+1)/2)
+            original_shape, original_device = video.shape, video.device
+            video = self.image_processor.preprocess((video.flatten(0, 1)+1)/2)  # expects range [0,1]
             video = video.to(self.enc_dec_dtype).cuda()  # shape: <n_timesteps x n_channels x height x width>
             def encode_chunk(chunk):
                 dist = self.vae.encode(chunk).latent_dist
                 return dist.mean + th.randn_like(dist.std) * dist.std
-            chunk_size = 10
             result = th.cat([encode_chunk(video[i:i+chunk_size]) for i in range(0, video.shape[0], chunk_size)])
-            # breakpoint()
-            # print(original_shape)
-            # print(result.shape)
-            # print(f"{(original_shape[0], original_shape[1], result.shape[-3], result.shape[-2], result.shape[-1])}")
-            return result.reshape(original_shape[0], original_shape[1], result.shape[-3], result.shape[-2], result.shape[-1])
+            return result.unflatten(0, (original_shape[0], original_shape[1])).to(original_device)
         elif self.diffusion_space == "wavelet":
             raise NotImplementedError
 
     # Make the decode method based on the above method that decodes the video.
     @th.no_grad()
-    def decode(self, video):
+    def decode(self, video, chunk_size=20):
         if self.diffusion_space == "pixel":
             return video
         elif self.diffusion_space == "latent":
-            def decode_chunk():
-                return self.vae.decode(video)
-            chunk_size = 8
-            return th.cat(
-                [decode_chunk(video[i:i+chunk_size]) for i in range(0, video.shape[0], chunk_size)]
-            ).to(self.original_dtype)
+            original_shape, original_device = video.shape, video.device
+            video = video.flatten(0, 1).to(self.enc_dec_dtype).cuda()
+            def decode_chunk(chunk):
+                return self.vae.decode(chunk, num_frames=1).sample
+            result = th.cat([decode_chunk(video[i:i+chunk_size]) for i in range(0, video.shape[0], chunk_size)])
+            return result.unflatten(0, (original_shape[0], original_shape[1])).to(original_device).to(self.original_dtype)
         elif self.diffusion_space == "wavelet":
             raise NotImplementedError
 

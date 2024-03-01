@@ -279,9 +279,11 @@ class TrainLoop:
         batch1 = next(self.data)[0]
         batch2 = next(self.data)[0] if self.pad_with_random_frames else None
         for i in range(0, batch1.shape[0], self.microbatch):
-            micro1 = self.encode(batch1[i : i + self.microbatch]).to(batch1.device)
-            micro2 = self.encode(batch2[i : i + self.microbatch]).to(batch2.device) if batch2 is not None else None
+            micro1 = batch1[i : i + self.microbatch]
+            micro2 = batch2[i : i + self.microbatch] if batch2 is not None else None
             micro, frame_indices, obs_mask, latent_mask = self.sample_all_masks(micro1, micro2)
+
+            micro = self.encode(micro)
             micro = micro.to(dist_util.dev())
             frame_indices = frame_indices.to(dist_util.dev())
             obs_mask = obs_mask.to(dist_util.dev())

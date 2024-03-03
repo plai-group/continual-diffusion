@@ -98,6 +98,7 @@ def main():
     data = load_data(
         dataset_name=args.dataset,
         batch_size=args.batch_size,
+        deterministic=args.deterministic_loader,
         T=args.T,
         num_workers=args.num_workers,
     )
@@ -151,6 +152,7 @@ def create_argparser():
         enc_dec_chunk_size=20,
         T=-1,
         sample_interval=50000,
+        deterministic_loader=False,  # set true to have fixed data ordering
     )
     defaults.update(model_and_diffusion_defaults())
     parser = argparse.ArgumentParser()

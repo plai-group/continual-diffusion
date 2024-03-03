@@ -3,6 +3,7 @@ datasets/cifar_*
 wandb
 checkpoints
 results
+.vscode
 
 
 # Default Python .gitignore:

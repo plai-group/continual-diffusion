@@ -1,3 +1,4 @@
+import json
 import os
 import numpy as np
 import torch as th
@@ -11,6 +12,7 @@ from .test_util import Protect
 
 
 video_data_paths_dict = {
+    "ball":         "datasets/ball",
     "minerl":       "datasets/minerl_navigate-torch",
     "mazes_cwvae":  "datasets/gqn_mazes-torch",
     "carla_no_traffic": "datasets/carla/no-traffic",
@@ -18,6 +20,7 @@ video_data_paths_dict = {
 }
 
 default_T_dict = {
+    "ball":         10,
     "minerl":       500,
     "mazes_cwvae":  300,
     "carla_no_traffic": 1000,
@@ -25,6 +28,7 @@ default_T_dict = {
 }
 
 default_image_size_dict = {
+    "ball":         32,
     "minerl":       64,
     "mazes_cwvae":  64,
     "carla_no_traffic": 128,
@@ -37,7 +41,10 @@ def load_data(dataset_name, batch_size, T=None, deterministic=False, num_workers
     T = default_T_dict[dataset_name] if T is None else T
     shard = MPI.COMM_WORLD.Get_rank()
     num_shards = MPI.COMM_WORLD.Get_size()
-    if dataset_name == "minerl":
+    if dataset_name == "ball":
+        dataset = StreamingBallDataset(data_path, shard=shard, num_shards=num_shards, T=T)
+        deterministic = True
+    elif dataset_name == "minerl":
         data_path = os.path.join(data_path, "train")
         dataset = MineRLDataset(data_path, shard=shard, num_shards=num_shards, T=T)
     elif dataset_name == "mazes_cwvae":
@@ -173,6 +180,98 @@ class BaseDataset(Dataset):
             start_i = 0 if self.is_test else np.random.randint(len(video) - T + 1)
             video = video[start_i:start_i+T]
         assert len(video) == T
+        return video
+
+
+class StreamDataset(Dataset):
+    def __init__(self, path, T):
+        super().__init__()
+        self.T = T
+        self.path = Path(path)
+        self.is_test = False
+        
+        config = json.load(open(self.path / 'config.json'))
+        self.T_total = config['T_total']
+        self.chunk_size = config['chunk_size']
+        assert self.chunk_size % self.T == 0
+
+        self.train_path = self.path / 'train'
+        self.test_path = self.path / 'test'
+
+    def __len__(self):
+        return self.T
+
+    def __getitem__(self, idx):
+        path = self.getitem_path(idx)
+        self.cache_file(path)
+        try:
+            video = self.loaditem(path)
+        except Exception as e:
+            print(f"Failed on loading {path}")
+            raise e
+        video = self.postprocess_video(video)
+        return self.get_video_subsequence(video, idx), {}
+
+    def getitem_path(self, idx):
+        raise NotImplementedError
+
+    def loaditem(self, path):
+        raise NotImplementedError
+
+    def postprocess_video(self, video):
+        raise NotImplementedError
+
+    def cache_file(self, path):
+        # Given a path to a dataset item, makes sure that the item is cached in the temporary directory.
+        if not path.exists():
+            path.parent.mkdir(parents=True, exist_ok=True)
+            src_path = self.get_src_path(path)
+            with Protect(path):
+                shutil.copyfile(str(src_path), str(path))  # TODO JASON: Get this to work with train/test folders
+
+    @staticmethod
+    def get_src_path(path):
+        """ Returns the source path to a file. This function is mainly used to handle SLURM_TMPDIR on ComputeCanada.
+            If DATA_ROOT is defined as an environment variable, the datasets are copied to it as they are accessed. This function is called
+            when we need the source path from a given path under DATA_ROOT.
+        """
+        if "DATA_ROOT" in os.environ and os.environ["DATA_ROOT"] != "":
+            # Verify that the path is under
+            data_root = Path(os.environ["DATA_ROOT"])
+            assert data_root in path.parents, f"Expected dataset item path ({path}) to be located under the data root ({data_root})."
+            src_path = Path(*path.parts[len(data_root.parts):]) # drops the data_root part from the path, to get the relative path to the source file.
+            return src_path
+        return path
+
+    def set_test(self):
+        self.is_test = True
+        print('setting test mode')
+
+    def get_video_subsequence(self, video, idx):
+        # Take a subsequence of the video.
+        start_i = idx % self.chunk_size
+        video = video[start_i:start_i+self.T]
+        assert len(video) == self.T
+        return video
+
+
+class StreamingBallDataset(StreamDataset):
+    def __init__(self, path, shard, num_shards, T):
+        assert shard == 0, "Distributed training is not supported by the Bouncing Ball dataset yet."
+        assert num_shards == 1, "Distributed training is not supported by the Bouncing Ball dataset yet."
+        super().__init__(path=path, T=T)
+
+    def getitem_path(self, idx):
+        chunk_idx = idx // self.chunk_size
+        return self.path / ("test" if self.is_test else "train" + "/" + f"{chunk_idx}.npy")
+
+    def loaditem(self, path):
+        return np.load(path)
+
+    def postprocess_video(self, video):
+        byte_to_tensor = lambda x: ToTensor()(x)
+        video = th.stack([byte_to_tensor(frame).float() for frame in video])
+        video = 2 * video - 1
         return video
 
 

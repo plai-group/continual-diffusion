@@ -55,7 +55,6 @@ def main(args):
     for mode in ['train', 'test']:
         split_path = path + f"/video_{mode}.csv"
         fnames = [line.rstrip('\n').split('/')[-1] for line in open(split_path, 'r').readlines() if '.pt' in line]
-
         sum_x, sum_x2, n_obs = torch.zeros(1, 4, 1, 1), torch.zeros(1, 4, 1, 1), 0
 
         for fname in fnames:
@@ -64,7 +63,7 @@ def main(args):
             save(path + "/encoded_" + fname, encoded_means)
             
             # record channel-wise normalization statistics
-            if args.normalize:
+            if args.normalize and mode == 'train':
                 sum_x += encoded_means.to(torch.float64).sum(dim=(0, 2, 3), keepdim=True)
                 sum_x2 += (encoded_means**2).to(torch.float64).sum(dim=(0, 2, 3), keepdim=True)
                 n_obs += encoded_means[0].numel()
@@ -72,6 +71,7 @@ def main(args):
 
         mean = (sum_x/n_obs).to(encoded_means.dtype)
         std = torch.sqrt(sum_x2/n_obs - mean**2).to(encoded_means.dtype)
+        torch.save({"mean": mean, "std": std}, path + f"/encoded_{mode}_norm_stats.pt")
 
         if args.normalize:
             print(f"Normalizing {mode} data.")

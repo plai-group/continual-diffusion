@@ -108,7 +108,7 @@ if __name__ == "__main__":
 
     # Set batch size given dataset if not specified
     if args.batch_size is None:
-        args.batch_size = {'mazes_cwvae': 16, 'minerl': 8, 'carla_no_traffic': 4, 'carla_no_traffic_2x': 4}[model_args.dataset]
+        args.batch_size = {'mazes_cwvae': 16, 'minerl': 8, 'carla_no_traffic': 4, 'carla_no_traffic_2x': 4, 'carla_no_traffic_2x_encoded': 4}[model_args.dataset]
 
     # Prepare datasets
     sample_dataset = SampleDataset(samples_path=(Path(args.eval_dir) / "samples"), sample_idx=args.sample_idx, length=args.num_videos)

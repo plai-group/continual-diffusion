@@ -83,7 +83,7 @@ class TrainLoop:
         self.pad_with_random_frames = pad_with_random_frames
         self.enc_dec_chunk_size = enc_dec_chunk_size
         with RNG(0):
-            vis_batch = next(self.data)[0][:2]
+            vis_batch = next(iter(self.data))[0][:2]
             self.vis_batch = self.encode(vis_batch).to(vis_batch.device)
         self.max_frames = max_frames
 
@@ -246,6 +246,7 @@ class TrainLoop:
             not self.lr_anneal_steps
             or self.step < self.lr_anneal_steps
         ):
+            # TODO JASON: Add for loop here that iterates over each experience.
             self.run_step()
             if self.step % self.log_interval == 0:
                 logger.dumpkvs()
@@ -276,6 +277,7 @@ class TrainLoop:
     
     def forward_backward(self):
         zero_grad(self.model_params)
+        # TODO JASON: Replace these two lines with replay buffer + current dataloader mish mash
         batch1 = next(self.data)[0]
         batch2 = next(self.data)[0] if self.pad_with_random_frames else None
         for i in range(0, batch1.shape[0], self.microbatch):

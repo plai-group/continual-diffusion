@@ -34,6 +34,10 @@ default_image_size_dict = {
     "carla_no_traffic_2x_encoded": 32,
 }
 
+data_encoding_stats_dict = {
+    "carla_no_traffic_2x_encoded": "datasets/carla/no-traffic-encoded/encoded_train_norm_stats.pt",
+}
+
 
 def load_data(dataset_name, batch_size, T=None, deterministic=False, num_workers=1, return_dataset=False):
     data_path = video_data_paths_dict[dataset_name]
@@ -210,7 +214,7 @@ class Carla2xDataset(CarlaDataset):
         super().__init__(train, path, shard, num_shards, T)
         self.encoded = encoded
         if self.encoded:
-            self.fnames = [fname for fname in self.fnames]
+            self.fnames = ["encoded_" + fname for fname in self.fnames]
         print(f"Loading {len(self.fnames)} files (Carla dataset).")
 
     def postprocess_video(self, video):

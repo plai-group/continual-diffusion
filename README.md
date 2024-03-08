@@ -9,6 +9,14 @@
 - diffusers
 - transformers
 
+### Running Latent Diffusion with Carla
+
+Sample run command: `python scripts/video_train.py --batch_size=1 --max_frames=5 --dataset=carla_no_traffic_2x_encoded --num_res_blocks=1 --num_workers=4 --save_interval=1000 --sample_interval=1000 --num_channels=64 --diffusion_space=latent`.
+
+Note: To run latent diffusion with Carla dataset with video whose latent embeddings have already been normalized, follow
+the Carla installation procedure, run `cd datasets/carla` then run `python encode_latent.py --path=no-traffic --normalize`.
+Then, when running `scripts/video_train.py` provide the flag `--dataset=carla_no_traffic_2x_encoded`.
+
 # Full overview
 # Usage
 

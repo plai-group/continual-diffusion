@@ -113,7 +113,7 @@ class GaussianDiffusion:
     :param rescale_timesteps: if True, pass floating point timesteps into the
                               model so that they are always scaled like in the
                               original paper (0 to 1000).
-    :param diffusion_space: what space to perform diffusion in.
+    :param diffusion_space_kwargs: Argument related to what space to perform diffusion in.
     """
 
     def __init__(
@@ -124,7 +124,7 @@ class GaussianDiffusion:
         model_var_type,
         loss_type,
         rescale_timesteps=False,
-        diffusion_space="pixel",
+        diffusion_space_kwargs=dict(),
     ):
         self.model_mean_type = model_mean_type
         self.model_var_type = model_var_type
@@ -170,7 +170,13 @@ class GaussianDiffusion:
             / (1.0 - self.alphas_cumprod)
         )
 
-        self.diffusion_space = diffusion_space
+        self.diffusion_space = diffusion_space_kwargs.get("diffusion_space")
+        self.pre_encoded = diffusion_space_kwargs.get("pre_encoded")
+        self.pre_encoded_stats_dict = diffusion_space_kwargs.get("pre_encoded_stats_dict")
+        if self.pre_encoded:
+            self.pre_encoded_stats_dict["mean"] = self.pre_encoded_stats_dict["mean"].reshape(1, 1, -1, 1, 1)
+            self.pre_encoded_stats_dict["std"] = self.pre_encoded_stats_dict["std"].reshape(1, 1, -1, 1, 1)
+
         self.original_dtype = None
         self.setup_enc_dec()
 
@@ -909,6 +915,8 @@ class GaussianDiffusion:
         if self.diffusion_space == "pixel":
             return video
         elif self.diffusion_space == "latent":
+            if self.pre_encoded:  # nothing to do if input is already pre encoded.
+                return video
             self.original_dtype = video.dtype
             original_shape, original_device = video.shape, video.device
             video = self.image_processor.preprocess((video.flatten(0, 1)+1)/2)  # expects range [0,1]
@@ -927,6 +935,8 @@ class GaussianDiffusion:
         if self.diffusion_space == "pixel":
             return video
         elif self.diffusion_space == "latent":
+            if self.pre_encoded:
+                video = video * self.pre_encoded_stats_dict['std'] + self.pre_encoded_stats_dict['mean']
             original_shape, original_device = video.shape, video.device
             video = video.flatten(0, 1).to(self.enc_dec_dtype).cuda()
             def decode_chunk(chunk):

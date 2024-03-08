@@ -47,7 +47,7 @@ class TrainLoop:
         save_interval,
         resume_checkpoint,
         use_fp16,
-        diffusion_space,
+        diffusion_space_kwargs,
         fp16_scale_growth,
         schedule_sampler,
         weight_decay,
@@ -75,7 +75,7 @@ class TrainLoop:
         self.resume_checkpoint = resume_checkpoint
         self.use_fp16 = use_fp16
         self.fp16_scale_growth = fp16_scale_growth
-        self.diffusion_space = diffusion_space
+        self.diffusion_space_kwargs = diffusion_space_kwargs
         self.schedule_sampler = schedule_sampler or UniformSampler(diffusion)
         self.weight_decay = weight_decay
         self.lr_anneal_steps = lr_anneal_steps
@@ -461,7 +461,7 @@ class TrainLoop:
                 return_attn_weights=True,
                 return_decoded=False,
             )
-            samples = self.decode(samples.cpu() * latent_mask + batch * obs_mask)
+            samples = self.decode(samples.cpu() * latent_mask + batch * obs_mask).float()
             _mark_as_observed(samples[:, :n_obs])
             samples = ((samples + 1) * 127.5).clamp(0, 255).to(th.uint8).cpu().numpy()
             for i, video in enumerate(samples):

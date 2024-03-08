@@ -23,7 +23,7 @@ def model_and_diffusion_defaults():
         sigma_small=False,
         class_cond=False,
         diffusion_steps=1000,
-        diffusion_space="pixel",
+        diffusion_space_kwargs=dict(diffusion_space=None, pre_encoded=False, pre_encoded_stats_dict=None),
         noise_schedule="linear",
         timestep_respacing="",
         use_kl=False,
@@ -49,7 +49,7 @@ def create_model_and_diffusion(
     attention_resolutions,
     dropout,
     diffusion_steps,
-    diffusion_space,
+    diffusion_space_kwargs,
     noise_schedule,
     timestep_respacing,
     use_kl,
@@ -85,7 +85,7 @@ def create_model_and_diffusion(
         rescale_timesteps=rescale_timesteps,
         rescale_learned_sigmas=rescale_learned_sigmas,
         timestep_respacing=timestep_respacing,
-        diffusion_space=diffusion_space,
+        diffusion_space_kwargs=diffusion_space_kwargs,
     )
     return model, diffusion
 
@@ -148,7 +148,7 @@ def create_gaussian_diffusion(
     rescale_timesteps=False,
     rescale_learned_sigmas=False,
     timestep_respacing="",
-    diffusion_space="pixel",
+    diffusion_space_kwargs={"diffusion_space": "pixel", "pre_encoded": False, "pre_encoded_stats_dict": None},
 ):
     betas = gd.get_named_beta_schedule(noise_schedule, steps)
     if use_kl:
@@ -176,7 +176,7 @@ def create_gaussian_diffusion(
         ),
         loss_type=loss_type,
         rescale_timesteps=rescale_timesteps,
-        diffusion_space=diffusion_space,
+        diffusion_space_kwargs=diffusion_space_kwargs,
     )
 
 

@@ -62,8 +62,11 @@ def load_data(dataset_name, batch_size, T=None, deterministic=False, num_workers
         loader = DataLoader(
             dataset, batch_size=batch_size, shuffle=(not deterministic), num_workers=num_workers, drop_last=True
         )
-        while True:
+        if deterministic:
             yield from loader
+        else:
+            while True:
+                yield from loader
 
 
 def get_train_dataset(dataset_name, T=None):
@@ -227,7 +230,7 @@ class StreamDataset(Dataset):
             path.parent.mkdir(parents=True, exist_ok=True)
             src_path = self.get_src_path(path)
             with Protect(path):
-                shutil.copyfile(str(src_path), str(path))  # TODO JASON: Get this to work with train/test folders
+                shutil.copyfile(str(src_path), str(path))
 
     @staticmethod
     def get_src_path(path):

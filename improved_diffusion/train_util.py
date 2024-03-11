@@ -23,6 +23,7 @@ from .fp16_util import (
     zero_grad,
 )
 from .nn import update_ema
+from .replay import ReplayDataset
 from .resample import LossAwareSampler, UniformSampler
 from .rng_util import rng_decorator, RNG
 
@@ -56,6 +57,7 @@ class TrainLoop:
         pad_with_random_frames,
         max_frames,
         enc_dec_chunk_size,
+        replay_dataset_kwargs,
         args,
     ):
         self.args = args
@@ -82,9 +84,7 @@ class TrainLoop:
         self.sample_interval = sample_interval
         self.pad_with_random_frames = pad_with_random_frames
         self.enc_dec_chunk_size = enc_dec_chunk_size
-        with RNG(0):
-            vis_batch = next(iter(self.data))[0][:2]
-            self.vis_batch = self.encode(vis_batch).to(vis_batch.device)
+        self.vis_batch = None
         self.max_frames = max_frames
 
         self.step = 0
@@ -114,15 +114,16 @@ class TrainLoop:
             ]
 
         if th.cuda.is_available():
-            self.use_ddp = True
-            self.ddp_model = DDP(
-                self.model,
-                device_ids=[dist_util.dev()],
-                output_device=dist_util.dev(),
-                broadcast_buffers=False,
-                bucket_cap_mb=128,
-                find_unused_parameters=False,
-            )
+            self.use_ddp = True  # FIXME JASON!
+            # self.ddp_model = DDP(
+            #     self.model,
+            #     device_ids=[dist_util.dev()],
+            #     output_device=dist_util.dev(),
+            #     broadcast_buffers=False,
+            #     bucket_cap_mb=128,
+            #     find_unused_parameters=False,
+            # )
+            self.ddp_model = self.model
         else:
             if dist.get_world_size() > 1:
                 print(
@@ -133,6 +134,8 @@ class TrainLoop:
             self.ddp_model = self.model
         if dist.get_rank() == 0:
             logger.logkv("num_parameters", sum(p.numel() for p in model.parameters()), distributed=False)
+
+        self.replay_dataset: ReplayDataset = ReplayDataset(**replay_dataset_kwargs)
 
     def _load_and_sync_parameters(self):
         resume_checkpoint = find_resume_checkpoint(self.args) or self.resume_checkpoint
@@ -218,6 +221,10 @@ class TrainLoop:
             )
         return batch, frame_indices, obs_mask, latent_mask
 
+    def get_autoregressive_masks(self, batch1, batch2=None, gather=True, set_masks={'obs': (), 'latent': ()}):
+        # Same as above, but always sets the last element as latent and all others as observed
+        raise NotImplementedError()
+
     def prepare_training_batch(self, mask, batch1, batch2, tensors):
         """
         Prepare training batch by selecting frames from batch1 according to mask, appending uniformly sampled frames
@@ -240,34 +247,63 @@ class TrainLoop:
                 new_t[b, instance_T:] = t[b][indices[b, instance_T:]]
         return new_batch, new_tensors, indices
 
+    def get_ctx_batch(self):
+        batch = next(self.data)[0]
+        self.replay_dataset.update(data=batch)
+        ctx_batch, mem_batch = self.replay_dataset.next_data()
+        batch1 = ctx_batch if mem_batch is None else th.cat((ctx_batch, mem_batch), dim=0)
+        batch2 = None if mem_batch is None else self.replay_dataset.sample_memory()
+        if self.vis_batch is None:
+            # Initialize datapoint to log here in case data is deterministic
+            with RNG(0):
+                self.vis_batch = self.encode(batch[:2]).to(batch.device)
+        return batch1, batch2
+
+    def get_ctx_batch(self):
+        batch = next(self.data)[0]
+        batch = self.encode(batch).to(batch.device)
+
+        self.replay_dataset.update(data=batch)  # Update context and memory
+        if self.vis_batch is None:
+            with RNG(0):  # Initialize datapoint to log here in case data is deterministic
+                self.vis_batch = self.encode(batch[:2]).to(batch.device)
+
+        return self.replay_dataset.get_context()
+
+    def append_mem_batch(self, ctx_batch):
+        mem_batch = self.replay_dataset.sample_memory()
+        return ctx_batch if mem_batch is None else th.cat((ctx_batch, mem_batch), dim=0)
+
     def run_loop(self):
         last_sample_time = None
-        while (
-            not self.lr_anneal_steps
-            or self.step < self.lr_anneal_steps
-        ):
+        while not self.lr_anneal_steps or self.step < self.lr_anneal_steps:
             # TODO JASON: Add for loop here that iterates over each experience.
-            self.run_step()
-            if self.step % self.log_interval == 0:
-                logger.dumpkvs()
-            if self.step % self.save_interval == 0:
-                self.save()
-                # Run for a finite amount of time in integration tests.
-            if os.environ.get("DIFFUSION_TRAINING_TEST", "") and self.step > 0:
-                return
-            if self.sample_interval is not None and self.step != 0 and (self.step % self.sample_interval == 0 or self.step == 5):
-                if last_sample_time is not None:
-                    logger.logkv('timing/time_between_samples', time()-last_sample_time)
-                self.log_samples()
-                last_sample_time = time()
-            self.step += 1
+            # if self.step % self.update_per_experience == 0:
+            ctx_batch = self.get_ctx_batch()
+            for _ in range(self.steps_per_experience):
+                batch = self.append_mem_batch(ctx_batch)
+                filler_batch = self.replay_dataset.sample_memory() if self.pad_with_random_frames else None
+                self.run_step(batch, filler_batch)
+                if self.step % self.log_interval == 0:
+                    logger.dumpkvs()
+                if self.step % self.save_interval == 0:
+                    self.save()
+                    # Run for a finite amount of time in integration tests.
+                if os.environ.get("DIFFUSION_TRAINING_TEST", "") and self.step > 0:
+                    return
+                if self.sample_interval is not None and self.step != 0 and (self.step % self.sample_interval == 0 or self.step == 5):
+                    if last_sample_time is not None:
+                        logger.logkv('timing/time_between_samples', time()-last_sample_time)
+                    self.log_samples()
+                    last_sample_time = time()
+                self.step += 1
         # Save the last checkpoint if it wasn't already saved.
         if (self.step - 1) % self.save_interval != 0:
             self.save()
 
-    def run_step(self):
+    def run_step(self, batch1, batch2):
         t0 = time()
-        self.forward_backward()
+        self.forward_backward(batch1, batch2)
         if self.use_fp16:
             self.optimize_fp16()
         else:
@@ -275,11 +311,11 @@ class TrainLoop:
         self.log_step()
         logger.logkv("timing/step_time", time() - t0)
     
-    def forward_backward(self):
+    def forward_backward(self, batch1, batch2):
         zero_grad(self.model_params)
-        # TODO JASON: Replace these two lines with replay buffer + current dataloader mish mash
-        batch1 = next(self.data)[0]
-        batch2 = next(self.data)[0] if self.pad_with_random_frames else None
+
+        # batch1 = next(self.data)[0]
+        # batch2 = next(self.data)[0] if self.pad_with_random_frames else None
         for i in range(0, batch1.shape[0], self.microbatch):
             micro1 = batch1[i : i + self.microbatch]
             micro2 = batch2[i : i + self.microbatch] if batch2 is not None else None

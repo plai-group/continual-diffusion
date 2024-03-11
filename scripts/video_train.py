@@ -82,6 +82,11 @@ def main():
         "pixel": 3,
         "latent": 4,
     }[args.diffusion_space]
+    args.replay_dataset_kwargs = {
+        "context_size": args.max_frames,
+        "mem_size": args.replay_buffer_size,
+        "mem_batch_size": args.max_frames,
+    }
 
     dist_util.setup_dist()
     resume = bool(args.resume_id)
@@ -125,6 +130,7 @@ def main():
         pad_with_random_frames=args.pad_with_random_frames,
         max_frames=args.max_frames,
         enc_dec_chunk_size=args.enc_dec_chunk_size,
+        replay_dataset_kwargs=args.replay_dataset_kwargs,
         args=args,
     ).run_loop()
 
@@ -153,6 +159,7 @@ def create_argparser():
         T=-1,
         sample_interval=50000,
         deterministic_loader=False,  # set true to have fixed data ordering
+        replay_buffer_size=0,
     )
     defaults.update(model_and_diffusion_defaults())
     parser = argparse.ArgumentParser()

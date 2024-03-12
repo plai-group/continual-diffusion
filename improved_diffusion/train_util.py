@@ -58,6 +58,7 @@ class TrainLoop:
         max_frames,
         enc_dec_chunk_size,
         replay_dataset_kwargs,
+        steps_per_experience,
         args,
     ):
         self.args = args
@@ -114,16 +115,15 @@ class TrainLoop:
             ]
 
         if th.cuda.is_available():
-            self.use_ddp = True  # FIXME JASON!
-            # self.ddp_model = DDP(
-            #     self.model,
-            #     device_ids=[dist_util.dev()],
-            #     output_device=dist_util.dev(),
-            #     broadcast_buffers=False,
-            #     bucket_cap_mb=128,
-            #     find_unused_parameters=False,
-            # )
-            self.ddp_model = self.model
+            self.use_ddp = True
+            self.ddp_model = DDP(
+                self.model,
+                device_ids=[dist_util.dev()],
+                output_device=dist_util.dev(),
+                broadcast_buffers=False,
+                bucket_cap_mb=128,
+                find_unused_parameters=False,
+            )
         else:
             if dist.get_world_size() > 1:
                 print(
@@ -136,6 +136,7 @@ class TrainLoop:
             logger.logkv("num_parameters", sum(p.numel() for p in model.parameters()), distributed=False)
 
         self.replay_dataset: ReplayDataset = ReplayDataset(**replay_dataset_kwargs)
+        self.steps_per_experience = steps_per_experience
 
     def _load_and_sync_parameters(self):
         resume_checkpoint = find_resume_checkpoint(self.args) or self.resume_checkpoint
@@ -247,17 +248,17 @@ class TrainLoop:
                 new_t[b, instance_T:] = t[b][indices[b, instance_T:]]
         return new_batch, new_tensors, indices
 
-    def get_ctx_batch(self):
-        batch = next(self.data)[0]
-        self.replay_dataset.update(data=batch)
-        ctx_batch, mem_batch = self.replay_dataset.next_data()
-        batch1 = ctx_batch if mem_batch is None else th.cat((ctx_batch, mem_batch), dim=0)
-        batch2 = None if mem_batch is None else self.replay_dataset.sample_memory()
-        if self.vis_batch is None:
-            # Initialize datapoint to log here in case data is deterministic
-            with RNG(0):
-                self.vis_batch = self.encode(batch[:2]).to(batch.device)
-        return batch1, batch2
+    # def get_ctx_batch(self):
+    #     batch = next(self.data)[0]
+    #     self.replay_dataset.update(data=batch)
+    #     ctx_batch, mem_batch = self.replay_dataset.next_data()
+    #     batch1 = ctx_batch if mem_batch is None else th.cat((ctx_batch, mem_batch), dim=0)
+    #     batch2 = None if mem_batch is None else self.replay_dataset.sample_memory()
+    #     if self.vis_batch is None:
+    #         # Initialize datapoint to log here in case data is deterministic
+    #         with RNG(0):
+    #             self.vis_batch = self.encode(batch[:2]).to(batch.device)
+    #     return batch1, batch2
 
     def get_ctx_batch(self):
         batch = next(self.data)[0]
@@ -282,7 +283,11 @@ class TrainLoop:
             ctx_batch = self.get_ctx_batch()
             for _ in range(self.steps_per_experience):
                 batch = self.append_mem_batch(ctx_batch)
-                filler_batch = self.replay_dataset.sample_memory() if self.pad_with_random_frames else None
+                if self.pad_with_random_frames:
+                    filler_batch = self.replay_dataset.sample_memory()
+                    filler_batch = filler_batch.repeat(len(batch)//len(filler_batch), *[1]*len(batch.shape[1:]))
+                else:
+                    filler_batch = None
                 self.run_step(batch, filler_batch)
                 if self.step % self.log_interval == 0:
                     logger.dumpkvs()

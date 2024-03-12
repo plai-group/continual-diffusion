@@ -202,7 +202,7 @@ class StreamDataset(Dataset):
         self.test_path = self.path / 'test'
 
     def __len__(self):
-        return self.T
+        return self.T_total
 
     def __getitem__(self, idx):
         path = self.getitem_path(idx)

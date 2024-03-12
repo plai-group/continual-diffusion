@@ -131,6 +131,7 @@ def main():
         max_frames=args.max_frames,
         enc_dec_chunk_size=args.enc_dec_chunk_size,
         replay_dataset_kwargs=args.replay_dataset_kwargs,
+        steps_per_experience=args.steps_per_experience,
         args=args,
     ).run_loop()
 
@@ -160,6 +161,7 @@ def create_argparser():
         sample_interval=50000,
         deterministic_loader=False,  # set true to have fixed data ordering
         replay_buffer_size=0,
+        steps_per_experience=1,
     )
     defaults.update(model_and_diffusion_defaults())
     parser = argparse.ArgumentParser()

@@ -197,6 +197,21 @@ class TrainLoop:
     def sample_all_masks(self, batch1, batch2=None, gather=True, set_masks={'obs': (), 'latent': ()}):
         N = self.max_frames
         B, T, *_ = batch1.shape
+
+        if T <= N:
+            # NOTE: In continual learning setting, max frames can be larger than T in the beginning.
+            # In this case, set all frames as latent.
+            masks = {'latent': th.ones_like(batch1[:, :, :1, :1, :1]),
+                     'obs': th.zeros_like(batch1[:, :, :1, :1, :1])}
+            if len(set_masks['obs']) > 0:  # set_masks allow us to choose informative masks for logging
+                for k in masks:
+                    n_set = min(len(set_masks[k]), len(masks[k]))
+                    masks[k][:n_set] = set_masks[k][:n_set]
+            any_mask = (masks['obs'] + masks['latent']).to(th.float32).clip(max=1).to(masks['obs'].dtype)
+            args = (any_mask, batch1, batch2, (masks['obs'], masks['latent']))
+            batch, (obs_mask, latent_mask), frame_indices = self.prepare_training_batch(*args)
+            return batch, frame_indices, obs_mask, latent_mask
+
         masks = {k: th.zeros_like(batch1[:, :, :1, :1, :1]) for k in ['obs', 'latent']}
         for obs_row, latent_row in zip(*[masks[k] for k in ['obs', 'latent']]):
             latent_row[self.sample_some_indices(max_indices=N, T=T)] = 1.
@@ -248,28 +263,17 @@ class TrainLoop:
                 new_t[b, instance_T:] = t[b][indices[b, instance_T:]]
         return new_batch, new_tensors, indices
 
-    # def get_ctx_batch(self):
-    #     batch = next(self.data)[0]
-    #     self.replay_dataset.update(data=batch)
-    #     ctx_batch, mem_batch = self.replay_dataset.next_data()
-    #     batch1 = ctx_batch if mem_batch is None else th.cat((ctx_batch, mem_batch), dim=0)
-    #     batch2 = None if mem_batch is None else self.replay_dataset.sample_memory()
-    #     if self.vis_batch is None:
-    #         # Initialize datapoint to log here in case data is deterministic
-    #         with RNG(0):
-    #             self.vis_batch = self.encode(batch[:2]).to(batch.device)
-    #     return batch1, batch2
-
     def get_ctx_batch(self):
         batch = next(self.data)[0]
         batch = self.encode(batch).to(batch.device)
 
         self.replay_dataset.update(data=batch)  # Update context and memory
-        if self.vis_batch is None:
-            with RNG(0):  # Initialize datapoint to log here in case data is deterministic
-                self.vis_batch = self.encode(batch[:2]).to(batch.device)
+        result = self.replay_dataset.get_context()
 
-        return self.replay_dataset.get_context()
+        if self.vis_batch is None or self.vis_batch.size(1) < self.max_frames:
+            with RNG(0):  # Initialize datapoint to log here in case data is deterministic
+                self.vis_batch = self.encode(result[:2]).to(batch.device)
+        return result
 
     def append_mem_batch(self, ctx_batch):
         mem_batch = self.replay_dataset.sample_memory()
@@ -278,12 +282,15 @@ class TrainLoop:
     def run_loop(self):
         last_sample_time = None
         while not self.lr_anneal_steps or self.step < self.lr_anneal_steps:
-            # TODO JASON: Add for loop here that iterates over each experience.
-            # if self.step % self.update_per_experience == 0:
-            ctx_batch = self.get_ctx_batch()
+            try:
+                ctx_batch = self.get_ctx_batch()
+            except StopIteration:
+                break
+
             for _ in range(self.steps_per_experience):
                 batch = self.append_mem_batch(ctx_batch)
                 if self.pad_with_random_frames:
+                    assert self.replay_dataset.has_mem
                     filler_batch = self.replay_dataset.sample_memory()
                     filler_batch = filler_batch.repeat(len(batch)//len(filler_batch), *[1]*len(batch.shape[1:]))
                 else:
@@ -296,12 +303,13 @@ class TrainLoop:
                     # Run for a finite amount of time in integration tests.
                 if os.environ.get("DIFFUSION_TRAINING_TEST", "") and self.step > 0:
                     return
-                if self.sample_interval is not None and self.step != 0 and (self.step % self.sample_interval == 0 or self.step == 5):
+                if self.sample_interval is not None and self.step != 0 and (self.step % self.sample_interval == 0 or self.step == self.max_frames):
                     if last_sample_time is not None:
                         logger.logkv('timing/time_between_samples', time()-last_sample_time)
                     self.log_samples()
                     last_sample_time = time()
                 self.step += 1
+
         # Save the last checkpoint if it wasn't already saved.
         if (self.step - 1) % self.save_interval != 0:
             self.save()
@@ -319,13 +327,15 @@ class TrainLoop:
     def forward_backward(self, batch1, batch2):
         zero_grad(self.model_params)
 
-        # batch1 = next(self.data)[0]
-        # batch2 = next(self.data)[0] if self.pad_with_random_frames else None
-        for i in range(0, batch1.shape[0], self.microbatch):
+        batch_size = batch1.shape[0]
+        self.microbatch = batch_size  # HACK: Disable microbatches
+        for i in range(0, batch_size, self.microbatch):
+            t1 = time()
             micro1 = batch1[i : i + self.microbatch]
             micro2 = batch2[i : i + self.microbatch] if batch2 is not None else None
             micro, frame_indices, obs_mask, latent_mask = self.sample_all_masks(micro1, micro2)
 
+            t2 = time()
             micro = self.encode(micro)
             micro = micro.to(dist_util.dev())
             frame_indices = frame_indices.to(dist_util.dev())
@@ -348,12 +358,12 @@ class TrainLoop:
                 latent_mask=(1-obs_mask) if self.pad_with_random_frames else latent_mask,
                 eval_mask=latent_mask,
             )
-
             if last_batch or not self.use_ddp:
                 losses = compute_losses()
             else:
                 with self.ddp_model.no_sync():
                     losses = compute_losses()
+            t3 = time()
 
             if isinstance(self.schedule_sampler, LossAwareSampler):
                 self.schedule_sampler.update_with_local_losses(
@@ -369,6 +379,8 @@ class TrainLoop:
                 (loss * loss_scale).backward()
             else:
                 loss.backward()
+            t4 = time()
+            # print(f"mask sample time: {t2-t1:.3f}, forward time: {t3-t2:.3f}, backward time: {t4-t3:.3f}")
 
     def optimize_fp16(self):
         if any(not th.isfinite(p.grad).all() for p in self.model_params):

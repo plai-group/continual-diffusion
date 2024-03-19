@@ -448,7 +448,7 @@ class TrainLoop:
                 self.vis_batch, None, gather=True,
                  set_masks={'obs': obs_mask, 'latent': latent_mask}
             )
-            samples, attn = self.diffusion.p_sample_loop(
+            samples, _ = self.diffusion.heun_sample(
                 self.model,
                 batch.shape,
                 clip_denoised=True,

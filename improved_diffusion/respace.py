@@ -4,7 +4,27 @@ import torch as th
 from .gaussian_diffusion import GaussianDiffusion
 
 
-def space_timesteps(num_timesteps, section_counts):
+def space_timesteps_edm(betas, num_steps, sigma_min, sigma_max, rho):
+    # space timesteps so that SNRs match up to schedule from EDM
+    alphas = 1 - betas
+    alphas_cumprod = np.cumprod(alphas)
+    sigmas = (1-alphas_cumprod**2)**0.5 / alphas_cumprod
+    step_indices = np.arange(num_steps)
+    sigmas_to_step_at = (
+        sigma_max ** (1 / rho) 
+        + step_indices / (num_steps - 1)
+        * (sigma_min ** (1 / rho) - sigma_max ** (1 / rho))
+    ) ** rho
+    timesteps = []
+    for sigma in sigmas_to_step_at:
+        nearest_timestep = np.argmin(np.abs((sigmas - sigma))) + 1
+        if nearest_timestep not in timesteps:
+            timesteps.append(nearest_timestep)
+    print('done timestep respacing, selected:', np.array(timesteps))
+    return np.array(timesteps)
+
+
+def space_timesteps(num_timesteps, section_counts, betas):
     """
     Create a list of timesteps to use from an original diffusion process,
     given the number of timesteps we want to take from equally-sized portions
@@ -16,6 +36,10 @@ def space_timesteps(num_timesteps, section_counts):
 
     If the stride is a string starting with "ddim", then the fixed striding
     from the DDIM paper is used, and only one section is allowed.
+
+    # If the stride is a string starting with "edm", then it should have the form
+    # edm-<num_steps>-<sigma_min>-<sigma_max>-<rho> and the EDM heuristic is used.
+
 
     :param num_timesteps: the number of diffusion steps in the original
                           process to divide up.
@@ -35,7 +59,15 @@ def space_timesteps(num_timesteps, section_counts):
             raise ValueError(
                 f"cannot create exactly {num_timesteps} steps with an integer stride"
             )
-        section_counts = [int(x) for x in section_counts.split(",")]
+        
+        elif section_counts.startswith("edm"):
+            params = map(float, section_counts.split("-")[1:])
+            num_steps, sigma_min, sigma_max, rho = params
+            return space_timesteps_edm(
+                betas, num_steps, sigma_min, sigma_max, rho)
+        else:
+            section_counts = [int(x) for x in section_counts.split(",")]
+
     size_per = num_timesteps // len(section_counts)
     extra = num_timesteps % len(section_counts)
     start_idx = 0

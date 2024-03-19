@@ -270,6 +270,9 @@ class GaussianDiffusion:
         B, C = x.shape[:2]
         assert t.shape == (B,)
         model_output, attn_weights = model(x, self._scale_timesteps(t), return_attn_weights=return_attn_weights, **model_kwargs)
+        if th.isinf(model_output.mean()):
+            raise ValueError("Model output contains NaN or inf values.")
+
 
         if self.model_var_type in [ModelVarType.LEARNED, ModelVarType.LEARNED_RANGE]:
             assert model_output.shape == (B, C * 2, *x.shape[2:])
@@ -398,6 +401,11 @@ class GaussianDiffusion:
             (t != 0).float().view(-1, *([1] * (len(x.shape) - 1)))
         )  # no noise when t == 0
         sample = out["mean"] + nonzero_mask * th.exp(0.5 * out["log_variance"]) * noise
+        # get map indicating latent/observed indices
+        obs_indicator = model_kwargs["obs_mask"] if model_kwargs is not None and "obs_mask" in model_kwargs else 0
+        latent_indicator = 1 - obs_indicator
+        # replace observed values with those from x0 according to mask
+        sample = latent_indicator * sample + obs_indicator * model_kwargs["x0"] 
         return {"sample": sample, "pred_xstart": out["pred_xstart"], "attn": out["attn"]}
 
     def p_sample_loop(
@@ -530,12 +538,14 @@ class GaussianDiffusion:
         denoised_fn=None,
         model_kwargs=None,
         eta=0.0,
+        return_attn_weights=False,
     ):
         """
         Sample x_{t-1} from the model using DDIM.
 
         Same usage as p_sample().
         """
+        del return_attn_weights
         out = self.p_mean_variance(
             model,
             x,
@@ -634,7 +644,7 @@ class GaussianDiffusion:
             eta=eta,
         ):
             final = sample
-        return final["sample"]
+        return final["sample"], None
 
     def ddim_sample_loop_progressive(
         self,
@@ -683,6 +693,132 @@ class GaussianDiffusion:
                 )
                 yield out
                 img = out["sample"]
+
+    def get_ve_sigmas(self):
+        if not hasattr(self, "ve_sigmas"):
+            self.ve_sigmas = (1-self.alphas_cumprod)**0.5 / self.sqrt_alphas_cumprod
+            self.ve_sigmas = np.append(0, self.ve_sigmas)
+        return self.ve_sigmas
+
+    def sigma2timestep(self, sigma):
+        """
+        sigma is the noise-to-signal ratio used in EDM
+        """
+        if th.is_tensor(sigma):
+            sigma = sigma.numpy().astype(np.float32)
+        nearest_timestep = np.argmin(np.abs((self.get_ve_sigmas() - sigma)))
+        return nearest_timestep
+
+    def timestep2sigma(self, timestep):  # error? timestep one should not have sigma 0
+        if th.is_tensor(timestep):
+            timestep = timestep.numpy().astype(np.float32)
+        if timestep == 0:
+            return 0
+        return self.get_ve_sigmas()[int(timestep)]
+
+    @th.no_grad()
+    def heun_sample(
+        self,
+        model,
+        shape,
+        noise=None,
+        clip_denoised=True,
+        denoised_fn=None,
+        model_kwargs=None,
+        device=None,
+        progress=False,
+        return_attn_weights=False,
+        return_decoded=True,
+        latent_mask=None,
+        S_churn=80,
+        S_min=0,
+        S_max=float("inf"),
+        S_noise=1.0,
+        sigma_max=1000,
+        sigma_min=0.001,
+        rho=7,
+        num_steps=50,
+    ):
+        del return_attn_weights, progress, latent_mask
+
+        if device is None:
+            device = next(model.parameters()).device
+        assert isinstance(shape, (tuple, list))
+
+        # select timesteps - for EDM sampler we do this here instead of respacing
+        sigmas = (1-self.alphas_cumprod**2)**0.5 / self.alphas_cumprod
+        step_indices = np.arange(num_steps+1)  # one step will usually be rounded to zero
+        sigmas_to_step_at = (
+            sigma_max ** (1 / rho) 
+            + step_indices / (num_steps - 1)
+            * (sigma_min ** (1 / rho) - sigma_max ** (1 / rho))
+        ) ** rho
+        timesteps = []
+        for sigma in np.append(sigmas_to_step_at, 0):
+            nearest_timestep = np.argmin(np.abs((sigmas - sigma)))
+            if nearest_timestep not in timesteps:
+                timesteps.append(nearest_timestep)
+
+        def get_latent_std(x, latent_indicator):
+            sqr = (x - x.mean())**2
+            avg_lat_sqr = sqr * latent_indicator / latent_indicator.mean()
+            return avg_lat_sqr.mean()**0.5
+
+        def get_denoised_estimate(xt, t, s):
+            scaled_x = xt / (1 + s**2)**0.5
+            out = self.p_mean_variance(
+                model, scaled_x.to(th.float32), th.tensor(t).to(th.int32).view(-1).to(device),
+                clip_denoised=clip_denoised, denoised_fn=denoised_fn, model_kwargs=model_kwargs,
+            )
+            obs_indicator = model_kwargs["obs_mask"] if model_kwargs is not None and "obs_mask" in model_kwargs else 0
+            latent_indicator = 1 - obs_indicator
+            denoised = out["pred_xstart"]
+            denoised = latent_indicator * denoised + obs_indicator * model_kwargs["x0"] 
+            return denoised.to(th.float64), latent_indicator
+
+        # make unit variance noise
+        if noise is not None:
+            x_next = noise.to(th.float64)
+        else:
+            x_next = th.randn(*shape, device=device, dtype=th.float64)
+        _, latent_indicator = get_denoised_estimate(x_next, timesteps[0], self.timestep2sigma(timesteps[0]))
+        # scale noise to match last step of VE process
+        x_next = x_next * self.timestep2sigma(timesteps[0])
+
+        to_float64 = lambda x: th.tensor(x, dtype=th.float64)
+        timesteps = timesteps
+        x_next = to_float64(x_next)
+
+        for i, (t_cur, t_next) in enumerate(zip(timesteps[:-1], timesteps[1:])):
+            x_cur = x_next
+
+            # get sigmas corresponding to these timesteps
+            s_cur = to_float64(self.timestep2sigma(t_cur))
+            s_next = to_float64(self.timestep2sigma(t_next))
+
+            # x_hat = x_cur; t_hat = t_cur; s_hat = s_cur
+
+            # Increase noise temporarily.
+            gamma = min(S_churn / num_steps, np.sqrt(2) - 1) if S_min <= s_cur <= S_max else 0
+            t_hat = to_float64(self.sigma2timestep(s_cur + gamma * s_cur))
+            s_hat = to_float64(self.timestep2sigma(t_hat))
+            if t_hat == t_cur:
+                x_hat = x_cur
+            else:
+                x_hat = x_cur + (s_hat ** 2 - s_cur ** 2).sqrt() * S_noise * th.randn_like(x_cur)
+
+            # Euler step.
+            denoised, latent_indicator = get_denoised_estimate(x_hat, t_hat, s_hat)
+            d_cur = (x_hat - denoised) / s_hat
+            x_next = x_hat + (s_next - s_hat) * d_cur
+
+            # Apply 2nd order correction.
+            if t_next > 0:
+                d_prime = (x_next - denoised) / s_next
+                x_next = x_hat + (s_next - s_hat) * (0.5 * d_cur + 0.5 * d_prime)
+
+        return (self.decode(x_next) if return_decoded else x_next), None
+
 
     def _vb_terms_bpd(
         self, model, x_start, x_t, t, clip_denoised=True, model_kwargs=None, latent_mask=None,
@@ -923,7 +1059,7 @@ class GaussianDiffusion:
             video = video.to(self.enc_dec_dtype).cuda()  # shape: <n_timesteps x n_channels x height x width>
             def encode_chunk(chunk):
                 dist = self.vae.encode(chunk).latent_dist
-                return dist.mean + th.randn_like(dist.std) * dist.std
+                return (dist.mean + th.randn_like(dist.std) * dist.std) / 8
             result = th.cat([encode_chunk(video[i:i+chunk_size]) for i in range(0, video.shape[0], chunk_size)])
             return result.unflatten(0, (original_shape[0], original_shape[1])).to(original_device)
         elif self.diffusion_space == "wavelet":
@@ -940,7 +1076,7 @@ class GaussianDiffusion:
             original_shape, original_device = video.shape, video.device
             video = video.flatten(0, 1).to(self.enc_dec_dtype).cuda()
             def decode_chunk(chunk):
-                return self.vae.decode(chunk, num_frames=1).sample
+                return self.vae.decode(8 * chunk, num_frames=1).sample
             result = th.cat([decode_chunk(video[i:i+chunk_size]) for i in range(0, video.shape[0], chunk_size)])
             return result.unflatten(0, (original_shape[0], original_shape[1])).to(original_device).to(self.original_dtype)
         elif self.diffusion_space == "wavelet":

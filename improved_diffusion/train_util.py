@@ -59,6 +59,7 @@ class TrainLoop:
         enc_dec_chunk_size,
         replay_dataset_kwargs,
         steps_per_experience,
+        use_autoregressive_mask,
         args,
     ):
         self.args = args
@@ -137,6 +138,7 @@ class TrainLoop:
 
         self.replay_dataset: ReplayDataset = ReplayDataset(**replay_dataset_kwargs)
         self.steps_per_experience = steps_per_experience
+        self.use_autoregressive_mask = use_autoregressive_mask
 
     def _load_and_sync_parameters(self):
         resume_checkpoint = find_resume_checkpoint(self.args) or self.resume_checkpoint
@@ -198,31 +200,22 @@ class TrainLoop:
         N = self.max_frames
         B, T, *_ = batch1.shape
 
+        masks = {k: th.zeros_like(batch1[:, :, :1, :1, :1]) for k in ['obs', 'latent']}
         if T <= N:
             # NOTE: In continual learning setting, max frames can be larger than T in the beginning.
             # In this case, set all frames as latent.
-            masks = {'latent': th.ones_like(batch1[:, :, :1, :1, :1]),
-                     'obs': th.zeros_like(batch1[:, :, :1, :1, :1])}
-            if len(set_masks['obs']) > 0:  # set_masks allow us to choose informative masks for logging
-                for k in masks:
-                    n_set = min(len(set_masks[k]), len(masks[k]))
-                    masks[k][:n_set] = set_masks[k][:n_set]
-            any_mask = (masks['obs'] + masks['latent']).to(th.float32).clip(max=1).to(masks['obs'].dtype)
-            args = (any_mask, batch1, batch2, (masks['obs'], masks['latent']))
-            batch, (obs_mask, latent_mask), frame_indices = self.prepare_training_batch(*args)
-            return batch, frame_indices, obs_mask, latent_mask
-
-        masks = {k: th.zeros_like(batch1[:, :, :1, :1, :1]) for k in ['obs', 'latent']}
-        for obs_row, latent_row in zip(*[masks[k] for k in ['obs', 'latent']]):
-            latent_row[self.sample_some_indices(max_indices=N, T=T)] = 1.
-            while True:
-                mask = obs_row if th.rand(()) < 0.5 else latent_row
-                indices = th.tensor(self.sample_some_indices(max_indices=N, T=T))
-                taken = (obs_row[indices] + latent_row[indices]).view(-1)
-                indices = indices[taken == 0]  # remove indices that are already used in a mask
-                if len(indices) > N - sum(obs_row) - sum(latent_row):
-                    break
-                mask[indices] = 1.
+            masks['latent'] = th.ones_like(batch1[:, :, :1, :1, :1])
+        else:
+            for obs_row, latent_row in zip(*[masks[k] for k in ['obs', 'latent']]):
+                latent_row[self.sample_some_indices(max_indices=N, T=T)] = 1.
+                while True:
+                    mask = obs_row if th.rand(()) < 0.5 else latent_row
+                    indices = th.tensor(self.sample_some_indices(max_indices=N, T=T))
+                    taken = (obs_row[indices] + latent_row[indices]).view(-1)
+                    indices = indices[taken == 0]  # remove indices that are already used in a mask
+                    if len(indices) > N - sum(obs_row) - sum(latent_row):
+                        break
+                    mask[indices] = 1.
         if len(set_masks['obs']) > 0:  # set_masks allow us to choose informative masks for logging
             for k in masks:
                 set_values = set_masks[k]
@@ -232,14 +225,28 @@ class TrainLoop:
         if not gather:
             return batch1, masks['obs'], masks['latent']
         batch, (obs_mask, latent_mask), frame_indices =\
-            self.prepare_training_batch(
-                any_mask, batch1, batch2, (masks['obs'], masks['latent'])
-            )
+            self.prepare_training_batch(any_mask, batch1, batch2, (masks['obs'], masks['latent']))
         return batch, frame_indices, obs_mask, latent_mask
 
-    def get_autoregressive_masks(self, batch1, batch2=None, gather=True, set_masks={'obs': (), 'latent': ()}):
+    def get_autoregressive_masks(self, batch1, gather=True, set_masks={'obs': (), 'latent': ()}):
         # Same as above, but always sets the last element as latent and all others as observed
-        raise NotImplementedError()
+        masks = {'latent': th.zeros_like(batch1[:, :, :1, :1, :1]), 'obs': th.ones_like(batch1[:, :, :1, :1, :1])}
+        masks['latent'][:, -1] = 1.
+        masks['obs'][:, -1] = 0.
+        # masks['latent'][:, masks['latent'].size(1)//2:] = 1.
+        # masks['obs'][:, masks['obs'].size(1)//2:] = 0.
+        
+        if len(set_masks['obs']) > 0:  # set_masks allow us to choose informative masks for logging
+            for k in masks:
+                set_values = set_masks[k]
+                n_set = min(len(set_values), len(masks[k]))
+                masks[k][:n_set] = set_values[:n_set]
+        any_mask = (masks['obs'] + masks['latent']).to(th.float32).clip(max=1).to(masks['obs'].dtype)
+        if not gather:
+            return batch1, masks['obs'], masks['latent']
+        batch, (obs_mask, latent_mask), frame_indices =\
+            self.prepare_training_batch(any_mask, batch1, None, (masks['obs'], masks['latent']))
+        return batch, frame_indices, obs_mask, latent_mask
 
     def prepare_training_batch(self, mask, batch1, batch2, tensors):
         """
@@ -333,7 +340,10 @@ class TrainLoop:
             t1 = time()
             micro1 = batch1[i : i + self.microbatch]
             micro2 = batch2[i : i + self.microbatch] if batch2 is not None else None
-            micro, frame_indices, obs_mask, latent_mask = self.sample_all_masks(micro1, micro2)
+            if self.use_autoregressive_mask:
+                micro, frame_indices, obs_mask, latent_mask = self.get_autoregressive_masks(micro1)
+            else:
+                micro, frame_indices, obs_mask, latent_mask = self.sample_all_masks(micro1, micro2)
 
             t2 = time()
             micro = self.encode(micro)

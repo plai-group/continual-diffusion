@@ -20,7 +20,7 @@ video_data_paths_dict = {
 }
 
 default_T_dict = {
-    "ball":         10,
+    "ball":         1,
     "minerl":       500,
     "mazes_cwvae":  300,
     "carla_no_traffic": 1000,
@@ -54,6 +54,8 @@ def load_data(dataset_name, batch_size, T=None, deterministic=False, num_workers
         dataset = CarlaDataset(train=True, path=data_path, shard=shard, num_shards=num_shards, T=T)
     elif dataset_name == "carla_no_traffic_2x":
         dataset = Carla2xDataset(train=True, path=data_path, shard=shard, num_shards=num_shards, T=T)
+    elif dataset_name == "continual_carla":
+        dataset = CarlaDataset(train=True, path=data_path, shard=shard, num_shards=num_shards, T=T)
     else:
         raise Exception("no dataset", dataset_name)
     if return_dataset:
@@ -82,7 +84,9 @@ def get_test_dataset(dataset_name, T=None):
     data_root = Path(os.environ["DATA_ROOT"]  if "DATA_ROOT" in os.environ and os.environ["DATA_ROOT"] != "" else ".")
     data_path = data_root / video_data_paths_dict[dataset_name]
     T = default_T_dict[dataset_name] if T is None else T
-    if dataset_name == "minerl":
+    if dataset_name == "ball":
+        dataset = StreamingBallDataset(data_path, shard=0, num_shards=1, T=T)
+    elif dataset_name == "minerl":
         data_path = os.path.join(data_path, "test")
         dataset = MineRLDataset(data_path, shard=0, num_shards=1, T=T)
     elif dataset_name == "mazes_cwvae":
@@ -266,7 +270,7 @@ class StreamingBallDataset(StreamDataset):
 
     def getitem_path(self, idx):
         chunk_idx = idx // self.chunk_size
-        return self.path / ("test" if self.is_test else "train" + "/" + f"{chunk_idx}.npy")
+        return self.path / (("test" if self.is_test else "train") + "/" + f"{chunk_idx}.npy")
 
     def loaditem(self, path):
         return np.load(path)

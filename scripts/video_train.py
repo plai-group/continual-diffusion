@@ -132,6 +132,7 @@ def main():
         enc_dec_chunk_size=args.enc_dec_chunk_size,
         replay_dataset_kwargs=args.replay_dataset_kwargs,
         steps_per_experience=args.steps_per_experience,
+        use_autoregressive_mask=args.use_autoregressive_mask,
         args=args,
     ).run_loop()
 
@@ -162,6 +163,7 @@ def create_argparser():
         deterministic_loader=False,  # set true to have fixed data ordering
         replay_buffer_size=0,
         steps_per_experience=1,
+        use_autoregressive_mask=False,
     )
     defaults.update(model_and_diffusion_defaults())
     parser = argparse.ArgumentParser()

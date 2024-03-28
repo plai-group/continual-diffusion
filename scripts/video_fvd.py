@@ -11,6 +11,7 @@ import tensorflow.compat.v1 as tf
 from improved_diffusion.video_datasets import get_test_dataset
 import improved_diffusion.frechet_video_distance as fvd
 from improved_diffusion import test_util
+from improved_diffusion.script_util import str2bool
 
 tf.disable_eager_execution() # Required for our FVD computation code
 
@@ -93,6 +94,7 @@ if __name__ == "__main__":
     parser.add_argument("--batch_size", type=int, default=None,
                         help="Batch size for extracting video features the I3D model.")
     parser.add_argument("--sample_idx", type=int, default=0)
+    parser.add_argument("--continual", type=str2bool, default=True)
     args = parser.parse_args()
 
     save_path = Path(args.eval_dir) / f"fvd-{args.num_videos}-{args.sample_idx}.txt"
@@ -109,6 +111,9 @@ if __name__ == "__main__":
     # Set batch size given dataset if not specified
     if args.batch_size is None:
         args.batch_size = {'mazes_cwvae': 16, 'minerl': 8, 'carla_no_traffic': 4, 'carla_no_traffic_2x': 4}[model_args.dataset]
+
+    if args.continual:
+        model_args.T = 100 # model_args.replay_dataset_kwargs['context_size']
 
     # Prepare datasets
     sample_dataset = SampleDataset(samples_path=(Path(args.eval_dir) / "samples"), sample_idx=args.sample_idx, length=args.num_videos)

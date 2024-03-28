@@ -42,12 +42,13 @@ class ReplayDataset:
             self.has_mem = False
             self.memory_buffer = None
         else:
-            assert mem_batch_size is not None
+            assert mem_batch_size is not None and mem_size % mem_batch_size == 0 and mem_size > mem_batch_size
             self.has_mem = True
-            writer = TensorDictMaxValueWriter(rank_key="score")
-            self.memory_buffer = ReplayBuffer(storage=LazyTensorStorage(mem_size), batch_size=mem_batch_size,
-                                              collate_fn=lambda x: x, sampler=SliceSampler(slice_len=mem_batch_size),
-                                              writer=writer)
+            self.tmp_memory_buffer = []
+            mem_buffer_size = mem_size // mem_batch_size  # we store chunks of data of size mem_batch_size
+            self.memory_buffer = ReplayBuffer(storage=LazyTensorStorage(mem_buffer_size), batch_size=1,  # mem_batch_size,
+                                              collate_fn=lambda x: x,  # sampler=SliceSampler(slice_len=mem_batch_size),
+                                              writer=TensorDictMaxValueWriter(rank_key="score"))
         self.n_obs = 0
 
     def update_context(self, data: Any) -> None:
@@ -66,23 +67,45 @@ class ReplayDataset:
         self.context_buffer.extend(data)
         self.n_obs += 1
 
+    # def update_memory(self, data: Any) -> None:
+    #     """
+    #     Updates the memory buffer with new data.
+
+    #     Args:
+    #         data (Any): The new data to be added to the memory buffer.
+
+    #     Returns:
+    #         None
+    #     """
+    #     if self.has_mem:
+    #         batch_size, device =len(data), data.device
+    #         score = torch.rand(batch_size).to(device)
+    #         data = TensorDict(dict(frames=data,
+    #                                time=self.n_obs * torch.ones(batch_size).to(device),
+    #                                episode=torch.zeros(batch_size).to(device),
+    #                                score=score), batch_size=len(data))
+    #         self.memory_buffer.extend(data)
+
     def update_memory(self, data: Any) -> None:
         """
-        Updates the memory buffer with new data.
+        Updates the memory buffer with new data every self.mem_batch_size exemplars. Uses reservoir sampling.
 
         Args:
             data (Any): The new data to be added to the memory buffer.
 
         Returns:
             None
-        """
+        """            
         if self.has_mem:
-            batch_size, device =len(data), data.device
-            data = TensorDict(dict(frames=data,
-                                   time=self.n_obs * torch.ones(batch_size).to(device),
-                                   episode=torch.zeros(batch_size).to(device),
-                                   score=torch.rand(batch_size).to(device),), batch_size=len(data))
-            self.memory_buffer.extend(data)
+            entry = TensorDict(dict(frames=data, time=self.n_obs * torch.ones(len(data), 1)), batch_size=(len(data), 1))
+
+            if len(self.tmp_memory_buffer) < self.mem_batch_size:
+                self.tmp_memory_buffer.append(entry)
+            else:
+                content = torch.cat(self.tmp_memory_buffer, dim=1)
+                frame_group = TensorDict(dict(group=content, score=torch.rand(1), episode=torch.zeros(1)), batch_size=1)
+                self.memory_buffer.extend(frame_group)
+                self.tmp_memory_buffer = [entry]
 
     def update(self, data: Any) -> None:
         """
@@ -112,6 +135,24 @@ class ReplayDataset:
         else:  # never reached
             raise Exception("Context buffer size must not be greater than context size")
 
+    # def sample_memory(self) -> torch.Tensor:
+    #     """
+    #     Returns a sample of memory data from the memory buffer.
+
+    #     Returns:
+    #         torch.Tensor: The sample of memory data.
+    #     """
+    #     if not self.has_mem:
+    #         return None
+    #     elif len(self.memory_buffer) <= self.mem_batch_size:
+    #         elements = self.memory_buffer[:self.mem_batch_size]
+    #         # switch batch and time dimensions because we assume we get one frame per batch
+    #         return elements['frames'].transpose(0, 1)
+    #     else:
+    #         elements = self.memory_buffer.sample()
+    #         sorted_elements = sorted(elements, key=lambda x: x['time'])
+    #         return torch.cat([el['frames'] for el in sorted_elements]).unsqueeze(0)
+
     def sample_memory(self) -> torch.Tensor:
         """
         Returns a sample of memory data from the memory buffer.
@@ -121,11 +162,7 @@ class ReplayDataset:
         """
         if not self.has_mem:
             return None
-        elif len(self.memory_buffer) <= self.mem_batch_size:
-            elements = self.memory_buffer[:self.mem_batch_size]
-            # switch batch and time dimensions because we assume we get one frame per batch
-            return elements['frames'].transpose(0, 1)
+        elif len(self.memory_buffer) == 0:
+            return self.get_context()
         else:
-            elements = self.memory_buffer.sample()
-            sorted_elements = sorted(elements, key=lambda x: x['time'])
-            return torch.cat([el['frames'] for el in sorted_elements]).unsqueeze(0)
+            return self.memory_buffer.sample()['group']['frames']

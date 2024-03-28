@@ -220,6 +220,8 @@ class Carla2xDataset(CarlaDataset):
     def postprocess_video(self, video):
         if not self.encoded:
             result = -1 + 2 * (video.permute(0, 3, 1, 2).float()/255)
+            # remove frames before upsampling to save memory if small --T is used
+            video = self.get_video_subsequence(result, self.T)
             video = th.nn.functional.interpolate(result, scale_factor=2)
         return video
 

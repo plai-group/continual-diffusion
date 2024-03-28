@@ -281,6 +281,8 @@ class UNetVideoModel(nn.Module):
         num_heads_upsample=-1,
         use_scale_shift_norm=False,
         use_rpe_net=False,
+        use_edm_scaling=False,
+        diffusion=None,
     ):
         super().__init__()
 
@@ -299,6 +301,8 @@ class UNetVideoModel(nn.Module):
         self.num_heads = num_heads
         self.num_heads_upsample = num_heads_upsample
         self.use_rpe_net = use_rpe_net
+        self.use_edm_scaling = use_edm_scaling
+        self.diffusion = diffusion
 
         time_embed_dim = model_channels * 4
         self.time_embed = nn.Sequential(
@@ -442,15 +446,15 @@ class UNetVideoModel(nn.Module):
         # add channel to indicate obs
         indicator_template = th.ones_like(x[:, :, :1, :, :])
         obs_indicator = indicator_template * obs_mask
-        x = th.cat([x*(1-obs_mask) + x0*obs_mask,
-                    obs_indicator],
-                   dim=2,
+        x_ = th.cat([x*(1-obs_mask) + x0*obs_mask,
+                     obs_indicator],
+                    dim=2,
         )
-        x = x.reshape(B*T, self.in_channels, H, W)
+        x_ = x_.reshape(B*T, self.in_channels, H, W)
         timesteps = timesteps.reshape(B*T)
         hs = []
         emb = self.time_embed(timestep_embedding(timesteps, self.model_channels))
-        h = x.type(self.inner_dtype)
+        h = x_.type(self.inner_dtype)
         attns = {'spatial': [], 'temporal': [], 'mixed': []} if return_attn_weights else None
         for layer, module in enumerate(self.input_blocks):
             h = module(h, emb,  attn_mask, T=T, attn_weights_list=attns, frame_indices=frame_indices)
@@ -459,9 +463,12 @@ class UNetVideoModel(nn.Module):
         for module in self.output_blocks:
             cat_in = th.cat([h, hs.pop()], dim=1)
             h = module(cat_in, emb,  attn_mask, T=T, attn_weights_list=attns, frame_indices=frame_indices)
-        h = h.type(x.dtype)
-        out = self.out(h)
-        return out.view(B, T, self.out_channels, H, W), attns
+        h = h.type(x_.dtype)
+        out = self.out(h).view(B, T, self.out_channels, H, W)
+        if self.use_edm_scaling:
+            timesteps = timesteps.long().view(B, T, 1, 1, 1)
+            out = self.diffusion.do_edm_scaling(timesteps, x, out)
+        return out, attns
 
     def get_feature_vectors(self, x, timesteps, y=None):
         """

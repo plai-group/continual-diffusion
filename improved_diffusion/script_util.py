@@ -33,6 +33,7 @@ def model_and_diffusion_defaults():
         use_checkpoint=False,
         use_scale_shift_norm=True,
         use_rpe_net=True,
+        use_edm_scaling=False,
     )
 
 
@@ -59,7 +60,20 @@ def create_model_and_diffusion(
     use_checkpoint,
     use_scale_shift_norm,
     use_rpe_net,
+    use_edm_scaling,
 ):
+    diffusion = create_gaussian_diffusion(
+        steps=diffusion_steps,
+        learn_sigma=learn_sigma,
+        sigma_small=sigma_small,
+        noise_schedule=noise_schedule,
+        use_kl=use_kl,
+        predict_xstart=predict_xstart,
+        rescale_timesteps=rescale_timesteps,
+        rescale_learned_sigmas=rescale_learned_sigmas,
+        timestep_respacing=timestep_respacing,
+        diffusion_space_kwargs=diffusion_space_kwargs,
+    )
     model = create_model(
         image_size,
         in_channels,
@@ -74,18 +88,8 @@ def create_model_and_diffusion(
         use_scale_shift_norm=use_scale_shift_norm,
         dropout=dropout,
         use_rpe_net=use_rpe_net,
-    )
-    diffusion = create_gaussian_diffusion(
-        steps=diffusion_steps,
-        learn_sigma=learn_sigma,
-        sigma_small=sigma_small,
-        noise_schedule=noise_schedule,
-        use_kl=use_kl,
-        predict_xstart=predict_xstart,
-        rescale_timesteps=rescale_timesteps,
-        rescale_learned_sigmas=rescale_learned_sigmas,
-        timestep_respacing=timestep_respacing,
-        diffusion_space_kwargs=diffusion_space_kwargs,
+        use_edm_scaling=use_edm_scaling,
+        diffusion=diffusion,
     )
     return model, diffusion
 
@@ -104,6 +108,8 @@ def create_model(
     use_scale_shift_norm,
     dropout,
     use_rpe_net,
+    use_edm_scaling,
+    diffusion,
 ):
     if image_size == 256:
         channel_mult = (1, 1, 2, 2, 4, 4)
@@ -134,6 +140,8 @@ def create_model(
         num_heads_upsample=num_heads_upsample,
         use_scale_shift_norm=use_scale_shift_norm,
         use_rpe_net=use_rpe_net,
+        use_edm_scaling=use_edm_scaling,
+        diffusion=diffusion,
     )
 
 

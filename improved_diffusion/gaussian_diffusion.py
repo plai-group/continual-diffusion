@@ -341,6 +341,39 @@ class GaussianDiffusion:
             "attn": attn_weights,
         }
 
+    def do_edm_x0_prediction_scaling(self, t, xt, output):
+        """Transform network output following EDM to nicely parameterize x0 prediction
+        """
+        x0_mult = _extract_into_tensor(self.sqrt_alphas_cumprod, t, xt.shape)
+        noise_mult = _extract_into_tensor(self.sqrt_one_minus_alphas_cumprod, t, xt.shape)
+        sigma_data = 1/2
+        sigma = noise_mult / x0_mult
+        c_skip = sigma_data**2 / (sigma_data**2 + sigma**2)**0.5
+        c_out = sigma_data * sigma / (sigma_data**2 + sigma**2)**0.5
+        x0_pred = c_skip * xt + c_out * output
+        return x0_pred
+    
+    def do_edm_eps_prediction_scaling(self, t, xt, output):
+        """Transform network output following EDM to nicely parameterize eps-prediction
+        """
+        x0_pred = self.do_edm_x0_prediction_scaling(t, xt, output)
+        x0_mult = _extract_into_tensor(self.sqrt_alphas_cumprod, t, xt.shape)
+        noise_mult = _extract_into_tensor(self.sqrt_one_minus_alphas_cumprod, t, xt.shape)
+        eps_pred = (xt - x0_mult * x0_pred) / noise_mult
+        return eps_pred
+    
+    def do_edm_scaling(self, *args, **kwargs):
+        # func = self.do_edm_x0_prediction_scaling if self.model_mean_type == ModelMeanType.START_X else self.do_edm_eps_prediction_scaling
+        func = {
+            ModelMeanType.START_X: self.do_edm_x0_prediction_scaling,
+            ModelMeanType.EPSILON: self.do_edm_eps_prediction_scaling,
+        }[self.model_mean_type]
+        return func(*args, **kwargs)
+    
+    def get_edm_loss_weighting(self, t):
+        # scale t so that we implicitly use the same weighting as in EDM
+        raise NotImplementedError
+
     def _predict_xstart_from_eps(self, x_t, t, eps):
         assert x_t.shape == eps.shape
         return (
@@ -766,6 +799,7 @@ class GaussianDiffusion:
 
         def get_denoised_estimate(xt, t, s):
             scaled_x = xt / (1 + s**2)**0.5
+            t = th.tensor([t] * shape[0], device=device)
             out = self.p_mean_variance(
                 model, scaled_x.to(th.float32), th.tensor(t).to(th.int32).view(-1).to(device),
                 clip_denoised=clip_denoised, denoised_fn=denoised_fn, model_kwargs=model_kwargs,
@@ -1059,7 +1093,7 @@ class GaussianDiffusion:
             video = video.to(self.enc_dec_dtype).cuda()  # shape: <n_timesteps x n_channels x height x width>
             def encode_chunk(chunk):
                 dist = self.vae.encode(chunk).latent_dist
-                return (dist.mean + th.randn_like(dist.std) * dist.std) / 8
+                return (dist.mean + th.randn_like(dist.std) * dist.std)
             result = th.cat([encode_chunk(video[i:i+chunk_size]) for i in range(0, video.shape[0], chunk_size)])
             return result.unflatten(0, (original_shape[0], original_shape[1])).to(original_device)
         elif self.diffusion_space == "wavelet":
@@ -1076,7 +1110,7 @@ class GaussianDiffusion:
             original_shape, original_device = video.shape, video.device
             video = video.flatten(0, 1).to(self.enc_dec_dtype).cuda()
             def decode_chunk(chunk):
-                return self.vae.decode(8 * chunk, num_frames=1).sample
+                return self.vae.decode(chunk, num_frames=1).sample
             result = th.cat([decode_chunk(video[i:i+chunk_size]) for i in range(0, video.shape[0], chunk_size)])
             return result.unflatten(0, (original_shape[0], original_shape[1])).to(original_device).to(self.original_dtype)
         elif self.diffusion_space == "wavelet":
@@ -1093,7 +1127,7 @@ def _extract_into_tensor(arr, timesteps, broadcast_shape):
                             dimension equal to the length of timesteps.
     :return: a tensor of shape [batch_size, 1, ...] where the shape has K dims.
     """
-    res = th.from_numpy(arr).to(device=timesteps.device)[timesteps].float()
+    res = th.from_numpy(arr).to(device=timesteps.device)[timesteps.long()].float()
     while len(res.shape) < len(broadcast_shape):
         res = res[..., None]
     return res.expand(broadcast_shape)

@@ -1,3 +1,4 @@
+from abc import abstractmethod
 import json
 import os
 import numpy as np
@@ -54,8 +55,6 @@ def load_data(dataset_name, batch_size, T=None, deterministic=False, num_workers
         dataset = CarlaDataset(train=True, path=data_path, shard=shard, num_shards=num_shards, T=T)
     elif dataset_name == "carla_no_traffic_2x":
         dataset = Carla2xDataset(train=True, path=data_path, shard=shard, num_shards=num_shards, T=T)
-    elif dataset_name == "continual_carla":
-        dataset = CarlaDataset(train=True, path=data_path, shard=shard, num_shards=num_shards, T=T)
     else:
         raise Exception("no dataset", dataset_name)
     if return_dataset:
@@ -144,14 +143,17 @@ class BaseDataset(Dataset):
         video = self.postprocess_video(video)
         return self.get_video_subsequence(video, self.T), {}
 
+    @abstractmethod
     def getitem_path(self, idx):
-        raise NotImplementedError
+        raise NotImplementedError()
 
+    @abstractmethod
     def loaditem(self, path):
-        raise NotImplementedError
+        raise NotImplementedError()
 
+    @abstractmethod
     def postprocess_video(self, video):
-        raise NotImplementedError
+        raise NotImplementedError()
 
     def cache_file(self, path):
         # Given a path to a dataset item, makes sure that the item is cached in the temporary directory.

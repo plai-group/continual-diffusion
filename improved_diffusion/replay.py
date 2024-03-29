@@ -95,7 +95,7 @@ class ReplayDataset:
 
         Returns:
             None
-        """            
+        """
         if self.has_mem:
             entry = TensorDict(dict(frames=data, time=self.n_obs * torch.ones(len(data), 1)), batch_size=(len(data), 1))
 

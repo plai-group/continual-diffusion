@@ -148,14 +148,22 @@ def new_speeds(m1, m2, v1, v2):
 # size of bounding box: SIZE X SIZE.
 
 
-def bounce_n(T=128, n=2, r=None, m=None):
+def bounce_n(T=128, n=2, r=None, m=None, color_period=None):
     if r is None:
         r = array([4.0]*n)
     if m is None:
         m = array([1]*n)
+
     # r is to be rather small.
     X = zeros((T, n, 2), dtype='float')
     V = zeros((T, n, 2), dtype='float')
+    if color_period is None:
+        C = None
+    else:
+        C = zeros((T, n, 3), dtype='float')
+        C[:, :, 0] = 1.0
+        # C[:, :, 2] = 1.0
+
     v = random.randn(n, 2)
     v = (v / norm(v)*.5)*1.0
     good_config = False
@@ -182,6 +190,27 @@ def bounce_n(T=128, n=2, r=None, m=None):
         for i in range(n):
             X[t, i] = x[i]
             V[t, i] = v[i]
+
+            # if C is not None and t > 0:
+            #     C[t, i, :] = C[t-1, i, :]
+            #     if t % color_period == 0:
+            #         C[t, i, 0] = 1 if C[t, i, 0] == 0 else 0
+            #     if t % (color_period * 2) == 0:
+            #         C[t, i, 2] = 1 if C[t, i, 2] == 0 else 0
+
+            if C is not None and t > 0:
+                C[t, i, :] = C[t-1, i, :]
+                if t % color_period == 0:
+                    # Generates 0 1 0 1 0 1 0 1 0 1 0 1 0 1 and so on.
+                    C[t, i, 1] = 1 if C[t, i, 1] == 0 else 0
+                    # Generates 0 1 0 0 0 1 0 0 0 1 0 0 0 1 and so on.
+                    last = C[max(0, t-1), i, 2]
+                    lastlast = C[max(0, t-color_period-1), i, 2]
+                    lastlastlast = C[max(0, t-color_period*2-1), i, 2]
+                    if last == 0 and lastlast == 0 and lastlastlast == 0:
+                        C[t, i, 2] = 1
+                    else:
+                        C[t, i, 2] = 0
 
         for mu in range(int(1/eps)):
 
@@ -219,14 +248,14 @@ def bounce_n(T=128, n=2, r=None, m=None):
                         v[i] += w*(new_v_i - v_i)
                         v[j] += w*(new_v_j - v_j)
 
-    return X, V
+    return X, V, C
 
 
 def ar(x, y, z):
     return z/2+arange(x, y, z, dtype='float')
 
 
-def matricize(X, V, res, r=None):
+def matricize(X, V, res, r=None, C=None):
 
     T, n = shape(X)[0:2]
     if r is None:
@@ -235,12 +264,20 @@ def matricize(X, V, res, r=None):
     A = zeros((T, res, res, 3), dtype='float')
 
     [I, J] = meshgrid(ar(0, 1, 1./res)*SIZE, ar(0, 1, 1./res)*SIZE)
+    if C is None:
+        # When the color schedule is not specified, we use the velocity to determine the color
+        C = zeros((T, n, 3), dtype='float')
+        for i in range(n):
+            C[:, i, 0] += 1.0 * (V[:, i, 0] + .5)
+            C[:, i, 1] += 1.0
+            C[:, i, 2] += 1.0 * (V[:, i, 1] + .5)
 
     for t in range(T):
         for i in range(n):
-            A[t, :, :, 1] += exp(-(((I-X[t, i, 0])**2+(J-X[t, i, 1])**2)/(r[i]**2))**4)
-            A[t, :, :, 0] += 1.0 * (V[t, i, 0] + .5) * exp(-(((I-X[t, i, 0])**2+(J-X[t, i, 1])**2)/(r[i]**2))**4)
-            A[t, :, :, 2] += 1.0 * (V[t, i, 1] + .5) * exp(-(((I-X[t, i, 0])**2+(J-X[t, i, 1])**2)/(r[i]**2))**4)
+            gaussian_bump = exp(-(((I-X[t, i, 0])**2+(J-X[t, i, 1])**2)/(r[i]**2))**4)
+            A[t, :, :, 0] += C[t, i, 0] * gaussian_bump
+            A[t, :, :, 1] += C[t, i, 1] * gaussian_bump
+            A[t, :, :, 2] += C[t, i, 2] * gaussian_bump
 
         A[t, :, :, 0][A[t, :, :, 0] > 1] = 1
         A[t, :, :, 1][A[t, :, :, 1] > 1] = 1
@@ -248,19 +285,11 @@ def matricize(X, V, res, r=None):
     return A
 
 
-def bounce_mat(res, n=2, T=128, r=None):
+def bounce_vec(res, n=2, T=128, color_period=None, r=None, m=None):
     if r is None:
         r = array([1.2]*n)
-    x = bounce_n(T, n, r)
-    A = matricize(x, res, r)
-    return A
-
-
-def bounce_vec(res, n=2, T=128, r=None, m=None):
-    if r is None:
-        r = array([1.2]*n)
-    x, v = bounce_n(T, n, r, m)  # x: <seq_len x num_balls x 2>
-    return matricize(x, v, res, r)
+    x, v, c = bounce_n(T, n, r, m, color_period)  # x: <seq_len x num_balls x 2>
+    return matricize(x, v, res, r, c)
 
 
 def unsigmoid(x): return log(x) - log(1-x)
@@ -274,6 +303,7 @@ if __name__ == "__main__":
     parser.add_argument("--num_balls", type=int, default=1)
     parser.add_argument("--resolution", type=int, default=32)
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--color_period", type=int, default=None)
     args = parser.parse_args()
 
     random.seed(args.seed)
@@ -285,12 +315,12 @@ if __name__ == "__main__":
     with open(f"{args.save_dir}/config.json", "w") as f:
         json.dump(args.__dict__, f, indent=2)
 
-    train_data = bounce_vec(args.resolution, args.num_balls, args.T_total)
+    train_data = bounce_vec(args.resolution, args.num_balls, args.T_total, args.color_period)
     for n in range(args.T_total // args.chunk_size):
         with open(f"{train_path}/{n}.npy", 'wb') as f:
             save(f, train_data[args.chunk_size * n:args.chunk_size * (n + 1)])
 
-    test_data = bounce_vec(args.resolution, args.num_balls, args.T_total)
+    test_data = bounce_vec(args.resolution, args.num_balls, args.T_total, args.color_period)
     for n in range(args.T_total // args.chunk_size):
         with open(f"{test_path}/{n}.npy", 'wb') as f:
             save(f, test_data[args.chunk_size * n:args.chunk_size * (n + 1)])

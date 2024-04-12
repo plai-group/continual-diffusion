@@ -35,8 +35,7 @@ def get_model_results_path(args):
     """
     # Extract the diffusion sampling arguments string (DDIM/respacing)
     postfix = ""
-    if args.use_ddim:
-        postfix += "_ddim"
+    postfix += f"_{args.sampler}"
     if args.timestep_respacing != "":
         postfix += "_" + f"respace{args.timestep_respacing}"
 

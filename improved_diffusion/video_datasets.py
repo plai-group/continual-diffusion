@@ -23,6 +23,7 @@ video_data_paths_dict = {
     "mazes_cwvae":         "datasets/gqn_mazes-torch",
     "carla_no_traffic":    "datasets/carla/no-traffic",
     "carla_no_traffic_2x": "datasets/carla/no-traffic",
+    "carla_no_traffic_2x_encoded": "datasets/carla/no-traffic-encoded",
 }
 
 default_T_dict = {
@@ -34,6 +35,7 @@ default_T_dict = {
     "mazes_cwvae":         300,
     "carla_no_traffic":    1000,
     "carla_no_traffic_2x": 1000,
+    "carla_no_traffic_2x_encoded": 1000,
 }
 
 default_image_size_dict = {
@@ -45,6 +47,11 @@ default_image_size_dict = {
     "mazes_cwvae":         64,
     "carla_no_traffic":    128,
     "carla_no_traffic_2x": 256,
+    "carla_no_traffic_2x_encoded": 32,
+}
+
+data_encoding_stats_dict = {
+    "carla_no_traffic_2x_encoded": "datasets/carla/no-traffic-encoded/encoded_train_norm_stats.pt",
 }
 
 
@@ -73,6 +80,8 @@ def load_data(dataset_name, batch_size, T=None, deterministic=False, num_workers
         dataset = CarlaDataset(train=True, path=data_path, shard=shard, num_shards=num_shards, T=T)
     elif dataset_name == "carla_no_traffic_2x":
         dataset = Carla2xDataset(train=True, path=data_path, shard=shard, num_shards=num_shards, T=T)
+    elif dataset_name == "carla_no_traffic_2x_encoded":
+        dataset = Carla2xDataset(train=True, path=data_path, shard=shard, num_shards=num_shards, T=T, encoded=True)
     else:
         raise Exception("no dataset", dataset_name)
     if return_dataset:
@@ -117,6 +126,8 @@ def get_test_dataset(dataset_name, T=None):
         dataset = CarlaDataset(train=False, path=data_path, shard=0, num_shards=1, T=T)
     elif dataset_name == "carla_no_traffic_2x":
         dataset = Carla2xDataset(train=False, path=data_path, shard=0, num_shards=1, T=T)
+    elif dataset_name == "carla_no_traffic_2x_encoded":
+        dataset = Carla2xDataset(train=False, path=data_path, shard=0, num_shards=1, T=T, encoded=True)
     else:
         raise Exception("no dataset", dataset_name)
     dataset.set_test()
@@ -353,9 +364,20 @@ class CarlaDataset(BaseDataset):
 
 
 class Carla2xDataset(CarlaDataset):
+    def __init__(self, train, path, shard, num_shards, T, encoded=False):
+        super().__init__(train, path, shard, num_shards, T)
+        self.encoded = encoded
+        if self.encoded:
+            self.fnames = ["encoded_" + fname for fname in self.fnames]
+        print(f"Loading {len(self.fnames)} files (Carla dataset).")
+
     def postprocess_video(self, video):
-        result = -1 + 2 * (video.permute(0, 3, 1, 2).float()/255)
-        return th.nn.functional.interpolate(result, scale_factor=2)
+        if not self.encoded:
+            result = -1 + 2 * (video.permute(0, 3, 1, 2).float()/255)
+            # remove frames before upsampling to save memory if small --T is used
+            video = self.get_video_subsequence(result, self.T)
+            video = th.nn.functional.interpolate(result, scale_factor=2)
+        return video
 
 
 class GQNMazesDataset(BaseDataset):

@@ -55,6 +55,7 @@ def sample_video(args, model, diffusion, batch, just_get_indices=False):
         # Prepare network's input
         frame_indices = th.cat([th.tensor(obs_frame_indices), th.tensor(latent_frame_indices)], dim=1).long()
         x0 = th.stack([samples[i, fi] for i, fi in enumerate(frame_indices)], dim=0).clone()
+        x0 = diffusion.encode(x0)
         obs_mask = th.cat([th.ones_like(th.tensor(obs_frame_indices)),
                               th.zeros_like(th.tensor(latent_frame_indices))], dim=1).view(B, -1, 1, 1, 1).float()
         latent_mask = 1 - obs_mask
@@ -69,14 +70,34 @@ def sample_video(args, model, diffusion, batch, just_get_indices=False):
             # Move tensors to the correct device
             x0, obs_mask, latent_mask, frame_indices = (t.to(args.device) for t in [x0, obs_mask, latent_mask, frame_indices])
             # Run the network
-            local_samples, _ = diffusion.p_sample_loop(
+            sampler, *sampler_args = args.sampler.split('-')
+            if sampler == "ddpm":
+                sample_func = diffusion.p_sample_loop
+                sampler_kwargs = {}
+            elif sampler == "ddim":
+                sample_func = diffusion.ddim_sample_loop
+                sampler_kwargs = {}
+            elif sampler == "heun":
+                sample_func = diffusion.heun_sample
+                (S_churn, S_max, S_min, S_noise,
+                 sigma_max, sigma_min, rho, num_steps) = sampler_args
+                sampler_kwargs = dict(
+                    S_churn=float(S_churn), S_max=float(S_max),
+                    S_min=float(S_min), S_noise=float(S_noise),
+                    sigma_max=float(sigma_max), sigma_min=float(sigma_min),
+                    rho=int(rho), num_steps=int(num_steps)
+                )
+            print('sample_func', sample_func)
+            local_samples, _ = sample_func(
                 model, x0.shape, clip_denoised=args.clip_denoised,
                 model_kwargs=dict(frame_indices=frame_indices,
                                   x0=x0,
                                   obs_mask=obs_mask,
                                   latent_mask=latent_mask),
                 latent_mask=latent_mask,
-                return_attn_weights=False)
+                return_attn_weights=False,
+                **sampler_kwargs,
+            )
             print('local samples', local_samples.min(), local_samples.max())
             # Fill in the generated frames
         for i, li in enumerate(latent_frame_indices):
@@ -177,7 +198,7 @@ if __name__ == "__main__":
     parser.add_argument("--max_latent_frames", type=int, default=None, help="Number of frames to sample in each stage. Defaults to max_frames/2.")
     parser.add_argument("--start_index", type=int, default=0)
     parser.add_argument("--stop_index", type=int, default=None)
-    parser.add_argument("--use_ddim", type=str2bool, default=False)
+    parser.add_argument("--sampler", type=str, default="ddpm",)
     parser.add_argument("--timestep_respacing", type=str, default="")
     parser.add_argument("--clip_denoised", type=str2bool, default=True)
     parser.add_argument("--sample_idx", type=int, default=0, help="Sampled images will have this specific index. Used for sampling multiple videos with the same observations.")
@@ -205,7 +226,7 @@ if __name__ == "__main__":
     data = dist_util.load_state_dict(args.checkpoint_path, map_location="cpu")
     state_dict = data["state_dict"]
     model_args = data["config"]
-    model_args.update({"use_ddim": args.use_ddim,
+    model_args.update({"use_ddim": args.sampler == "ddim",
                        "timestep_respacing": args.timestep_respacing})
     model_args = argparse.Namespace(**model_args)
     model, diffusion = create_model_and_diffusion(

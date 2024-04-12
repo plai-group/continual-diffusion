@@ -111,7 +111,7 @@ if __name__ == "__main__":
     # Set batch size given dataset if not specified
     args.dataset = model_args.dataset
     if args.batch_size is None:
-        args.batch_size = {'mazes_cwvae': 16, 'minerl': 8, 'carla_no_traffic': 4, 'carla_no_traffic_2x': 4}[args.dataset]
+        args.batch_size = {'mazes_cwvae': 16, 'minerl': 8, 'carla_no_traffic': 4, 'carla_no_traffic_2x': 4, 'carla_no_traffic_2x_encoded': 4}[args.dataset]
 
     if args.T is None:
         args.T = model_args.T

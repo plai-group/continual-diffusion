@@ -3,6 +3,7 @@ from abc import ABC, abstractmethod
 import numpy as np
 import torch as th
 import torch.distributed as dist
+import wandb
 
 
 def create_named_schedule_sampler(name, diffusion):
@@ -16,6 +17,12 @@ def create_named_schedule_sampler(name, diffusion):
         return UniformSampler(diffusion)
     elif name == "loss-second-moment":
         return LossSecondMomentResampler(diffusion)
+    elif name == "edm":
+        return EDMSampler(diffusion)
+    elif name.split("_")[0] == "edm":
+        P_mean = float(name.split("_")[1])
+        P_std = float(name.split("_")[2])
+        return EDMSampler(diffusion, P_mean=P_mean, P_std=P_std)
     else:
         raise NotImplementedError(f"unknown schedule sampler: {name}")
 
@@ -54,6 +61,54 @@ class ScheduleSampler(ABC):
         indices_np = np.random.choice(len(p), size=(batch_size,), p=p)
         indices = th.from_numpy(indices_np).long().to(device)
         weights_np = 1 / (len(p) * p[indices_np])
+        weights = th.from_numpy(weights_np).float().to(device)
+        return indices, weights
+
+
+class EDMSampler(ScheduleSampler):
+    """
+    UNSTABLE UNLESS USED WITH --predict_xstart=True
+
+    EDM suggests distributing log sigma (in VE proces) as N(-1.2, 1.2^2) in a continuous space
+
+    We will define a distribution over the discrete timesteps that gets as close as possible to this
+
+    We also copy their loss weighting (1+sigma^2) / (sigma)^2
+    """
+    def __init__(self, diffusion, P_mean=-1.2, P_std=1.2):
+        self.diffusion = diffusion
+        # compute frequency with which to sample different log sigmas
+        x0_mult = diffusion.sqrt_alphas_cumprod
+        noise_mult = diffusion.sqrt_one_minus_alphas_cumprod
+        sigmas = noise_mult / x0_mult
+        log_sigmas = np.log(sigmas)
+        log_sigma_bucket_boundaries = np.concatenate([
+            np.array([-float('inf')]),
+            0.5 * (log_sigmas[1:] + log_sigmas[:-1]),
+            np.array([float('inf')]),
+        ])
+        edm_log_sigma_dist = th.distributions.Normal(P_mean, P_std)
+        edm_log_sigma_cdfs = edm_log_sigma_dist.cdf(th.tensor(log_sigma_bucket_boundaries)).numpy()
+        edm_log_sigma_probs = edm_log_sigma_cdfs[1:] - edm_log_sigma_cdfs[:-1]
+        assert np.all(edm_log_sigma_probs >= 0) and np.sum(edm_log_sigma_probs) == 1
+        self.timestep_sampling_probs = edm_log_sigma_probs
+        # compute weighting for all sigmas
+        self.weights_array = (1 + sigmas ** 2) / sigmas ** 2
+        wandb.log({
+            'log_sigma/timesteps': wandb.Histogram(np_histogram=np.histogram(log_sigmas, bins=100)),
+            'log_sigma/sampling_probs': wandb.Histogram(np_histogram=np.histogram(log_sigmas, weights=self.timestep_sampling_probs, bins=100)),
+            'log_sigma/loss_weight': wandb.Histogram(np_histogram=np.histogram(log_sigmas, weights=self.timestep_sampling_probs*self.weights_array, bins=100)),
+        }
+        )
+    
+    def weights(self):
+        raise NotImplementedError
+    
+    def sample(self, batch_size, device):
+        p = self.timestep_sampling_probs
+        indices_np = np.random.choice(len(p), size=(batch_size,), p=p)
+        indices = th.from_numpy(indices_np).long().to(device)
+        weights_np = self.weights_array[indices_np]
         weights = th.from_numpy(weights_np).float().to(device)
         return indices, weights
 

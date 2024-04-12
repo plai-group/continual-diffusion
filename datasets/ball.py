@@ -300,9 +300,9 @@ if __name__ == "__main__":
     parser.add_argument("--save_dir", type=str, default="datasets/ball")
     parser.add_argument("--T_total", type=int, default=100000)
     parser.add_argument("--chunk_size", type=int, default=10000)
-    parser.add_argument("--num_balls", type=int, default=1)
     parser.add_argument("--resolution", type=int, default=32)
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--num_balls", type=int, default=1)
     parser.add_argument("--color_period", type=int, default=None)
     args = parser.parse_args()
 

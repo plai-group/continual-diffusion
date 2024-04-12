@@ -24,6 +24,7 @@ class RPENet(nn.Module):
              (relative_distances == 0).float()],
             dim=-1
         )  # BxTxTx3
+
         B, T, _ = relative_distances.shape
         C = self.channels
         emb = self.embed_diffusion_time(temb).view(B, T, 1, C) \

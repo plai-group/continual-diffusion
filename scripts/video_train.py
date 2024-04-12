@@ -9,7 +9,7 @@ import wandb
 import torch.distributed as dist
 
 from improved_diffusion import dist_util
-from improved_diffusion.video_datasets import load_data, default_T_dict, default_image_size_dict
+from improved_diffusion.video_datasets import load_data, default_T_dict, default_image_size_dict, CONTINUAL_DATASETS
 from improved_diffusion.resample import create_named_schedule_sampler
 from improved_diffusion.script_util import (
     model_and_diffusion_defaults,
@@ -83,9 +83,9 @@ def main():
         "latent": 4,
     }[args.diffusion_space]
     args.replay_dataset_kwargs = {
-        "context_size": args.max_frames,
-        "mem_size": args.replay_buffer_size,
-        "mem_batch_size": args.max_frames,
+        "stm_size": args.T if args.stm_size == -1 else args.stm_size,
+        "ltm_size": args.ltm_size,
+        "mem_batch_size": args.T if args.stm_size == -1 else args.stm_size,
     }
 
     dist_util.setup_dist()
@@ -103,10 +103,10 @@ def main():
     data = load_data(
         dataset_name=args.dataset,
         batch_size=args.batch_size,
-        deterministic=args.deterministic_loader,
         T=args.T,
         num_workers=args.num_workers,
     )
+    args.continual_learning = args.dataset in CONTINUAL_DATASETS
 
     print("training...")
     TrainLoop(
@@ -132,7 +132,8 @@ def main():
         enc_dec_chunk_size=args.enc_dec_chunk_size,
         replay_dataset_kwargs=args.replay_dataset_kwargs,
         steps_per_experience=args.steps_per_experience,
-        use_autoregressive_mask=args.use_autoregressive_mask,
+        masking_mode=args.masking_mode,
+        continual_learning=args.continual_learning,
         args=args,
     ).run_loop()
 
@@ -160,10 +161,11 @@ def create_argparser():
         enc_dec_chunk_size=20,
         T=-1,
         sample_interval=50000,
-        deterministic_loader=False,  # set true to have fixed data ordering
-        replay_buffer_size=0,
+        stm_size=-1,  # Only used for flexible sampling (masking_mode == "flexible")
+        ltm_size=-1,
         steps_per_experience=1,
-        use_autoregressive_mask=False,
+        masking_mode="flexible",
+        attentive_er=False,  # If true, the model attends to replay frames
     )
     defaults.update(model_and_diffusion_defaults())
     parser = argparse.ArgumentParser()

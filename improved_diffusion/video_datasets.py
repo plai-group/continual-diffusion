@@ -12,27 +12,38 @@ from mpi4py import MPI
 from .test_util import Protect
 
 
+CONTINUAL_DATASETS = ["streaming_ball", "streaming_mine"]
+
 video_data_paths_dict = {
-    "ball":         "datasets/ball",
-    "minerl":       "datasets/minerl_navigate-torch",
-    "mazes_cwvae":  "datasets/gqn_mazes-torch",
-    "carla_no_traffic": "datasets/carla/no-traffic",
+    "ball":                "datasets/ball500k",
+    "streaming_ball":      "datasets/ball500k",
+    "mine":                "datasets/continual_minecraft",
+    "streaming_mine":      "datasets/continual_minecraft",
+    "minerl":              "datasets/minerl_navigate-torch",
+    "mazes_cwvae":         "datasets/gqn_mazes-torch",
+    "carla_no_traffic":    "datasets/carla/no-traffic",
     "carla_no_traffic_2x": "datasets/carla/no-traffic",
 }
 
 default_T_dict = {
-    "ball":         1,
-    "minerl":       500,
-    "mazes_cwvae":  300,
-    "carla_no_traffic": 1000,
+    "ball":                10,
+    "streaming_ball":      1,
+    "mine":                500,
+    "streaming_mine":      1,
+    "minerl":              500,
+    "mazes_cwvae":         300,
+    "carla_no_traffic":    1000,
     "carla_no_traffic_2x": 1000,
 }
 
 default_image_size_dict = {
-    "ball":         32,
-    "minerl":       64,
-    "mazes_cwvae":  64,
-    "carla_no_traffic": 128,
+    "ball":                32,
+    "streaming_ball":      32,
+    "mine":                64,
+    "streaming_mine":      64,
+    "minerl":              64,
+    "mazes_cwvae":         64,
+    "carla_no_traffic":    128,
     "carla_no_traffic_2x": 256,
 }
 
@@ -43,7 +54,14 @@ def load_data(dataset_name, batch_size, T=None, deterministic=False, num_workers
     shard = MPI.COMM_WORLD.Get_rank()
     num_shards = MPI.COMM_WORLD.Get_size()
     if dataset_name == "ball":
-        dataset = StreamingBallDataset(data_path, shard=shard, num_shards=num_shards, T=T)
+        dataset = BallDataset(data_path, shard=shard, num_shards=num_shards, T=T)
+    elif dataset_name == "streaming_ball":
+        dataset = BallDataset(data_path, shard=shard, num_shards=num_shards, T=1)
+        deterministic = True
+    elif dataset_name == "mine":
+        dataset = MineDataset(data_path, shard=shard, num_shards=num_shards, T=T)
+    elif dataset_name == "streaming_mine":
+        dataset = MineDataset(data_path, shard=shard, num_shards=num_shards, T=1)
         deterministic = True
     elif dataset_name == "minerl":
         data_path = os.path.join(data_path, "train")
@@ -63,17 +81,19 @@ def load_data(dataset_name, batch_size, T=None, deterministic=False, num_workers
         loader = DataLoader(
             dataset, batch_size=batch_size, shuffle=(not deterministic), num_workers=num_workers, drop_last=True
         )
-        if deterministic:
+        counter, deterministic_epoch_limit = 0, 1
+        while True:
             yield from loader
-        else:
-            while True:
-                yield from loader
+
+            counter += 1
+            if deterministic and counter >= deterministic_epoch_limit:
+                raise StopIteration()
 
 
 def get_train_dataset(dataset_name, T=None):
     return load_data(
         dataset_name, return_dataset=False, T=T,
-        batch_size=None, deterministic=None, num_workers=None
+        batch_size=None, deterministic=False, num_workers=None
     )
 
 
@@ -84,7 +104,9 @@ def get_test_dataset(dataset_name, T=None):
     data_path = data_root / video_data_paths_dict[dataset_name]
     T = default_T_dict[dataset_name] if T is None else T
     if dataset_name == "ball":
-        dataset = StreamingBallDataset(data_path, shard=0, num_shards=1, T=T)
+        dataset = BallDataset(data_path, shard=0, num_shards=1, T=T)
+    elif dataset_name == "streaming_ball":
+        dataset = BallDataset(data_path, shard=0, num_shards=1, T=T)
     elif dataset_name == "minerl":
         data_path = os.path.join(data_path, "test")
         dataset = MineRLDataset(data_path, shard=0, num_shards=1, T=T)
@@ -192,23 +214,27 @@ class BaseDataset(Dataset):
         return video
 
 
-class StreamDataset(Dataset):
-    def __init__(self, path, T):
+class ChunkedBaseDataset(Dataset):
+    # __getitem__ returns data of shape <1 x self.T x ...>
+    def __init__(self, path, T=1):
         super().__init__()
         self.T = T
         self.path = Path(path)
         self.is_test = False
+        # assert self.T == 1  # FIXME: Consider changing this. Right now, the class only returns a single frame per timestep.
         
         config = json.load(open(self.path / 'config.json'))
         self.T_total = config['T_total']
         self.chunk_size = config['chunk_size']
+        assert self.T_total % self.T == 0
+        assert self.T_total % self.chunk_size == 0
         assert self.chunk_size % self.T == 0
 
         self.train_path = self.path / 'train'
         self.test_path = self.path / 'test'
 
     def __len__(self):
-        return self.T_total
+        return self.T_total // self.T
 
     def __getitem__(self, idx):
         path = self.getitem_path(idx)
@@ -258,20 +284,40 @@ class StreamDataset(Dataset):
 
     def get_video_subsequence(self, video, idx):
         # Take a subsequence of the video.
-        start_i = idx % self.chunk_size
+        start_i = (idx * self.T) % self.chunk_size
         video = video[start_i:start_i+self.T]
         assert len(video) == self.T
         return video
 
 
-class StreamingBallDataset(StreamDataset):
+class BallDataset(ChunkedBaseDataset):
     def __init__(self, path, shard, num_shards, T):
         assert shard == 0, "Distributed training is not supported by the Bouncing Ball dataset yet."
         assert num_shards == 1, "Distributed training is not supported by the Bouncing Ball dataset yet."
         super().__init__(path=path, T=T)
 
     def getitem_path(self, idx):
-        chunk_idx = idx // self.chunk_size
+        chunk_idx = (idx * self.T) // self.chunk_size
+        return self.path / (("test" if self.is_test else "train") + "/" + f"{chunk_idx}.npy")
+
+    def loaditem(self, path):
+        return np.load(path)
+
+    def postprocess_video(self, video):
+        byte_to_tensor = lambda x: ToTensor()(x)
+        video = th.stack([byte_to_tensor(frame).float() for frame in video])
+        video = 2 * video - 1
+        return video
+
+
+class MineDataset(ChunkedBaseDataset):
+    def __init__(self, path, shard, num_shards, T):
+        assert shard == 0, "Distributed training is not supported by the Bouncing Ball dataset yet."
+        assert num_shards == 1, "Distributed training is not supported by the Bouncing Ball dataset yet."
+        super().__init__(path=path, T=T)
+
+    def getitem_path(self, idx):
+        chunk_idx = (idx * self.T) // self.chunk_size
         return self.path / (("test" if self.is_test else "train") + "/" + f"{chunk_idx}.npy")
 
     def loaditem(self, path):

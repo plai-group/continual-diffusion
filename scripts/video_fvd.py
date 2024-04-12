@@ -94,7 +94,7 @@ if __name__ == "__main__":
     parser.add_argument("--batch_size", type=int, default=None,
                         help="Batch size for extracting video features the I3D model.")
     parser.add_argument("--sample_idx", type=int, default=0)
-    parser.add_argument("--continual", type=str2bool, default=True)
+    parser.add_argument("--T", type=int, default=None, help="Length of the videos. If not specified, it will be inferred from the dataset.")
     args = parser.parse_args()
 
     save_path = Path(args.eval_dir) / f"fvd-{args.num_videos}-{args.sample_idx}.txt"
@@ -109,18 +109,19 @@ if __name__ == "__main__":
         model_args = argparse.Namespace(**json.load(f))
 
     # Set batch size given dataset if not specified
+    args.dataset = model_args.dataset
     if args.batch_size is None:
-        args.batch_size = {'mazes_cwvae': 16, 'minerl': 8, 'carla_no_traffic': 4, 'carla_no_traffic_2x': 4}[model_args.dataset]
+        args.batch_size = {'mazes_cwvae': 16, 'minerl': 8, 'carla_no_traffic': 4, 'carla_no_traffic_2x': 4}[args.dataset]
 
-    if args.continual:
-        model_args.T = 100 # model_args.replay_dataset_kwargs['context_size']
+    if args.T is None:
+        args.T = model_args.T
 
     # Prepare datasets
     sample_dataset = SampleDataset(samples_path=(Path(args.eval_dir) / "samples"), sample_idx=args.sample_idx, length=args.num_videos)
     test_dataset = th.utils.data.Subset(
-        dataset=get_test_dataset(dataset_name=model_args.dataset, T=model_args.T),
+        dataset=get_test_dataset(dataset_name=args.dataset, T=args.T),
         indices=list(range(args.num_videos)),
     )
-    fvd = compute_fvd(test_dataset, sample_dataset, T=model_args.T, num_videos=args.num_videos, batch_size=args.batch_size)
+    fvd = compute_fvd(test_dataset, sample_dataset, T=args.T, num_videos=args.num_videos, batch_size=args.batch_size)
     np.savetxt(save_path, np.array([fvd]))
     print(f"FVD: {fvd}")

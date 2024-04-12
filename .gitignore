@@ -1,5 +1,7 @@
 visualisations/
 datasets/cifar_*
+datasets/ball
+datasets/ball500k
 wandb
 checkpoints
 results

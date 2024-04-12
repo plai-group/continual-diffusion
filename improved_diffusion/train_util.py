@@ -59,7 +59,8 @@ class TrainLoop:
         enc_dec_chunk_size,
         replay_dataset_kwargs,
         steps_per_experience,
-        use_autoregressive_mask,
+        masking_mode,
+        continual_learning,
         args,
     ):
         self.args = args
@@ -138,7 +139,8 @@ class TrainLoop:
 
         self.replay_dataset: ReplayDataset = ReplayDataset(**replay_dataset_kwargs)
         self.steps_per_experience = steps_per_experience
-        self.use_autoregressive_mask = use_autoregressive_mask
+        self.masking_mode = masking_mode
+        self.continual_learning = continual_learning
 
     def _load_and_sync_parameters(self):
         resume_checkpoint = find_resume_checkpoint(self.args) or self.resume_checkpoint
@@ -197,25 +199,22 @@ class TrainLoop:
             return self.sample_some_indices(max_indices, T)
 
     def sample_all_masks(self, batch1, batch2=None, gather=True, set_masks={'obs': (), 'latent': ()}):
-        N = self.max_frames
         B, T, *_ = batch1.shape
+        N = min(T, self.max_frames)
 
         masks = {k: th.zeros_like(batch1[:, :, :1, :1, :1]) for k in ['obs', 'latent']}
-        if T <= N:
-            # NOTE: In continual learning setting, max frames can be larger than T in the beginning.
-            # In this case, set all frames as latent.
-            masks['latent'] = th.ones_like(batch1[:, :, :1, :1, :1])
-        else:
-            for obs_row, latent_row in zip(*[masks[k] for k in ['obs', 'latent']]):
-                latent_row[self.sample_some_indices(max_indices=N, T=T)] = 1.
-                while True:
-                    mask = obs_row if th.rand(()) < 0.5 else latent_row
-                    indices = th.tensor(self.sample_some_indices(max_indices=N, T=T))
-                    taken = (obs_row[indices] + latent_row[indices]).view(-1)
-                    indices = indices[taken == 0]  # remove indices that are already used in a mask
-                    if len(indices) > N - sum(obs_row) - sum(latent_row):
-                        break
-                    mask[indices] = 1.
+        for obs_row, latent_row in zip(*[masks[k] for k in ['obs', 'latent']]):
+            latent_row[self.sample_some_indices(max_indices=N, T=T)] = 1.
+            while True:
+                mask = obs_row if th.rand(()) < 0.5 else latent_row
+                indices = th.tensor(self.sample_some_indices(max_indices=N, T=T))
+                taken = (obs_row[indices] + latent_row[indices]).view(-1)
+                indices = indices[taken == 0]  # remove indices that are already used in a mask
+                if len(indices) > N - sum(obs_row) - sum(latent_row)\
+                    or len(indices) == N - sum(obs_row) - sum(latent_row) == 0:
+                    break
+                mask[indices] = 1.
+
         if len(set_masks['obs']) > 0:  # set_masks allow us to choose informative masks for logging
             for k in masks:
                 set_values = set_masks[k]
@@ -226,16 +225,31 @@ class TrainLoop:
             return batch1, masks['obs'], masks['latent']
         batch, (obs_mask, latent_mask), frame_indices =\
             self.prepare_training_batch(any_mask, batch1, batch2, (masks['obs'], masks['latent']))
+
         return batch, frame_indices, obs_mask, latent_mask
 
     def get_autoregressive_masks(self, batch1, gather=True, set_masks={'obs': (), 'latent': ()}):
         # Same as above, but always sets the last element as latent and all others as observed
         masks = {'latent': th.zeros_like(batch1[:, :, :1, :1, :1]), 'obs': th.ones_like(batch1[:, :, :1, :1, :1])}
-        masks['latent'][:, -1] = 1.
-        masks['obs'][:, -1] = 0.
-        # masks['latent'][:, masks['latent'].size(1)//2:] = 1.
-        # masks['obs'][:, masks['obs'].size(1)//2:] = 0.
-        
+        # masks['latent'][:, -1] = 1.
+        # masks['obs'][:, -1] = 0.
+        masks['latent'][:, masks['latent'].size(1)//2:] = 1.
+        masks['obs'][:, masks['obs'].size(1)//2:] = 0.
+        if len(set_masks['obs']) > 0:  # set_masks allow us to choose informative masks for logging
+            for k in masks:
+                set_values = set_masks[k]
+                n_set = min(len(set_values), len(masks[k]))
+                masks[k][:n_set] = set_values[:n_set]
+        any_mask = (masks['obs'] + masks['latent']).to(th.float32).clip(max=1).to(masks['obs'].dtype)
+        if not gather:
+            return batch1, masks['obs'], masks['latent']
+        batch, (obs_mask, latent_mask), frame_indices =\
+            self.prepare_training_batch(any_mask, batch1, None, (masks['obs'], masks['latent']))
+        return batch, frame_indices, obs_mask, latent_mask
+
+    def get_joint_masks(self, batch1, gather=True, set_masks={'obs': (), 'latent': ()}):
+        # Same as above, but always sets the last element as latent and all others as observed
+        masks = {'latent': th.ones_like(batch1[:, :, :1, :1, :1]), 'obs': th.zeros_like(batch1[:, :, :1, :1, :1])}
         if len(set_masks['obs']) > 0:  # set_masks allow us to choose informative masks for logging
             for k in masks:
                 set_values = set_masks[k]
@@ -279,30 +293,34 @@ class TrainLoop:
 
         if self.vis_batch is None or self.vis_batch.size(1) < self.max_frames:
             with RNG(0):  # Initialize datapoint to log here in case data is deterministic
-                self.vis_batch = self.encode(result[:2]).to(batch.device)
+                self.vis_batch = result[:2].frames.to(batch.device)
         return result
 
     def append_mem_batch(self, ctx_batch):
         mem_batch = self.replay_dataset.sample_memory()
-        return ctx_batch if mem_batch is None else th.cat((ctx_batch, mem_batch), dim=0)
+        cat_dim = 1 if self.args.attentive_er else 0
+        return ctx_batch if mem_batch is None else th.cat((ctx_batch, mem_batch), dim=cat_dim)
 
     def run_loop(self):
         last_sample_time = None
         while not self.lr_anneal_steps or self.step < self.lr_anneal_steps:
             try:
                 ctx_batch = self.get_ctx_batch()
-            except StopIteration:
+            except Exception as e:
+                print(e)
                 break
 
             for _ in range(self.steps_per_experience):
-                batch = self.append_mem_batch(ctx_batch)
+                batch_info = self.append_mem_batch(ctx_batch)
+                batch, absolute_index_map = batch_info.frames, batch_info.absolute_index_map
+
                 if self.pad_with_random_frames:
                     assert self.replay_dataset.has_mem
                     filler_batch = self.replay_dataset.sample_memory()
                     filler_batch = filler_batch.repeat(len(batch)//len(filler_batch), *[1]*len(batch.shape[1:]))
                 else:
                     filler_batch = None
-                self.run_step(batch, filler_batch)
+                self.run_step(batch, filler_batch, absolute_index_map)
                 if self.step % self.log_interval == 0:
                     logger.dumpkvs()
                 if self.step % self.save_interval == 0:
@@ -321,9 +339,9 @@ class TrainLoop:
         if (self.step - 1) % self.save_interval != 0:
             self.save()
 
-    def run_step(self, batch1, batch2):
+    def run_step(self, batch1, batch2, absolute_index_map=None):
         t0 = time()
-        self.forward_backward(batch1, batch2)
+        self.forward_backward(batch1, batch2, absolute_index_map)
         if self.use_fp16:
             self.optimize_fp16()
         else:
@@ -331,22 +349,27 @@ class TrainLoop:
         self.log_step()
         logger.logkv("timing/step_time", time() - t0)
     
-    def forward_backward(self, batch1, batch2):
+    def forward_backward(self, batch1, batch2, absolute_index_map=None):
         zero_grad(self.model_params)
 
         batch_size = batch1.shape[0]
         self.microbatch = batch_size  # HACK: Disable microbatches
         for i in range(0, batch_size, self.microbatch):
-            t1 = time()
             micro1 = batch1[i : i + self.microbatch]
             micro2 = batch2[i : i + self.microbatch] if batch2 is not None else None
-            if self.use_autoregressive_mask:
+            if self.masking_mode == "autoregressive":
                 micro, frame_indices, obs_mask, latent_mask = self.get_autoregressive_masks(micro1)
-            else:
+            elif self.masking_mode == "none":
+                micro, frame_indices, obs_mask, latent_mask = self.get_joint_masks(micro1)
+            elif self.masking_mode == "flexible":
                 micro, frame_indices, obs_mask, latent_mask = self.sample_all_masks(micro1, micro2)
+            else:
+                raise ValueError(f"Unknown masking mode: {self.masking_mode}")
 
-            t2 = time()
-            micro = self.encode(micro)
+            if absolute_index_map is not None:
+                # Convert frame indices to indices in one long video frame for RPE attention to work with.
+                frame_indices = th.stack([idx_map[idx] for idx_map, idx in zip(absolute_index_map, frame_indices)], dim=0)
+
             micro = micro.to(dist_util.dev())
             frame_indices = frame_indices.to(dist_util.dev())
             obs_mask = obs_mask.to(dist_util.dev())
@@ -354,9 +377,6 @@ class TrainLoop:
 
             last_batch = (i + self.microbatch) >= batch1.shape[0]
             t, weights = self.schedule_sampler.sample(micro.shape[0], dist_util.dev())
-
-            # encode micro to latent space
-            # micro = self.encode(micro)
 
             compute_losses = functools.partial(
                 self.diffusion.training_losses,
@@ -373,7 +393,6 @@ class TrainLoop:
             else:
                 with self.ddp_model.no_sync():
                     losses = compute_losses()
-            t3 = time()
 
             if isinstance(self.schedule_sampler, LossAwareSampler):
                 self.schedule_sampler.update_with_local_losses(
@@ -389,8 +408,6 @@ class TrainLoop:
                 (loss * loss_scale).backward()
             else:
                 loss.backward()
-            t4 = time()
-            # print(f"mask sample time: {t2-t1:.3f}, forward time: {t3-t2:.3f}, backward time: {t4-t3:.3f}")
 
     def optimize_fp16(self):
         if any(not th.isfinite(p.grad).all() for p in self.model_params):

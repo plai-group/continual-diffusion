@@ -6,7 +6,7 @@ import uuid
 from improved_diffusion.test_util import tensor2mp4
 
 parser = argparse.ArgumentParser()
-parser.add_argument("--in_path", type=str, default='datasets/ball100/train/0.npy')
+parser.add_argument("--in_path", type=str, default='datasets/ball/train/0.npy')
 parser.add_argument("--save_path", type=str, default='output.mp4')
 args = parser.parse_args()
 

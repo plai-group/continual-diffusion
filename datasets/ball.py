@@ -16,6 +16,10 @@ import os
 
 FRICTION = False  # whether there is friction in the system
 SIZE = 10
+COLORS = dict(red=(1, 0, 0), yellow=(1, 1, 0), green=(0, 1, 0))
+COLOR_TRANSITION = {('green','red'): 'yellow', ('yellow','red'): 'green',
+                    ('red','green'): 'red', ('red','yellow'): 'red',
+                    (None, 'red'): 'yellow', (None, 'green'): 'red', (None, 'yellow'): 'red'}
 
 
 def norm(x): return sqrt((x**2).sum())
@@ -30,7 +34,13 @@ def new_speeds(m1, m2, v1, v2):
 # size of bounding box: SIZE X SIZE.
 
 
-def bounce_n(T=128, n=2, r=None, m=None, color_period=None):
+def direction_changed(v1, v2):
+    v1_x, v1_y = v1
+    v2_x, v2_y = v2
+    return ((v1_x > 0) != (v2_x > 0)) or ((v1_y > 0) != (v2_y > 0))
+
+
+def bounce_n(T=128, n=2, r=None, m=None):
     if r is None:
         r = array([4.0]*n)
     if m is None:
@@ -39,11 +49,7 @@ def bounce_n(T=128, n=2, r=None, m=None, color_period=None):
     # r is to be rather small.
     X = zeros((T, n, 2), dtype='float')
     V = zeros((T, n, 2), dtype='float')
-    if color_period is None:
-        C = None
-    else:
-        C = zeros((T, n, 3), dtype='float')
-        C[:, :, 0] = 1.0
+    C = zeros((T, n, 3), dtype='float')
 
     v = random.randn(n, 2)
     v = (v / norm(v)*.5)*1.0
@@ -65,32 +71,24 @@ def bounce_n(T=128, n=2, r=None, m=None, color_period=None):
                     good_config = False
 
     eps = .5
+    curr_color, prev_color = 'red', None
     for t in range(T):
         # for how long do we show small simulation
 
         for i in range(n):
             X[t, i] = x[i]
             V[t, i] = v[i]
+            C[t, i] = COLORS[curr_color]
 
-            if C is not None and t > 0:
-                C[t, i, :] = C[t-1, i, :]
-                if t % color_period == 0:
-                    # Generates 0 1 0 1 0 1 0 1 0 1 0 1 0 1 and so on.
-                    C[t, i, 1] = 1 if C[t, i, 1] == 0 else 0
-                    # Generates 0 1 0 0 0 1 0 0 0 1 0 0 0 1 and so on.
-                    last = C[max(0, t-1), i, 2]
-                    lastlast = C[max(0, t-color_period-1), i, 2]
-                    lastlastlast = C[max(0, t-color_period*2-1), i, 2]
-                    if last == 0 and lastlast == 0 and lastlastlast == 0:
-                        C[t, i, 2] = 1
-                    else:
-                        C[t, i, 2] = 0
+            if t>0 and direction_changed(V[t-1,i], V[t,i]):
+                next_color = COLOR_TRANSITION[(prev_color, curr_color)]
+                prev_color = curr_color
+                curr_color = next_color
 
         for mu in range(int(1/eps)):
 
             for i in range(n):
-                # x[i]+=eps*v[i]
-                x[i] += .5*v[i]
+                x[i] += eps*v[i]
 
             # gravity and drag
             if FRICTION:
@@ -109,7 +107,7 @@ def bounce_n(T=128, n=2, r=None, m=None, color_period=None):
                 for j in range(i):
                     if norm(x[i]-x[j]) < r[i]+r[j]:
                         # if (x[i][0] > 0) and (x[i][0] < size) and (x[i][1] > 0) and (x[i][1] < size):
-                        #  if (x[i][0] > 0) and (x[i][0] < size) and (x[i][1] > 0) and (x[i][1] < size):
+                        # if (x[i][0] > 0) and (x[i][0] < size) and (x[i][1] > 0) and (x[i][1] < size):
                         # the bouncing off part:
                         w = x[i]-x[j]
                         w = w / norm(w)
@@ -169,10 +167,10 @@ def matricize(X, V, res, chunk_size, save_dir, r=None, C=None):
                 save(f, A_c)
 
 
-def bounce_vec(save_dir, res, n=2, T=128, chunk_size=100, color_period=None, r=None, m=None):
+def bounce_vec(save_dir, res, n=2, T=128, chunk_size=100, r=None, m=None):
     if r is None:
         r = array([1.2]*n)
-    x, v, c = bounce_n(T, n, r, m, color_period)  # x: <seq_len x num_balls x 2>
+    x, v, c = bounce_n(T, n, r, m)  # x: <seq_len x num_balls x 2>
     return matricize(x, v, res, chunk_size, save_dir, r, c)
 
 
@@ -187,7 +185,6 @@ if __name__ == "__main__":
     parser.add_argument("--resolution", type=int, default=32)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--num_balls", type=int, default=1)
-    parser.add_argument("--color_period", type=int, default=None)
     args = parser.parse_args()
 
     random.seed(args.seed)
@@ -200,7 +197,7 @@ if __name__ == "__main__":
         json.dump(args.__dict__, f, indent=2)
 
     # save train data
-    bounce_vec(train_path, args.resolution, args.num_balls, args.T_total, args.chunk_size, args.color_period)
+    bounce_vec(train_path, args.resolution, args.num_balls, args.T_total, args.chunk_size)
 
     # save test data
-    bounce_vec(test_path, args.resolution, args.num_balls, args.T_total, args.chunk_size, args.color_period)
+    bounce_vec(test_path, args.resolution, args.num_balls, args.T_total, args.chunk_size)

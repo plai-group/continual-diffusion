@@ -3,6 +3,7 @@ datasets/cifar_*
 datasets/ball
 datasets/ball500k
 datasets/ball1m
+datasets/ball1m_old
 datasets/continual_minecraft/*
 wandb
 checkpoints

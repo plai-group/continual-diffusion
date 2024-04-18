@@ -2,6 +2,8 @@ visualisations/
 datasets/cifar_*
 datasets/ball
 datasets/ball500k
+datasets/ball1m
+datasets/ball1m_old
 datasets/continual_minecraft/*
 wandb
 checkpoints
@@ -9,6 +11,7 @@ results
 .vscode
 .tfhub_cache
 output.mp4
+summarized
 
 # Default Python .gitignore:
 # Byte-compiled / optimized / DLL files

@@ -21,18 +21,23 @@ if __name__ == "__main__":
     parser.add_argument("--obs_length", type=int, default=0,
                         help="Number of observed images. If positive, marks the first obs_length frames in output gifs by a red border.")
     parser.add_argument("--format", type=str, default="gif", choices=["gif", "mp4", "avi"])
+    parser.add_argument("--eval_on_train", type=str2bool, default=False)
     args = parser.parse_args()
 
+    samples_prefix = "samples_train" if args.eval_on_train else "samples"
+    videos_prefix = "videos_train" if args.eval_on_train else "videos"
     if args.add_gt:
         try:  # Infer T from sampled video
-            T = len(np.load(Path(args.eval_dir) / "samples" / f"sample_0000-0.npy"))
+            T = len(np.load(Path(args.eval_dir) / samples_prefix / f"sample_0000-0.npy"))
         except PermissionError:
             T = None
         model_args_path = Path(args.eval_dir) / "model_config.json"
         with open(model_args_path, "r") as f:
             model_args = argparse.Namespace(**json.load(f))
         dataset = get_test_dataset(model_args.dataset, T=T)
-    out_dir = (Path(args.out_dir) if args.out_dir is not None else Path(args.eval_dir)) / "videos"
+        if args.eval_on_train:
+            dataset.is_test = False
+    out_dir = (Path(args.out_dir) if args.out_dir is not None else Path(args.eval_dir)) / videos_prefix
     out_dir.mkdir(exist_ok=True)
     out_path = out_dir / f"{args.do_n}_{args.n_seeds}.{args.format}"
 
@@ -51,7 +56,7 @@ if __name__ == "__main__":
         seed = 0
         done = 0
         while done < args.n_seeds:
-            filename = Path(args.eval_dir) / "samples" / f"sample_{data_idx:04d}-{seed}.npy"
+            filename = Path(args.eval_dir) / samples_prefix / f"sample_{data_idx:04d}-{seed}.npy"
             print(filename)
             try:
                 video = np.load(filename)

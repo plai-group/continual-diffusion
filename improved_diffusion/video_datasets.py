@@ -15,8 +15,8 @@ from .test_util import Protect
 CONTINUAL_DATASETS = ["streaming_ball", "streaming_mine"]
 
 video_data_paths_dict = {
-    "ball":                "datasets/ball500k",
-    "streaming_ball":      "datasets/ball500k",
+    "ball":                "datasets/ball1m",
+    "streaming_ball":      "datasets/ball1m",
     "mine":                "datasets/continual_minecraft",
     "streaming_mine":      "datasets/continual_minecraft",
     "minerl":              "datasets/minerl_navigate-torch",

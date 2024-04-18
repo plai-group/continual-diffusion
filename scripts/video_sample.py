@@ -90,7 +90,7 @@ def main(args, model, diffusion, dataset):
     while len(not_done) > 0:
         batch_indices = not_done[:args.batch_size]
         not_done = not_done[args.batch_size:]
-        output_filenames = [args.eval_dir / "samples" / f"sample_{i:04d}-{args.sample_idx}.npy" for i in batch_indices]
+        output_filenames = [args.eval_dir / ("samples_train" if args.eval_on_train else "samples") / f"sample_{i:04d}-{args.sample_idx}.npy" for i in batch_indices]
         todo = [not p.exists() for p in output_filenames]
         if not any(todo):
             print(f"Nothing to do for the batches {min(batch_indices)} - {max(batch_indices)}, sample #{args.sample_idx}.")
@@ -178,6 +178,7 @@ if __name__ == "__main__":
     parser.add_argument("--start_index", type=int, default=0)
     parser.add_argument("--stop_index", type=int, default=None)
     parser.add_argument("--use_ddim", type=str2bool, default=False)
+    parser.add_argument("--eval_on_train", type=str2bool, default=False)
     parser.add_argument("--timestep_respacing", type=str, default="")
     parser.add_argument("--clip_denoised", type=str2bool, default=True)
     parser.add_argument("--sample_idx", type=int, default=0, help="Sampled images will have this specific index. Used for sampling multiple videos with the same observations.")
@@ -225,14 +226,18 @@ if __name__ == "__main__":
     dataset = get_test_dataset(dataset_name=model_args.dataset, T=args.T)
     args.T = dataset.T
 
+    if args.eval_on_train:
+        dataset.is_test = False
+
     if args.just_visualise:
         visualise(args, model, diffusion, dataset)
         exit()
 
     # Prepare samples directory
     args.eval_dir = get_model_results_path(args) / get_eval_run_identifier(args)
-    (args.eval_dir / 'samples').mkdir(parents=True, exist_ok=True)
-    print(f"Saving samples to {args.eval_dir / 'samples'}")
+    samples_prefix = "samples_train" if args.eval_on_train else "samples"
+    (args.eval_dir / samples_prefix).mkdir(parents=True, exist_ok=True)
+    print(f"Saving samples to {args.eval_dir / samples_prefix}")
 
     # Store model configs in a JSON file
     json_path = args.eval_dir / "model_config.json"

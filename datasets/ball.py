@@ -13,124 +13,6 @@ from numpy import *
 import os
 
 
-"""
-shape_std=shape
-def shape(A):
-    if isinstance(A, ndarray):
-        return shape_std(A)
-    else:
-        return A.shape()
-
-size_std = size
-def size(A):
-    if isinstance(A, ndarray):
-        return size_std(A)
-    else:
-        return A.size()
-
-det = linalg.det
-
-def new_speeds(m1, m2, v1, v2):
-    new_v2 = (2*m1*v1 + v2*(m2-m1))/(m1+m2)
-    new_v1 = new_v2 + (v2 - v1)
-    return new_v1, new_v2
-
-
-def norm(x): return sqrt((x**2).sum())
-def sigmoid(x):        return 1./(1.+exp(-x))
-
-SIZE=10
-# size of bounding box: SIZE X SIZE.
-
-def bounce_n(T=128, n=2, r=None, m=None):
-    if r is None: r=array([1.2]*n)
-    if m is None: m=array([1]*n)
-    # r is to be rather small.
-    X=zeros((T, n, 2), dtype='float')
-    v = random.randn(n,2)
-    v = v / norm(v)*.5
-    good_config=False
-    while not good_config:
-        x = 2+ random.rand(n,2)*8
-        good_config=True
-        for i in range(n):
-            for z in range(2):
-                if x[i][z]-r[i]<0:      good_config=False
-                if x[i][z]+r[i]>SIZE:     good_config=False
-
-        # that's the main part.
-        for i in range(n):
-            for j in range(i):
-                if norm(x[i]-x[j])<r[i]+r[j]:
-                    good_config=False
-
-
-    eps = .5
-    for t in range(T):
-        # for how long do we show small simulation
-
-        for i in range(n):
-            X[t,i]=x[i]
-
-        for mu in range(int(1/eps)):
-
-            for i in range(n):
-                x[i]+=eps*v[i]
-
-            for i in range(n):
-                for z in range(2):
-                    if x[i][z]-r[i]<0:  v[i][z]= abs(v[i][z]) # want positive
-                    if x[i][z]+r[i]>SIZE: v[i][z]=-abs(v[i][z]) # want negative
-
-
-            for i in range(n):
-                for j in range(i):
-                    if norm(x[i]-x[j])<r[i]+r[j]:
-                        # the bouncing off part:
-                        w    = x[i]-x[j]
-                        w    = w / norm(w)
-
-                        v_i  = dot(w.T_totalranspose(),v[i])
-                        v_j  = dot(w.T_totalranspose(),v[j])
-
-                        new_v_i, new_v_j = new_speeds(m[i], m[j], v_i, v_j)
-
-                        v[i]+= w*(new_v_i - v_i)
-                        v[j]+= w*(new_v_j - v_j)
-
-    return X
-
-def ar(x,y,z):
-    return z/2+arange(x,y,z,dtype='float')
-
-def matricize(X,res,r=None):
-
-    T, n= shape(X)[0:2]
-    if r is None: r=array([1.2]*n)
-
-    A=zeros((T,res,res), dtype='float')
-
-    [I, J]=meshgrid(ar(0,1,1./res)*SIZE, ar(0,1,1./res)*SIZE)
-
-    for t in range(T):
-        for i in range(n):
-            A[t]+= exp(-(  ((I-X[t,i,0])**2+(J-X[t,i,1])**2)/(r[i]**2)  )**4    )
-
-        A[t][A[t]>1]=1
-    return A
-
-def bounce_mat(res, n=2, T=128, r =None):
-    if r is None: r=array([1.2]*n)
-    x = bounce_n(T,n,r);
-    A = matricize(x,res,r)
-    return A
-
-def bounce_vec(res, n=2, T=128, r =None, m =None):
-    if r is None: r=array([1.2]*n)
-    x = bounce_n(T,n,r,m);
-    V = matricize(x,res,r)
-    return V.reshape(T, res, res)
-"""
 
 FRICTION = False  # whether there is friction in the system
 SIZE = 10
@@ -162,7 +44,6 @@ def bounce_n(T=128, n=2, r=None, m=None, color_period=None):
     else:
         C = zeros((T, n, 3), dtype='float')
         C[:, :, 0] = 1.0
-        # C[:, :, 2] = 1.0
 
     v = random.randn(n, 2)
     v = (v / norm(v)*.5)*1.0
@@ -190,13 +71,6 @@ def bounce_n(T=128, n=2, r=None, m=None, color_period=None):
         for i in range(n):
             X[t, i] = x[i]
             V[t, i] = v[i]
-
-            # if C is not None and t > 0:
-            #     C[t, i, :] = C[t-1, i, :]
-            #     if t % color_period == 0:
-            #         C[t, i, 0] = 1 if C[t, i, 0] == 0 else 0
-            #     if t % (color_period * 2) == 0:
-            #         C[t, i, 2] = 1 if C[t, i, 2] == 0 else 0
 
             if C is not None and t > 0:
                 C[t, i, :] = C[t-1, i, :]
@@ -255,13 +129,10 @@ def ar(x, y, z):
     return z/2+arange(x, y, z, dtype='float')
 
 
-def matricize(X, V, res, r=None, C=None):
-
+def matricize(X, V, res, chunk_size, save_dir, r=None, C=None):
     T, n = shape(X)[0:2]
     if r is None:
         r = array([4.0]*n)
-
-    A = zeros((T, res, res, 3), dtype='float')
 
     [I, J] = meshgrid(ar(0, 1, 1./res)*SIZE, ar(0, 1, 1./res)*SIZE)
     if C is None:
@@ -272,24 +143,37 @@ def matricize(X, V, res, r=None, C=None):
             C[:, i, 1] += 1.0
             C[:, i, 2] += 1.0 * (V[:, i, 1] + .5)
 
-    for t in range(T):
-        for i in range(n):
-            gaussian_bump = exp(-(((I-X[t, i, 0])**2+(J-X[t, i, 1])**2)/(r[i]**2))**4)
-            A[t, :, :, 0] += C[t, i, 0] * gaussian_bump
-            A[t, :, :, 1] += C[t, i, 1] * gaussian_bump
-            A[t, :, :, 2] += C[t, i, 2] * gaussian_bump
+    n_chunks = T // chunk_size
+    for chunk_idx in range(n_chunks):
 
-        A[t, :, :, 0][A[t, :, :, 0] > 1] = 1
-        A[t, :, :, 1][A[t, :, :, 1] > 1] = 1
-        A[t, :, :, 2][A[t, :, :, 2] > 1] = 1
-    return A
+        chunk_start = chunk_idx * chunk_size
+        chunk_end = (chunk_idx + 1) * chunk_size
+
+        A_c = zeros((chunk_size, res, res, 3), dtype='float')
+        C_c = C[chunk_start:chunk_end]
+        X_c = X[chunk_start:chunk_end]
+
+        for t in range(chunk_size):
+            for i in range(n):
+                gaussian_bump = exp(-(((I-X_c[t, i, 0])**2+(J-X_c[t, i, 1])**2)/(r[i]**2))**4)
+                A_c[t, :, :, 0] += C_c[t, i, 0] * gaussian_bump
+                A_c[t, :, :, 1] += C_c[t, i, 1] * gaussian_bump
+                A_c[t, :, :, 2] += C_c[t, i, 2] * gaussian_bump
+
+            A_c[t, :, :, 0][A_c[t, :, :, 0] > 1] = 1
+            A_c[t, :, :, 1][A_c[t, :, :, 1] > 1] = 1
+            A_c[t, :, :, 2][A_c[t, :, :, 2] > 1] = 1
+
+        if save_dir is not None:
+            with open(f"{save_dir}/{chunk_idx}.npy", 'wb') as f:
+                save(f, A_c)
 
 
-def bounce_vec(res, n=2, T=128, color_period=None, r=None, m=None):
+def bounce_vec(save_dir, res, n=2, T=128, chunk_size=100, color_period=None, r=None, m=None):
     if r is None:
         r = array([1.2]*n)
     x, v, c = bounce_n(T, n, r, m, color_period)  # x: <seq_len x num_balls x 2>
-    return matricize(x, v, res, r, c)
+    return matricize(x, v, res, chunk_size, save_dir, r, c)
 
 
 def unsigmoid(x): return log(x) - log(1-x)
@@ -315,12 +199,8 @@ if __name__ == "__main__":
     with open(f"{args.save_dir}/config.json", "w") as f:
         json.dump(args.__dict__, f, indent=2)
 
-    train_data = bounce_vec(args.resolution, args.num_balls, args.T_total, args.color_period)
-    for n in range(args.T_total // args.chunk_size):
-        with open(f"{train_path}/{n}.npy", 'wb') as f:
-            save(f, train_data[args.chunk_size * n:args.chunk_size * (n + 1)])
+    # save train data
+    bounce_vec(train_path, args.resolution, args.num_balls, args.T_total, args.chunk_size, args.color_period)
 
-    test_data = bounce_vec(args.resolution, args.num_balls, args.T_total, args.color_period)
-    for n in range(args.T_total // args.chunk_size):
-        with open(f"{test_path}/{n}.npy", 'wb') as f:
-            save(f, test_data[args.chunk_size * n:args.chunk_size * (n + 1)])
+    # save test data
+    bounce_vec(test_path, args.resolution, args.num_balls, args.T_total, args.chunk_size, args.color_period)

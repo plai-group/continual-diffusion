@@ -86,6 +86,8 @@ def main():
         "stm_size": args.T if args.stm_size == -1 else args.stm_size,
         "ltm_size": args.ltm_size,
         "mem_batch_size": args.T if args.stm_size == -1 else args.stm_size,
+        "n_sample_stm": args.n_sample_stm,
+        "n_sample_ltm": args.n_sample_ltm,
     }
 
     dist_util.setup_dist()
@@ -163,6 +165,8 @@ def create_argparser():
         sample_interval=50000,
         stm_size=-1,  # Only used for flexible sampling (masking_mode == "flexible")
         ltm_size=-1,
+        n_sample_stm=1,
+        n_sample_ltm=1,
         steps_per_experience=1,
         masking_mode="flexible",
         attentive_er=False,  # If true, the model attends to replay frames

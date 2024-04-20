@@ -11,10 +11,13 @@ class ReplayItem:
 
 
 class ReplayDataset:
-    def __init__(self, stm_size, ltm_size=-1, mem_batch_size=None) -> None:
+    def __init__(self, stm_size, ltm_size=-1, mem_batch_size=None, n_sample_stm=1, n_sample_ltm=1) -> None:
         self.stm_size = stm_size
         self.mem_batch_size = mem_batch_size
         self.mem_buffer_size = ltm_size // mem_batch_size if ltm_size > 0 else 0
+        self.n_sample_stm = n_sample_stm
+        self.n_sample_ltm = n_sample_ltm
+
         self._context_buffer: ReplayItem = None
         if ltm_size == -1:
             self.has_mem = False
@@ -91,25 +94,29 @@ class ReplayDataset:
         content = dict(frames=data, absolute_index_map=self.n_obs + torch.arange(T_new).repeat(B_new, 1).to(device))
         return ReplayItem(**content, batch_size=(B_new, T_new))
 
-    def get_context(self) -> ReplayItem:
+    def get_context(self, n_sample: int = None) -> ReplayItem:
         """
         Returns the context data from the context buffer.
 
         Returns:
             torch.Tensor: The context data.
         """
-        return self._context_buffer
+        n_sample = self.n_sample_stm if n_sample is None else n_sample
+        return self._context_buffer.expand(n_sample, self._context_buffer.size(1))
 
-    def sample_memory(self) -> ReplayItem:
+    def sample_memory(self, n_sample: int = None) -> ReplayItem:
         """
         Returns a sample of memory data from the memory buffer.
 
         Returns:
             torch.Tensor: The sample of memory data.
         """
+        n_sample = self.n_sample_ltm if n_sample is None else n_sample
         if not self.has_mem:
             return None
         elif len(self._memory_buffer) == 0:
-            return self.get_context()
+            return self.get_context(n_sample=n_sample)
         else:
-            return self._memory_buffer[torch.randint(len(self._memory_buffer), (1,))]
+            # return self._memory_buffer[torch.randint(len(self._memory_buffer), (1,))]
+            items = [self._memory_buffer[i] for i in torch.randint(len(self._memory_buffer), (n_sample,))]
+            return torch.cat(items, dim=0)

@@ -117,6 +117,5 @@ class ReplayDataset:
         elif len(self._memory_buffer) == 0:
             return self.get_context(n_sample=n_sample)
         else:
-            # return self._memory_buffer[torch.randint(len(self._memory_buffer), (1,))]
             items = [self._memory_buffer[i] for i in torch.randint(len(self._memory_buffer), (n_sample,))]
             return torch.cat(items, dim=0)

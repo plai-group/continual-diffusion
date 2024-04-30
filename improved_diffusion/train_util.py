@@ -205,6 +205,7 @@ class TrainLoop:
         masks = {k: th.zeros_like(batch1[:, :, :1, :1, :1]) for k in ['obs', 'latent']}
         for obs_row, latent_row in zip(*[masks[k] for k in ['obs', 'latent']]):
             latent_row[self.sample_some_indices(max_indices=N, T=T)] = 1.
+            n_repeats = 0
             while True:
                 mask = obs_row if th.rand(()) < 0.5 else latent_row
                 indices = th.tensor(self.sample_some_indices(max_indices=N, T=T))
@@ -231,8 +232,6 @@ class TrainLoop:
     def get_autoregressive_masks(self, batch1, gather=True, set_masks={'obs': (), 'latent': ()}):
         # Same as above, but always sets the last element as latent and all others as observed
         masks = {'latent': th.zeros_like(batch1[:, :, :1, :1, :1]), 'obs': th.ones_like(batch1[:, :, :1, :1, :1])}
-        # masks['latent'][:, -1] = 1.
-        # masks['obs'][:, -1] = 0.
         masks['latent'][:, masks['latent'].size(1)//2:] = 1.
         masks['obs'][:, masks['obs'].size(1)//2:] = 0.
         if len(set_masks['obs']) > 0:  # set_masks allow us to choose informative masks for logging
@@ -260,6 +259,37 @@ class TrainLoop:
             return batch1, masks['obs'], masks['latent']
         batch, (obs_mask, latent_mask), frame_indices =\
             self.prepare_training_batch(any_mask, batch1, None, (masks['obs'], masks['latent']))
+        return batch, frame_indices, obs_mask, latent_mask
+
+    def get_autoregressive_flexible_masks(self, batch1, batch2=None, gather=True, set_masks={'obs': (), 'latent': ()}):
+        # Same as self.sample_all_masks but sets first half indices to observed and the latter half to latent
+        B, T, *_ = batch1.shape
+        N = min(T, self.max_frames)
+        masks = {k: th.zeros_like(batch1[:, :, :1, :1, :1]) for k in ['obs', 'latent']}
+        for obs_row, latent_row in zip(*[masks[k] for k in ['obs', 'latent']]):
+            selected_indices = set()
+            while True:
+                indices = th.tensor(self.sample_some_indices(max_indices=N, T=T))
+                new_indices = [i.item() for i in indices if i not in selected_indices]
+                if len(new_indices) > N - len(selected_indices)\
+                    or len(new_indices) == N - len(selected_indices) == 0:
+                    break
+                selected_indices.update(new_indices)
+            selected_indices = sorted(list(selected_indices))
+            obs_row[selected_indices[:N//2]] = 1.
+            latent_row[selected_indices[N//2:]] = 1.
+
+        if len(set_masks['obs']) > 0:  # set_masks allow us to choose informative masks for logging
+            for k in masks:
+                set_values = set_masks[k]
+                n_set = min(len(set_values), len(masks[k]))
+                masks[k][:n_set] = set_values[:n_set]
+        any_mask = (masks['obs'] + masks['latent']).to(th.float32).clip(max=1).to(masks['obs'].dtype)
+        if not gather:
+            return batch1, masks['obs'], masks['latent']
+        batch, (obs_mask, latent_mask), frame_indices =\
+            self.prepare_training_batch(any_mask, batch1, batch2, (masks['obs'], masks['latent']))
+
         return batch, frame_indices, obs_mask, latent_mask
 
     def prepare_training_batch(self, mask, batch1, batch2, tensors):
@@ -363,6 +393,8 @@ class TrainLoop:
                 micro, frame_indices, obs_mask, latent_mask = self.get_joint_masks(micro1)
             elif self.masking_mode == "flexible":
                 micro, frame_indices, obs_mask, latent_mask = self.sample_all_masks(micro1, micro2)
+            elif self.masking_mode == "autoflex":
+                micro, frame_indices, obs_mask, latent_mask = self.get_autoregressive_flexible_masks(micro1)
             else:
                 raise ValueError(f"Unknown masking mode: {self.masking_mode}")
 

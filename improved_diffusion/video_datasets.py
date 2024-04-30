@@ -15,8 +15,8 @@ from .test_util import Protect
 CONTINUAL_DATASETS = ["streaming_ball", "streaming_mine"]
 
 video_data_paths_dict = {
-    "ball":                "datasets/ball1m",
-    "streaming_ball":      "datasets/ball1m",
+    "ball":                "datasets/2balls1m",  # "datasets/ball1m",
+    "streaming_ball":      "datasets/2balls1m",  # "datasets/ball1m",
     "mine":                "datasets/continual_minecraft",
     "streaming_mine":      "datasets/continual_minecraft",
     "minerl":              "datasets/minerl_navigate-torch",
@@ -221,7 +221,6 @@ class ChunkedBaseDataset(Dataset):
         self.T = T
         self.path = Path(path)
         self.is_test = False
-        # assert self.T == 1  # FIXME: Consider changing this. Right now, the class only returns a single frame per timestep.
         
         config = json.load(open(self.path / 'config.json'))
         self.T_total = config['T_total']

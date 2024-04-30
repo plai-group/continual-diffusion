@@ -16,44 +16,62 @@ def ar(x, y, z):
 
 
 # def get_kernel_maxacts(frame, kernels):
-#     frame = frame / frame.flatten(-3).norm(dim=-1).reshape(-1, 1, 1, 1)
-#     kernels = kernels / kernels.flatten(-3).norm(dim=-1).reshape(-1, 1, 1, 1)
-#     outputs = torch.nn.functional.conv2d(frame, kernels)
-#     best_score, kernel_idx, loc = -float('inf'), None, None
-#     for k, output in enumerate(outputs[0]):
-#         max_score = output.max()
-#         max_loc = (output==max_score).nonzero()[0, -2:].tolist()
-#         if max_score > best_score:
-#             best_score = max_score
+#     kernel_size = kernels.size(-1)
+#     _, C, width, height = frame.shape
+
+#     frame_unfolded = frame.unfold(2, kernel_size, 1).unfold(3, kernel_size, 1).permute(0, 2, 3, 1, 4, 5)
+#     frame_unfolded = frame_unfolded.reshape(-1, C, kernel_size, kernel_size)
+#     best_score, kernel_idx, loc = float('inf'), None, None
+#     scores, locs = [], []
+#     for k, kernel in enumerate(kernels):
+#         distances = (kernel - frame_unfolded).norm(2, dim=(1, 2, 3))
+#         best_match_indices = torch.argmin(distances)
+#         min_loc = torch.unravel_index(best_match_indices, (width - kernel_size + 1, height - kernel_size + 1))
+#         min_dist = distances.min().item()
+#         scores.append(min_dist)
+#         locs.append(min_loc)
+#         if min_dist < best_score:
+#             best_score = min_dist
 #             kernel_idx = k
-#             loc = max_loc
-#     return loc, kernel_idx
+#             loc = min_loc
+#     return loc, kernel_idx  # frame[0,1,20:28,16:24]
 
 
-def get_kernel_maxacts(frame, kernels):
+def get_kernel_maxacts(frame, kernels, n_max=1):
     kernel_size = kernels.size(-1)
     _, C, width, height = frame.shape
-
     frame_unfolded = frame.unfold(2, kernel_size, 1).unfold(3, kernel_size, 1).permute(0, 2, 3, 1, 4, 5)
     frame_unfolded = frame_unfolded.reshape(-1, C, kernel_size, kernel_size)
-    best_score, kernel_idx, loc = float('inf'), None, None
-    scores, locs = [], []
+
+    best_stats = [(None, float('inf'), None)] * n_max  # location, distance, kernel index
     for k, kernel in enumerate(kernels):
         distances = (kernel - frame_unfolded).norm(2, dim=(1, 2, 3))
-        best_match_indices = torch.argmin(distances)
-        min_loc = torch.unravel_index(best_match_indices, (width - kernel_size + 1, height - kernel_size + 1))
-        min_dist = distances.min().item()
-        scores.append(min_dist)
-        locs.append(min_loc)
-        if min_dist < best_score:
-            best_score = min_dist
-            kernel_idx = k
-            loc = min_loc
-    return loc, kernel_idx  # frame[0,1,20:28,16:24]
+        topk_result = torch.topk(distances, k=n_max, largest=False)
+        best_match_indices, min_dists = topk_result.indices, topk_result.values
+        min_locs = torch.unravel_index(best_match_indices, (width - kernel_size + 1, height - kernel_size + 1))
+        min_locs = torch.stack(min_locs, dim=0).transpose(0, 1)
+        curr_stats = [(loc.tolist(), dist.item(), k) for loc, dist in zip(min_locs, min_dists)]
+        best_stats = sorted(best_stats+curr_stats, key=lambda e: e[1])[:n_max]
+    locs, kernel_idxs = [e[0] for e in best_stats], [e[2] for e in best_stats]
+    return locs, kernel_idxs
+
+
+def align_balls(traj, color):
+    result = [(traj[0], color[0])]
+    for t, (locs_next, c_next) in enumerate(zip(traj[1:], color[1:])):
+        distances = torch.cdist(torch.FloatTensor(traj[t]), torch.FloatTensor(locs_next))
+        min_locs = torch.topk(distances, k=1, largest=False).indices
+        # assert len(min_locs) == len(min_locs.unique())
+        to_add_traj, to_add_color = [], []
+        for min_loc in min_locs:
+            to_add_traj.append(locs_next[min_loc])
+            to_add_color.append(c_next[min_loc])
+        result.append([to_add_traj, to_add_color])
+    return [e[0] for e in result], [e[1] for e in result]
 
 
 def compute_minADE_exemplar(test_frames: torch.Tensor, all_sample_frames: List[torch.Tensor],
-                            kernels: torch.Tensor, T: int, batch_size: int):
+                            kernels: torch.Tensor, T: int, n_balls: int):
     num_samples = len(all_sample_frames)
     test_traj = []
     test_color = []
@@ -61,30 +79,34 @@ def compute_minADE_exemplar(test_frames: torch.Tensor, all_sample_frames: List[t
     sample_colors = [[] for _ in range(num_samples)]
     for t in range(T):
         test_frame = test_frames[0, t]
-        test_loc, test_kernel = get_kernel_maxacts(test_frame.unsqueeze(0), kernels)
+        test_loc, test_kernel = get_kernel_maxacts(test_frame.unsqueeze(0), kernels, n_balls)
         test_traj.append(test_loc)
         test_color.append(test_kernel)
 
         for sample_idx in range(num_samples):
             sample_frame = all_sample_frames[sample_idx][0, t]
-            sample_loc, sample_kernel = get_kernel_maxacts(sample_frame.unsqueeze(0), kernels)
+            sample_loc, sample_kernel = get_kernel_maxacts(sample_frame.unsqueeze(0), kernels, n_balls)
             sample_trajs[sample_idx].append(sample_loc)
             sample_colors[sample_idx].append(sample_kernel)
 
+    test_traj, test_color = align_balls(test_traj, test_color)
+    sample_results = [align_balls(traj, color) for traj, color in zip(sample_trajs, sample_colors)]
+    sample_trajs, sample_colors = [e[0] for e in sample_results], [e[1] for e in sample_results]
+
     test_traj = torch.tensor(test_traj).unsqueeze(0).float()
     sample_trajs = torch.tensor(sample_trajs).float()
-    ADEs = (test_traj-sample_trajs).norm(2, dim=-1).mean(dim=-1)
+    ADEs = (test_traj-sample_trajs).norm(2, dim=-1).mean(dim=(-1,-2))
     minADE = torch.min(ADEs).item()
 
     test_color = torch.tensor(test_color).unsqueeze(0)
     sample_colors = torch.tensor(sample_colors)
-    color_accs = (test_color == sample_colors).float().mean(dim=-1)
+    color_accs = (test_color == sample_colors).float().mean(dim=(-1,-2))
     min_color_acc = torch.min(color_accs).item()
 
     return minADE, min_color_acc
 
 
-def compute_minADE(test_dataset, sample_datasets, n_obs, T, batch_size):
+def compute_minADE(test_dataset, sample_datasets, n_obs, T, n_balls):
     minADE = 0.
     test_loader = iter(torch.utils.data.DataLoader(test_dataset, batch_size=1,
                                                    shuffle=False, drop_last=False))
@@ -100,7 +122,7 @@ def compute_minADE(test_dataset, sample_datasets, n_obs, T, batch_size):
     kernels = (
         torch.stack([1. * gaussian_bump, 0. * gaussian_bump, 0. * gaussian_bump], dim=0),  # red ball
         torch.stack([1. * gaussian_bump, 1. * gaussian_bump, 0. * gaussian_bump], dim=0),  # yellow ball
-        torch.stack([1. * gaussian_bump, 1. * gaussian_bump, 1. * gaussian_bump], dim=0),  # white ball
+        torch.stack([0. * gaussian_bump, 1. * gaussian_bump, 0. * gaussian_bump], dim=0),  # green ball
     )
     kernels = torch.stack(kernels, dim=0) * 2 - 1
 
@@ -110,7 +132,7 @@ def compute_minADE(test_dataset, sample_datasets, n_obs, T, batch_size):
     for _ in range(len(test_dataset)):
         test_frames = next(test_loader)[0][:, n_obs:]
         sample_frames = [next(sample_loader)[0][:, n_obs:] for sample_loader in sample_loaders]
-        ADE, acc = compute_minADE_exemplar(test_frames, sample_frames, kernels, T, batch_size)
+        ADE, acc = compute_minADE_exemplar(test_frames, sample_frames, kernels, T, n_balls)
         all_ADEs.append(ADE)
         all_accs.append(acc)
 
@@ -123,10 +145,8 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--eval_dir", type=str, required=True)
     parser.add_argument("--n_obs", type=int, required=True, help="Number of observed frames at the beginning of the video. These are not counted.")
-    parser.add_argument("--num_videos", type=int, default=None,
-                        help="Number of generated samples per test video.")
-    parser.add_argument("--batch_size", type=int, default=6,
-                        help="Batch size for extracting video features the I3D model.")
+    parser.add_argument("--num_videos", type=int, default=None, help="Number of generated samples per test video.")
+    parser.add_argument("--n_balls", type=int, default=2, help="Number of bouncing balls in a video frame.")
     parser.add_argument("--sample_indices", type=int, nargs='+', default=[0])
     parser.add_argument("--T", type=int, default=None, help="Length of the videos. If not specified, it will be inferred from the dataset.")
     parser.add_argument("--eval_on_train", type=str2bool, default=False)
@@ -152,9 +172,6 @@ if __name__ == "__main__":
 
     # Set batch size given dataset if not specified
     args.dataset = model_args.dataset
-    if args.batch_size is None:
-        args.batch_size = {'mazes_cwvae': 16, 'minerl': 8, 'carla_no_traffic': 4, 'carla_no_traffic_2x': 4}[args.dataset]
-
     if args.T is None:
         args.T = model_args.T
 
@@ -172,7 +189,7 @@ if __name__ == "__main__":
     )
 
     T_sample = args.T - args.n_obs
-    minADE, min_color_acc = compute_minADE(test_dataset, sample_datasets, n_obs=args.n_obs, T=T_sample, batch_size=args.batch_size)
+    minADE, min_color_acc = compute_minADE(test_dataset, sample_datasets, n_obs=args.n_obs, T=T_sample, n_balls=args.n_balls)
     np.savetxt(save_path, np.array([minADE]))
     np.savetxt(save_path_color, np.array([min_color_acc]))
     print(f"minADE: {minADE:.5f}, color-acc: {min_color_acc:.5f}")

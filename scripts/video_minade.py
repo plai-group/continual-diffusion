@@ -15,28 +15,6 @@ def ar(x, y, z):
     return z/2+np.arange(x, y, z, dtype='float')
 
 
-# def get_kernel_maxacts(frame, kernels):
-#     kernel_size = kernels.size(-1)
-#     _, C, width, height = frame.shape
-
-#     frame_unfolded = frame.unfold(2, kernel_size, 1).unfold(3, kernel_size, 1).permute(0, 2, 3, 1, 4, 5)
-#     frame_unfolded = frame_unfolded.reshape(-1, C, kernel_size, kernel_size)
-#     best_score, kernel_idx, loc = float('inf'), None, None
-#     scores, locs = [], []
-#     for k, kernel in enumerate(kernels):
-#         distances = (kernel - frame_unfolded).norm(2, dim=(1, 2, 3))
-#         best_match_indices = torch.argmin(distances)
-#         min_loc = torch.unravel_index(best_match_indices, (width - kernel_size + 1, height - kernel_size + 1))
-#         min_dist = distances.min().item()
-#         scores.append(min_dist)
-#         locs.append(min_loc)
-#         if min_dist < best_score:
-#             best_score = min_dist
-#             kernel_idx = k
-#             loc = min_loc
-#     return loc, kernel_idx  # frame[0,1,20:28,16:24]
-
-
 def get_kernel_maxacts(frame, kernels, n_max=1):
     kernel_size = kernels.size(-1)
     _, C, width, height = frame.shape
@@ -46,27 +24,33 @@ def get_kernel_maxacts(frame, kernels, n_max=1):
     best_stats = [(None, float('inf'), None)] * n_max  # location, distance, kernel index
     for k, kernel in enumerate(kernels):
         distances = (kernel - frame_unfolded).norm(2, dim=(1, 2, 3))
-        topk_result = torch.topk(distances, k=n_max, largest=False)
+        topk_result = torch.topk(distances, k=n_max * 4, largest=False)
         best_match_indices, min_dists = topk_result.indices, topk_result.values
         min_locs = torch.unravel_index(best_match_indices, (width - kernel_size + 1, height - kernel_size + 1))
         min_locs = torch.stack(min_locs, dim=0).transpose(0, 1)
         curr_stats = [(loc.tolist(), dist.item(), k) for loc, dist in zip(min_locs, min_dists)]
+
+        # HACK: Ensure the centers of balls are at least 4 pixels away from the best match location for this ball.
+        curr_stats = [curr_stats[0]] + [stat for stat in curr_stats if (torch.tensor(stat[0])-min_locs[0]).float().norm()>4]
+
         best_stats = sorted(best_stats+curr_stats, key=lambda e: e[1])[:n_max]
     locs, kernel_idxs = [e[0] for e in best_stats], [e[2] for e in best_stats]
     return locs, kernel_idxs
 
 
 def align_balls(traj, color):
-    result = [(traj[0], color[0])]
+    first_frame_info = sorted(zip(traj[0], color[0]), key=lambda e: e[0])
+    result = [([e[0] for e in first_frame_info], [e[1] for e in first_frame_info])]
+
     for t, (locs_next, c_next) in enumerate(zip(traj[1:], color[1:])):
-        distances = torch.cdist(torch.FloatTensor(traj[t]), torch.FloatTensor(locs_next))
+        distances = torch.cdist(torch.FloatTensor(result[t][0]), torch.FloatTensor(locs_next))
         min_locs = torch.topk(distances, k=1, largest=False).indices
-        # assert len(min_locs) == len(min_locs.unique())
+        assert len(min_locs) == len(min_locs.unique()), "Each location must uniquely be assigned to a ball."
         to_add_traj, to_add_color = [], []
         for min_loc in min_locs:
             to_add_traj.append(locs_next[min_loc])
             to_add_color.append(c_next[min_loc])
-        result.append([to_add_traj, to_add_color])
+        result.append((to_add_traj, to_add_color))
     return [e[0] for e in result], [e[1] for e in result]
 
 
@@ -101,9 +85,9 @@ def compute_minADE_exemplar(test_frames: torch.Tensor, all_sample_frames: List[t
     test_color = torch.tensor(test_color).unsqueeze(0)
     sample_colors = torch.tensor(sample_colors)
     color_accs = (test_color == sample_colors).float().mean(dim=(-1,-2))
-    min_color_acc = torch.min(color_accs).item()
+    max_color_acc = torch.min(color_accs).item()
 
-    return minADE, min_color_acc
+    return minADE, max_color_acc
 
 
 def compute_minADE(test_dataset, sample_datasets, n_obs, T, n_balls):
@@ -137,8 +121,8 @@ def compute_minADE(test_dataset, sample_datasets, n_obs, T, n_balls):
         all_accs.append(acc)
 
     minADE = sum(all_ADEs)/len(all_ADEs)
-    min_color_acc = sum(all_accs)/len(all_accs)
-    return minADE, min_color_acc
+    max_color_acc = sum(all_accs)/len(all_accs)
+    return minADE, max_color_acc
 
 
 if __name__ == "__main__":
@@ -159,11 +143,11 @@ if __name__ == "__main__":
         save_path = Path(args.eval_dir) / f"minADE-{args.num_videos}.txt"
         save_path_color = Path(args.eval_dir) / f"color-acc-{args.num_videos}.txt"
 
-    if save_path.exists():
-        content = np.loadtxt(save_path).squeeze()
-        print(f"minADE/min_color_acc already computed: {content}")
-        print(f"Results at\n{save_path}\n{save_path_color}")
-        exit(1)
+    # if save_path.exists():
+    #     content = np.loadtxt(save_path).squeeze()
+    #     print(f"minADE/max_color_acc already computed: {content}")
+    #     print(f"Results at\n{save_path}\n{save_path_color}")
+    #     exit(0)
 
     # Load model args
     model_args_path = Path(args.eval_dir) / "model_config.json"
@@ -189,8 +173,8 @@ if __name__ == "__main__":
     )
 
     T_sample = args.T - args.n_obs
-    minADE, min_color_acc = compute_minADE(test_dataset, sample_datasets, n_obs=args.n_obs, T=T_sample, n_balls=args.n_balls)
+    minADE, max_color_acc = compute_minADE(test_dataset, sample_datasets, n_obs=args.n_obs, T=T_sample, n_balls=args.n_balls)
     np.savetxt(save_path, np.array([minADE]))
-    np.savetxt(save_path_color, np.array([min_color_acc]))
-    print(f"minADE: {minADE:.5f}, color-acc: {min_color_acc:.5f}")
+    np.savetxt(save_path_color, np.array([max_color_acc]))
+    print(f"minADE: {minADE:.5f}, color-acc: {max_color_acc:.5f}")
     print(f"Results saved to\n{save_path}\n{save_path_color}")

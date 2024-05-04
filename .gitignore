@@ -4,7 +4,9 @@ datasets/ball
 datasets/ball500k
 datasets/ball1m
 datasets/2balls1m
-datasets/continual_minecraft/*
+datasets/continual_minecraft
+datasets/windows_maze
+
 wandb
 checkpoints
 results

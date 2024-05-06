@@ -15,6 +15,50 @@ def ar(x, y, z):
     return z/2+np.arange(x, y, z, dtype='float')
 
 
+def kl_div(ps, qs):
+    results = []
+    for p1, p2 in zip(ps, qs):
+        result = 0.
+        for b1, b2 in zip(p1, p2):
+            if b1 > 0:
+                result += b1 * (b1 / b2).log() if b2>0 else float('inf')
+        results.append(result)
+    return sum(results)/len(results)
+
+
+def compute_color_transition_stats(sample_colors, n_obs):
+    """
+    Compute how many times the ball transitioned from one color to another for each color pairs.
+    - sample_colors shape: <n_seeds x n_timesteps, x n_balls>
+    - output shape: <n_seed>
+    """
+    n_seeds, n_timesteps, n_balls = sample_colors.shape
+    transition_stats = torch.zeros(n_seeds, 3, 3)
+    # transition_accs = torch.zeros(n_seeds)
+    # gt_dict = {(0): (1,2), (1): (0), (2): (0), (0,1): (0), (0,2): (0), (1,0): (2), (2,0): (1),
+    #            (0,1,0): (2), (1,0,2): (0), (0,2,0): (1), (2,0,1): (0)}
+
+    for s in range(n_seeds):
+        for b in range(n_balls):
+            prev_color = sample_colors[s, 0, b]
+            # color_window = (prev_color)
+            for t in range(1, n_timesteps):
+                curr_color = sample_colors[s, t, b]
+                if prev_color != curr_color:
+                    # color change detected during model sampling
+                    if t >= n_obs:
+                        # reached model generated part of the video
+                        # true_color = gt_dict[color_window] if color_window in gt_dict else -1
+                        # transition_accs[s] += 1 if curr_color == true_color else 0
+                        transition_stats[s, prev_color, curr_color] += 1
+                    # color_window = (*color_window[-2:], curr_color)
+                prev_color = curr_color
+
+    # transition_accs = transition_accs/(n_timesteps-n_obs)
+    transition_stats = transition_stats/transition_stats.sum(dim=-1, keepdim=True)
+    return transition_stats
+
+
 def get_kernel_maxacts(frame, kernels, n_max=1):
     kernel_size = kernels.size(-1)
     _, C, width, height = frame.shape
@@ -55,7 +99,7 @@ def align_balls(traj, color):
 
 
 def compute_minADE_exemplar(test_frames: torch.Tensor, all_sample_frames: List[torch.Tensor],
-                            kernels: torch.Tensor, T: int, n_balls: int):
+                            kernels: torch.Tensor, T: int, n_balls: int, n_obs: int):
     num_samples = len(all_sample_frames)
     test_traj = []
     test_color = []
@@ -79,15 +123,16 @@ def compute_minADE_exemplar(test_frames: torch.Tensor, all_sample_frames: List[t
 
     test_traj = torch.tensor(test_traj).unsqueeze(0).float()
     sample_trajs = torch.tensor(sample_trajs).float()
-    ADEs = (test_traj-sample_trajs).norm(2, dim=-1).mean(dim=(-1,-2))
+    ADEs = (test_traj[:, n_obs:] - sample_trajs[:, n_obs:]).norm(2, dim=-1).mean(dim=(-1,-2))
     minADE = torch.min(ADEs).item()
 
     test_color = torch.tensor(test_color).unsqueeze(0)
     sample_colors = torch.tensor(sample_colors)
-    color_accs = (test_color == sample_colors).float().mean(dim=(-1,-2))
-    max_color_acc = torch.min(color_accs).item()
+    color_accs = (test_color[:, n_obs:] == sample_colors[:, n_obs:]).float().mean(dim=(-1,-2))
+    max_color_acc = torch.max(color_accs).item()
+    transition_stats = compute_color_transition_stats(sample_colors, n_obs)
 
-    return minADE, max_color_acc
+    return minADE, max_color_acc, transition_stats
 
 
 def compute_minADE(test_dataset, sample_datasets, n_obs, T, n_balls):
@@ -112,17 +157,23 @@ def compute_minADE(test_dataset, sample_datasets, n_obs, T, n_balls):
 
     # TODO: Have 3 kernels for red, white, yellow
 
-    all_ADEs, all_accs = [], []
+    all_ADEs, all_accs, all_transitions = [], [], []
     for _ in range(len(test_dataset)):
-        test_frames = next(test_loader)[0][:, n_obs:]
-        sample_frames = [next(sample_loader)[0][:, n_obs:] for sample_loader in sample_loaders]
-        ADE, acc = compute_minADE_exemplar(test_frames, sample_frames, kernels, T, n_balls)
+        test_frames = next(test_loader)[0]
+        sample_frames = [next(sample_loader)[0] for sample_loader in sample_loaders]
+        ADE, acc, transitions = compute_minADE_exemplar(test_frames, sample_frames, kernels, T, n_balls, n_obs)
         all_ADEs.append(ADE)
         all_accs.append(acc)
+        all_transitions.append(transitions)
 
     minADE = sum(all_ADEs)/len(all_ADEs)
     max_color_acc = sum(all_accs)/len(all_accs)
-    return minADE, max_color_acc
+    
+    total_transition_stats = sum(all_transitions).mean(dim=0)
+    total_transition_stats = total_transition_stats/total_transition_stats.sum(dim=-1, keepdim=True)
+    true_transition_stats = torch.tensor([[0.,0.5,0.5], [1.,0.,0.], [1.,0.,0.]])
+    transition_kl = kl_div(total_transition_stats, true_transition_stats)
+    return minADE, max_color_acc, transition_kl
 
 
 if __name__ == "__main__":
@@ -139,9 +190,11 @@ if __name__ == "__main__":
     if args.eval_on_train:
         save_path = Path(args.eval_dir) / f"minADE-{args.num_videos}-train.txt"
         save_path_color = Path(args.eval_dir) / f"color-acc-{args.num_videos}-train.txt"
+        save_path_transition = Path(args.eval_dir) / f"trans-kl-{args.num_videos}-train.txt"
     else:
         save_path = Path(args.eval_dir) / f"minADE-{args.num_videos}.txt"
         save_path_color = Path(args.eval_dir) / f"color-acc-{args.num_videos}.txt"
+        save_path_transition = Path(args.eval_dir) / f"trans-kl-{args.num_videos}.txt"
 
     # if save_path.exists():
     #     content = np.loadtxt(save_path).squeeze()
@@ -173,8 +226,9 @@ if __name__ == "__main__":
     )
 
     T_sample = args.T - args.n_obs
-    minADE, max_color_acc = compute_minADE(test_dataset, sample_datasets, n_obs=args.n_obs, T=T_sample, n_balls=args.n_balls)
+    minADE, max_color_acc, transition_kl = compute_minADE(test_dataset, sample_datasets, n_obs=args.n_obs, T=T_sample, n_balls=args.n_balls)
     np.savetxt(save_path, np.array([minADE]))
     np.savetxt(save_path_color, np.array([max_color_acc]))
-    print(f"minADE: {minADE:.5f}, color-acc: {max_color_acc:.5f}")
-    print(f"Results saved to\n{save_path}\n{save_path_color}")
+    np.savetxt(save_path_transition, np.array([transition_kl]))
+    print(f"minADE: {minADE:.5f}, color-acc: {max_color_acc:.5f}, trans-kl: {transition_kl:.5f}")
+    print(f"Results saved to\n{save_path}\n{save_path_color}\n{save_path_transition}")

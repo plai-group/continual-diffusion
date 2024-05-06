@@ -247,6 +247,8 @@ class BaseDataset(Dataset):
 class ChunkedBaseDataset(Dataset):
     # __getitem__ returns data of shape <1 x self.T x ...>
     def __init__(self, path, T=1):
+        # NOTE: self.chunk_size denotes the number of frames present in each npy file.
+        #       self.T denotes the number of frames that the dataset should return to the model per item.
         super().__init__()
         self.T = T
         self.path = Path(path)

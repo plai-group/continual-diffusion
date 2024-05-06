@@ -36,7 +36,10 @@ def video_to_npy(video_path, save_dir, resolution=(64, 64), chunk_size=10000):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--video_path", type=str, default="datasets/continual_minecraft/MC16min.mp4", help="64x64 video with 10fps")
+    parser.add_argument("--train_video_path", type=str, default="datasets/continual_minecraft/MC16min.mp4",
+                        help="video stream to train on.")
+    parser.add_argument("--test_video_path", type=str, default="datasets/continual_minecraft/MC16min.mp4",
+                        help="video stream to test on.")
     parser.add_argument("--save_dir", type=str, default="datasets/continual_minecraft")
     parser.add_argument("--chunk_size", type=int, default=10000)
     parser.add_argument("--resolution", type=int, default=64)
@@ -48,9 +51,9 @@ if __name__ == "__main__":
     os.makedirs(train_path, exist_ok=True)
     os.makedirs(test_path, exist_ok=True)
 
-    n_frames_train = video_to_npy(video_path=args.video_path, resolution=(args.resolution, args.resolution),
+    n_frames_train = video_to_npy(video_path=args.train_video_path, resolution=(args.resolution, args.resolution),
                                   chunk_size=args.chunk_size, save_dir=train_path)
-    n_frames_test = video_to_npy(video_path=args.video_path, resolution=(args.resolution, args.resolution),
+    n_frames_test = video_to_npy(video_path=args.test_video_path, resolution=(args.resolution, args.resolution),
                                  chunk_size=args.chunk_size, save_dir=test_path)
     args.T_total = n_frames_train
 

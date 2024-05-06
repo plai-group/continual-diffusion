@@ -246,7 +246,6 @@ if __name__ == "__main__":
 
     # Load the dataset (to get observations from)
     dataset = get_test_dataset(dataset_name=model_args.dataset, T=args.T)
-    args.T = dataset.T
 
     if args.eval_on_train:
         dataset.is_test = False

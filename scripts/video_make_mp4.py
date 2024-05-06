@@ -17,6 +17,7 @@ if __name__ == "__main__":
     parser.add_argument("--out_dir", type=str, default=None)
     parser.add_argument("--add_gt", type=str2bool, default=True)
     parser.add_argument("--do_n", type=int, default=1)
+    parser.add_argument("--start_idx", type=int, default=0)
     parser.add_argument("--n_seeds", type=int, default=1)
     parser.add_argument("--obs_length", type=int, default=0,
                         help="Number of observed images. If positive, marks the first obs_length frames in output gifs by a red border.")
@@ -28,7 +29,7 @@ if __name__ == "__main__":
     videos_prefix = "videos_train" if args.eval_on_train else "videos"
     if args.add_gt:
         try:  # Infer T from sampled video
-            T = len(np.load(Path(args.eval_dir) / samples_prefix / f"sample_0000-0.npy"))
+            T = len(np.load(Path(args.eval_dir) / samples_prefix / f"sample_{args.start_idx:04d}-0.npy"))
         except PermissionError:
             T = None
         model_args_path = Path(args.eval_dir) / "model_config.json"
@@ -42,7 +43,7 @@ if __name__ == "__main__":
     out_path = out_dir / f"{args.do_n}_{args.n_seeds}.{args.format}"
 
     videos = []
-    for data_idx in range(args.do_n):
+    for data_idx in range(args.start_idx, args.start_idx+args.do_n):
         if args.add_gt:
 
             gt_drange = [-1, 1]

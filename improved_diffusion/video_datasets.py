@@ -15,8 +15,10 @@ from .test_util import Protect
 CONTINUAL_DATASETS = ["streaming_ball", "streaming_mine"]
 
 video_data_paths_dict = {
-    "ball":                "datasets/ball1m",
-    "streaming_ball":      "datasets/ball1m",
+    "ball":                "datasets/2balls1m",  # "datasets/ball1m",
+    "streaming_ball":      "datasets/2balls1m",  # "datasets/ball1m",
+    "wmaze":               "datasets/windows_maze",
+    "streaming_wmaze":     "datasets/windows_maze",
     "mine":                "datasets/continual_minecraft",
     "streaming_mine":      "datasets/continual_minecraft",
     "minerl":              "datasets/minerl_navigate-torch",
@@ -29,6 +31,8 @@ video_data_paths_dict = {
 default_T_dict = {
     "ball":                10,
     "streaming_ball":      1,
+    "wmaze":               20,
+    "streaming_wmaze":     1,
     "mine":                500,
     "streaming_mine":      1,
     "minerl":              500,
@@ -41,6 +45,8 @@ default_T_dict = {
 default_image_size_dict = {
     "ball":                32,
     "streaming_ball":      32,
+    "wmaze":               64,
+    "streaming_wmaze":     64,
     "mine":                64,
     "streaming_mine":      64,
     "minerl":              64,
@@ -64,6 +70,11 @@ def load_data(dataset_name, batch_size, T=None, deterministic=False, num_workers
         dataset = BallDataset(data_path, shard=shard, num_shards=num_shards, T=T)
     elif dataset_name == "streaming_ball":
         dataset = BallDataset(data_path, shard=shard, num_shards=num_shards, T=1)
+        deterministic = True
+    elif dataset_name == "wmaze":
+        dataset = WindowsMazeDataset(data_path, shard=shard, num_shards=num_shards, T=T)
+    elif dataset_name == "streaming_wmaze":
+        dataset = WindowsMazeDataset(data_path, shard=shard, num_shards=num_shards, T=1)
         deterministic = True
     elif dataset_name == "mine":
         dataset = MineDataset(data_path, shard=shard, num_shards=num_shards, T=T)
@@ -116,6 +127,14 @@ def get_test_dataset(dataset_name, T=None):
         dataset = BallDataset(data_path, shard=0, num_shards=1, T=T)
     elif dataset_name == "streaming_ball":
         dataset = BallDataset(data_path, shard=0, num_shards=1, T=T)
+    elif dataset_name == "wmaze":
+        dataset = WindowsMazeDataset(data_path, shard=0, num_shards=1, T=T)
+    elif dataset_name == "streaming_wmaze":
+        dataset = WindowsMazeDataset(data_path, shard=0, num_shards=1, T=T)
+    elif dataset_name == "mine":
+        dataset = MineDataset(data_path, shard=0, num_shards=1, T=T)
+    elif dataset_name == "streaming_mine":
+        dataset = MineDataset(data_path, shard=0, num_shards=0, T=T)
     elif dataset_name == "minerl":
         data_path = os.path.join(data_path, "test")
         dataset = MineRLDataset(data_path, shard=0, num_shards=1, T=T)
@@ -232,7 +251,6 @@ class ChunkedBaseDataset(Dataset):
         self.T = T
         self.path = Path(path)
         self.is_test = False
-        # assert self.T == 1  # FIXME: Consider changing this. Right now, the class only returns a single frame per timestep.
         
         config = json.load(open(self.path / 'config.json'))
         self.T_total = config['T_total']
@@ -302,6 +320,32 @@ class ChunkedBaseDataset(Dataset):
 
 
 class BallDataset(ChunkedBaseDataset):
+    def __init__(self, path, shard, num_shards, T):
+        assert shard == 0, "Distributed training is not supported by the Bouncing Ball dataset yet."
+        assert num_shards == 1, "Distributed training is not supported by the Bouncing Ball dataset yet."
+        super().__init__(path=path, T=T)
+
+    def getitem_path(self, idx):
+        chunk_idx = (idx * self.T) // self.chunk_size
+        return self.path / (("test" if self.is_test else "train") + "/" + f"{chunk_idx}.npy")
+
+    def loaditem(self, path):
+        return np.load(path)
+
+    def postprocess_video(self, video):
+        byte_to_tensor = lambda x: ToTensor()(x)
+        video = th.stack([byte_to_tensor(frame).float() for frame in video])
+        video = 2 * video - 1
+        return video
+
+
+class WindowsMazeDataset(ChunkedBaseDataset):
+    """
+    Youtube video download and preprocessing
+
+    yt-dlp "https://www.youtube.com/watch?v=MHGnSqr9kK8&ab_channel=Dprotp" -S res:256
+    ffmpeg -i '10 Hours of Windows 3D Maze [MHGnSqr9kK8].webm' -filter:v "fps=30,crop=240:240:30:0,scale=64:64" windows_maze_10h_r64.mp4
+    """
     def __init__(self, path, shard, num_shards, T):
         assert shard == 0, "Distributed training is not supported by the Bouncing Ball dataset yet."
         assert num_shards == 1, "Distributed training is not supported by the Bouncing Ball dataset yet."

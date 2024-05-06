@@ -12,7 +12,7 @@ Example Run Command: python scripts/collect_results.py
                      --output_dir ball_train_hierarchy
                      --video_path=ema_0.9999_500000/hierarchy-3_10_5_50_10/videos_train/0.mp4
 
-python scripts/collect_results.py --wandb_ids dhwmkuiq 1fyc5svh 9ewarb2a 79vf3yni piexv54k --nicknames auto joint flex50 flex50attentive flex20 --txt_path=ema_0.9999_500000/hierarchy-3_10_5_50_10/fvd-500-0-train.txt --output_dir ball_train_hierarchy --video_path=ema_0.9999_500000/hierarchy-3_10_5_50_10/videos_train/0.mp4
+python scripts/collect_results.py --wandb_ids dhwmkuiq 1fyc5svh 9ewarb2a 79vf3yni piexv54k --nicknames auto joint flex50 flex50attentive flex20 --txt_paths ema_0.9999_500000/hierarchy-3_10_5_50_10/fvd-500-0-train.txt --output_dir ball_train_hierarchy --video_path=ema_0.9999_500000/hierarchy-3_10_5_50_10/videos_train/0.mp4
 """
 
 
@@ -20,16 +20,15 @@ def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument('--nicknames', type=str, nargs='+', default=None)
     parser.add_argument('--wandb_ids', type=str, nargs='+', required=True)
-    parser.add_argument('--txt_path', type=str, required=True)
+    parser.add_argument('--txt_paths', type=str, nargs='+', required=True)
     parser.add_argument('--output_dir', type=str, default='ball')
     parser.add_argument('--video_path', type=str, default=None)
     return parser.parse_args()
 
 
-import matplotlib.pyplot as plt
 import imageio
 import numpy as np
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw
 
 
 def stack_gifs_with_labels(input_paths, nicknames, output_path):
@@ -105,41 +104,51 @@ def main(args):
     os.makedirs(output_dir, exist_ok=True)
     nicknames = args.nicknames if args.nicknames else [f"config_{i}" for i in range(len(args.wandb_ids))]
 
-    # result = {'nickname': [], 'score': [], 'wandb': []}
-    result = {'nickname': [], 'score': [], 'wandb': [], 'gif_paths': []}
+    result = {'nickname': [], 'wandb': []}
+    for txt_path in args.txt_paths:
+        metric = txt_path.split('/')[-1].split('.')[0]
+        result[metric] = []
+
     for nickname, id in zip(nicknames, args.wandb_ids):
-        path = f"results/{id}/{args.txt_path}"
-        try:
-            print(f"Reading {path} ({nickname})")
-            with open(path, 'r') as f:
-                content = f.read()
-        except FileNotFoundError:
-            print(f"WARNING - File for {nickname} not found: {path}")
-            continue
         result['nickname'].append(nickname)
-        result['score'].append(float(content))
         result['wandb'].append(id)
 
-        if args.video_path is not None:
-            os.makedirs(f"{output_dir}/gifs", exist_ok=True)
+        for txt_path in args.txt_paths:
+            metric = txt_path.split('/')[-1].split('.')[0]
+            path = f"results/{id}/{txt_path}"
+            try:
+                print(f"Reading {path} ({nickname})")
+                with open(path, 'r') as f:
+                    content = f.read()
+            except FileNotFoundError:
+                print(f"WARNING - File for {nickname} not found: {path}")
+                result[metric].append(float('nan'))
+                continue
+            result[metric].append(float(content))
+
+    df = pd.DataFrame(result)
+    out_path = f"{output_dir}/summary.csv"
+    df.to_csv(out_path, index=False)
+    print(f"saved results to {out_path}.")
+
+    if args.video_path is not None:
+        os.makedirs(f"{output_dir}/gifs", exist_ok=True)
+        gif_paths = []
+        gif_nicknames = []
+        for nickname, id in zip(nicknames, args.wandb_ids):
             try:
                 video_path = f"results/{id}/{args.video_path}"
                 video_out_path = f"{output_dir}/gifs/{nickname}.{args.video_path.split('.')[-1]}"
                 shutil.copy(video_path, video_out_path)
             except Exception as e:
                 print(f"WARNING - Video copy failed for {nickname} with error: {e}")
-            result['gif_paths'].append(video_path)
-
-    df = pd.DataFrame(result)
-    out_path = f"{output_dir}/{args.txt_path.split('/')[-1].split('.')[0]}.csv"
-    df.to_csv(out_path, index=False)
-    print(f"saved results to {out_path}.")
-
-    if len(result['gif_paths']) > 0:
-        gif_paths = result['gif_paths']
-        labels = result['nickname']
+                continue
+            gif_nicknames.append(nickname)
+            gif_paths.append(video_path)
         out_path = f"{output_dir}/summary.gif"
-        stack_gifs_with_labels(gif_paths, labels, out_path)
+        stack_gifs_with_labels(gif_paths, gif_nicknames, f"{output_dir}/summary.gif")
+        print(f"saved gifs to {out_path}")
+
 
 if __name__ == "__main__":
     args = parse_args()

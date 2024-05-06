@@ -3,8 +3,10 @@ datasets/cifar_*
 datasets/ball
 datasets/ball500k
 datasets/ball1m
-datasets/ball1m_old
-datasets/continual_minecraft/*
+datasets/2balls1m
+datasets/continual_minecraft
+datasets/windows_maze
+
 wandb
 checkpoints
 results

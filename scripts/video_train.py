@@ -85,10 +85,13 @@ def main():
         "pixel": 3,
         "latent": 4,
     }[args.diffusion_space]
+
     args.replay_dataset_kwargs = {
         "stm_size": args.T if args.stm_size == -1 else args.stm_size,
         "ltm_size": args.ltm_size,
         "mem_batch_size": args.T if args.stm_size == -1 else args.stm_size,
+        "n_sample_stm": args.batch_size if args.n_sample_stm == -1 else args.n_sample_stm,
+        "n_sample_ltm": args.n_sample_ltm,
     }
     args.diffusion_space_kwargs = {
         "diffusion_space": args.diffusion_space,
@@ -169,8 +172,10 @@ def create_argparser():
         enc_dec_chunk_size=20,
         T=-1,
         sample_interval=50000,
-        stm_size=-1,  # Only used for flexible sampling (masking_mode == "flexible")
+        stm_size=-1,  # Only used for flexible and streaming sampling (masking_mode == "flexible")
         ltm_size=-1,
+        n_sample_stm=-1,
+        n_sample_ltm=1,
         steps_per_experience=1,
         masking_mode="flexible",
         attentive_er=False,  # If true, the model attends to replay frames

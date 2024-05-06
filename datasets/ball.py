@@ -20,6 +20,7 @@ COLORS = dict(red=(1, 0, 0), yellow=(1, 1, 0), green=(0, 1, 0))
 COLOR_TRANSITION = {('green','red'): 'yellow', ('yellow','red'): 'green',
                     ('red','green'): 'red', ('red','yellow'): 'red',
                     (None, 'red'): 'yellow', (None, 'green'): 'red', (None, 'yellow'): 'red'}
+BALL_POSITIONS_FILENAME = "ball_positions.npy"
 
 
 def norm(x): return sqrt((x**2).sum())
@@ -71,19 +72,23 @@ def bounce_n(T=128, n=2, r=None, m=None):
                     good_config = False
 
     eps = .5
-    curr_color, prev_color = 'red', None
+    curr_colors = ['red'] * n
+    prev_colors = [None] * n
     for t in range(T):
         # for how long do we show small simulation
 
         for i in range(n):
+            curr_color = curr_colors[i]
+            prev_color = prev_colors[i]
+
             X[t, i] = x[i]
             V[t, i] = v[i]
             C[t, i] = COLORS[curr_color]
 
             if t>0 and direction_changed(V[t-1,i], V[t,i]):
                 next_color = COLOR_TRANSITION[(prev_color, curr_color)]
-                prev_color = curr_color
-                curr_color = next_color
+                prev_colors[i] = curr_color
+                curr_colors[i] = next_color
 
         for mu in range(int(1/eps)):
 
@@ -171,6 +176,9 @@ def bounce_vec(save_dir, res, n=2, T=128, chunk_size=100, r=None, m=None):
     if r is None:
         r = array([1.2]*n)
     x, v, c = bounce_n(T, n, r, m)  # x: <seq_len x num_balls x 2>
+    if save_dir is not None:
+        with open(f"{save_dir}/{BALL_POSITIONS_FILENAME}", 'wb') as f:
+            save(f, x)
     return matricize(x, v, res, chunk_size, save_dir, r, c)
 
 

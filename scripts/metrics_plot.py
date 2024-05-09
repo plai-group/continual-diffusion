@@ -13,10 +13,10 @@ def parse_args():
     return parser.parse_args()
 
 def plot_metrics(csv_paths, out_path, nicknames):
-    fig, ax = plt.subplots(3, sharex=True)
     dfs = [pd.read_csv(path) for path in csv_paths]
     steps = [int(path.split('/')[-2].split('_')[-1][1:]) for path in csv_paths]
     metrics = [c for c in dfs[0].columns if c not in ['nickname', 'wandb']]
+    fig, ax = plt.subplots(len(metrics), sharex=True)
 
     for mid, metric in enumerate(metrics):
         all_metric_info = dfs[0][['nickname', metric]].rename(columns={metric: f"{metric}_{steps[0]}"})

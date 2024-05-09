@@ -101,7 +101,7 @@ def sample_video(args, model, diffusion, batch, just_get_indices=False):
             print('local samples', local_samples.min(), local_samples.max())
             # Fill in the generated frames
         for i, li in enumerate(latent_frame_indices):
-            samples[i, li] = local_samples[i, -len(li):].cpu()
+            samples[i, li] = local_samples[i, -len(li):].cpu().to(samples.dtype)
         indices_used.append((obs_frame_indices, latent_frame_indices))
     return samples, indices_used
 
@@ -198,7 +198,7 @@ if __name__ == "__main__":
     parser.add_argument("--max_latent_frames", type=int, default=None, help="Number of frames to sample in each stage. Defaults to max_frames/2.")
     parser.add_argument("--start_index", type=int, default=0)
     parser.add_argument("--stop_index", type=int, default=None)
-    parser.add_argument("--sampler", type=str, default="ddpm",)
+    parser.add_argument("--sampler", type=str, default="heun-80-inf-0-1-1000-0.002-7-50")
     parser.add_argument("--use_ddim", type=str2bool, default=False)
     parser.add_argument("--eval_on_train", type=str2bool, default=False)
     parser.add_argument("--timestep_respacing", type=str, default="")

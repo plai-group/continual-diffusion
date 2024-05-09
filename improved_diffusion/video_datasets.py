@@ -12,7 +12,7 @@ from mpi4py import MPI
 from .test_util import Protect
 
 
-CONTINUAL_DATASETS = ["streaming_ball", "streaming_mine"]
+CONTINUAL_DATASETS = ["streaming_ball", "streaming_wmaze", "streaming_mine"]
 
 video_data_paths_dict = {
     "ball":                "datasets/2balls1m",  # "datasets/ball1m",

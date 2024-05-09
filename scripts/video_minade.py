@@ -10,6 +10,8 @@ from improved_diffusion.script_util import str2bool
 from video_fvd import SampleDataset
 
 
+# from torchvision.utils import save_image
+# save_image((frame+1)/2, 'true.png')
 
 def ar(x, y, z):
     return z/2+np.arange(x, y, z, dtype='float')
@@ -55,7 +57,7 @@ def compute_color_transition_stats(sample_colors, n_obs):
                 prev_color = curr_color
 
     # transition_accs = transition_accs/(n_timesteps-n_obs)
-    transition_stats = transition_stats/transition_stats.sum(dim=-1, keepdim=True)
+    transition_stats = torch.nan_to_num(transition_stats/transition_stats.sum(dim=-1, keepdim=True))
     return transition_stats
 
 
@@ -87,8 +89,20 @@ def align_balls(traj, color):
     result = [([e[0] for e in first_frame_info], [e[1] for e in first_frame_info])]
 
     for t, (locs_next, c_next) in enumerate(zip(traj[1:], color[1:])):
+        n_balls = len(locs_next)
+        min_locs = torch.zeros(n_balls).to(torch.int)
+        available_new_ball_indices = set(range(n_balls))
         distances = torch.cdist(torch.FloatTensor(result[t][0]), torch.FloatTensor(locs_next))
-        min_locs = torch.topk(distances, k=1, largest=False).indices
+        for old_ball_index in range(n_balls):
+            # For each current ball position, select the next timestep ball position that is closest and not taken
+            best_match, ordered_matches = None, torch.topk(distances[old_ball_index], k=n_balls, largest=False).indices
+            for match in ordered_matches.tolist():
+                if match in available_new_ball_indices:
+                    best_match = match
+                    break
+            min_locs[old_ball_index] = best_match
+            available_new_ball_indices.remove(best_match)
+
         assert len(min_locs) == len(min_locs.unique()), "Each location must uniquely be assigned to a ball."
         to_add_traj, to_add_color = [], []
         for min_loc in min_locs:
@@ -170,9 +184,9 @@ def compute_minADE(test_dataset, sample_datasets, n_obs, T, n_balls):
     max_color_acc = sum(all_accs)/len(all_accs)
     
     total_transition_stats = sum(all_transitions).mean(dim=0)
-    total_transition_stats = total_transition_stats/total_transition_stats.sum(dim=-1, keepdim=True)
+    total_transition_stats = torch.nan_to_num(total_transition_stats/total_transition_stats.sum(dim=-1, keepdim=True))
     true_transition_stats = torch.tensor([[0.,0.5,0.5], [1.,0.,0.], [1.,0.,0.]])
-    transition_kl = kl_div(total_transition_stats, true_transition_stats)
+    transition_kl = kl_div(true_transition_stats, total_transition_stats)
     return minADE, max_color_acc, transition_kl
 
 

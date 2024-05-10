@@ -67,12 +67,14 @@ def load_data(dataset_name, batch_size, T=None, deterministic=False, num_workers
     shard = MPI.COMM_WORLD.Get_rank()
     num_shards = MPI.COMM_WORLD.Get_size()
     if dataset_name == "ball":
-        dataset = BallDataset(data_path, shard=shard, num_shards=num_shards, T=T)
+        # dataset = BallDataset(data_path, shard=shard, num_shards=num_shards, T=T)
+        dataset = OfflineVideoDataset(data_path, T=T)
     elif dataset_name == "streaming_ball":
         dataset = BallDataset(data_path, shard=shard, num_shards=num_shards, T=1)
         deterministic = True
     elif dataset_name == "wmaze":
-        dataset = WindowsMazeDataset(data_path, shard=shard, num_shards=num_shards, T=T)
+        # dataset = WindowsMazeDataset(data_path, shard=shard, num_shards=num_shards, T=T)
+        dataset = OfflineVideoDataset(data_path, T=T)
     elif dataset_name == "streaming_wmaze":
         dataset = WindowsMazeDataset(data_path, shard=shard, num_shards=num_shards, T=1)
         deterministic = True
@@ -316,6 +318,93 @@ class ChunkedBaseDataset(Dataset):
     def get_video_subsequence(self, video, idx):
         # Take a subsequence of the video.
         start_i = (idx * self.T) % self.chunk_size
+        video = video[start_i:start_i+self.T]
+        assert len(video) == self.T
+        return video
+
+
+class OfflineVideoDataset(Dataset):
+    # __getitem__ returns data of shape <1 x self.T x ...>
+    def __init__(self, path, T=1):
+        # NOTE: self.chunk_size denotes the number of frames present in each npy file.
+        #       self.T denotes the number of frames that the dataset should return to the model per item.
+        super().__init__()
+        self.T = T
+        self.path = Path(path)
+        self.is_test = False
+
+        config = json.load(open(self.path / 'config.json'))
+        self.T_total = config['T_total']
+        self.chunk_size = config['chunk_size']
+        assert self.T_total % self.T == 0
+        assert self.T_total % self.chunk_size == 0
+        assert self.chunk_size % self.T == 0
+
+        self.train_path = self.path / 'train'
+        self.test_path = self.path / 'test'
+
+    def __len__(self):
+        return self.T_total - self.T + 1
+
+    def __getitem__(self, idx):
+        paths = self.getitem_paths(idx)
+        self.cache_files(paths)
+        try:
+            video = self.loaditem(paths)
+        except Exception as e:
+            print(f"Failed on loading {paths}")
+            raise e
+        video = self.get_video_subsequence(video, idx)
+        return self.postprocess_video(video), {}
+
+    def getitem_paths(self, idx):
+        # chunk_idx = idx // self.chunk_size
+        # return self.path / (("test" if self.is_test else "train") + "/" + f"{chunk_idx}.npy")
+        chunk_idxs = [idx // self.chunk_size]
+        if (idx % self.chunk_size) + self.T >= self.chunk_size:
+            chunk_idxs.append((idx // self.chunk_size) + 1)
+        return [self.path / (("test" if self.is_test else "train") + "/" + f"{chunk_idx}.npy") for chunk_idx in chunk_idxs]
+
+    def loaditem(self, paths):
+        loaded = [np.load(path) for path in paths]
+        return np.concatenate(loaded, axis=0)
+
+    def postprocess_video(self, video):
+        byte_to_tensor = lambda x: ToTensor()(x)
+        video = th.stack([byte_to_tensor(frame).float() for frame in video])
+        video = 2 * video - 1
+        return video
+
+    def cache_files(self, paths):
+        # Given a path to a dataset item, makes sure that the item is cached in the temporary directory.
+        for path in paths:
+            if not path.exists():
+                path.parent.mkdir(parents=True, exist_ok=True)
+                src_path = self.get_src_path(path)
+                with Protect(path):
+                    shutil.copyfile(str(src_path), str(path))
+
+    @staticmethod
+    def get_src_path(path):
+        """ Returns the source path to a file. This function is mainly used to handle SLURM_TMPDIR on ComputeCanada.
+            If DATA_ROOT is defined as an environment variable, the datasets are copied to it as they are accessed. This function is called
+            when we need the source path from a given path under DATA_ROOT.
+        """
+        if "DATA_ROOT" in os.environ and os.environ["DATA_ROOT"] != "":
+            # Verify that the path is under
+            data_root = Path(os.environ["DATA_ROOT"])
+            assert data_root in path.parents, f"Expected dataset item path ({path}) to be located under the data root ({data_root})."
+            src_path = Path(*path.parts[len(data_root.parts):]) # drops the data_root part from the path, to get the relative path to the source file.
+            return src_path
+        return path
+
+    def set_test(self):
+        self.is_test = True
+        print('setting test mode')
+
+    def get_video_subsequence(self, video, idx):
+        # Take a subsequence of the video.
+        start_i = idx % self.chunk_size
         video = video[start_i:start_i+self.T]
         assert len(video) == self.T
         return video

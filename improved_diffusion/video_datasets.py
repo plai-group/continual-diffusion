@@ -344,7 +344,7 @@ class OfflineVideoDataset(Dataset):
         self.test_path = self.path / 'test'
 
     def __len__(self):
-        return self.T_total - self.T + 1
+        return self.T_total - self.T
 
     def __getitem__(self, idx):
         paths = self.getitem_paths(idx)

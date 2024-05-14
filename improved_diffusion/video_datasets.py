@@ -61,7 +61,7 @@ data_encoding_stats_dict = {
 }
 
 
-def load_data(dataset_name, batch_size, T=None, deterministic=False, num_workers=1, return_dataset=False):
+def load_data(dataset_name, batch_size, T=None, deterministic=False, num_workers=1, return_dataset=False, resume_id=''):
     data_path = video_data_paths_dict[dataset_name]
     T = default_T_dict[dataset_name] if T is None else T
     shard = MPI.COMM_WORLD.Get_rank()
@@ -97,6 +97,14 @@ def load_data(dataset_name, batch_size, T=None, deterministic=False, num_workers
         dataset = Carla2xDataset(train=True, path=data_path, shard=shard, num_shards=num_shards, T=T, encoded=True)
     else:
         raise Exception("no dataset", dataset_name)
+
+    if resume_id and deterministic:
+        with open(os.path.join('checkpoints', resume_id, 'replay_state.json')) as f:
+            n_observed = json.load(f)['n_obs']
+            start_index = n_observed // dataset.T + 1
+            print(f"starting deterministic dataloader from {n_observed+1}-th datapoint.")
+        dataset = th.utils.data.Subset(dataset, indices=range(start_index, len(dataset)))
+
     if return_dataset:
         return dataset
     else:

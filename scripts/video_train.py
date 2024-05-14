@@ -116,6 +116,7 @@ def main():
         batch_size=args.batch_size,
         T=args.T,
         num_workers=args.num_workers,
+        resume_id=args.resume_id,
     )
     args.continual_learning = args.dataset in CONTINUAL_DATASETS
 

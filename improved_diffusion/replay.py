@@ -16,8 +16,11 @@ class ReplayItem:
 
 def load_replay_item_memmap(path) -> ReplayItem:
     # Replacement for ReplayItem.load_memmap as it's not available in older versions...
-    tmp = TensorDict.load_memmap(path)
-    return ReplayItem(**tmp, batch_size=tmp.batch_size)
+    result = TensorDict.load_memmap(path)
+    if isinstance(result, ReplayItem):
+        return result
+    else:
+        return ReplayItem(**result, batch_size=result.batch_size)
 
 
 def maybe_load_item_from_disk(item: Union[ReplayItem, int], path_prefix: str):

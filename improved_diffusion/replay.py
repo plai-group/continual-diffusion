@@ -1,4 +1,4 @@
-from tensordict import tensorclass
+from tensordict import tensorclass, TensorDict
 import json
 import os
 import pathlib
@@ -14,11 +14,17 @@ class ReplayItem:
     absolute_index_map: torch.Tensor
 
 
+def load_replay_item_memmap(path) -> ReplayItem:
+    # Replacement for ReplayItem.load_memmap as it's not available in older versions...
+    tmp = TensorDict.load_memmap(path)
+    return ReplayItem(**tmp, batch_size=tmp.batch_size)
+
+
 def maybe_load_item_from_disk(item: Union[ReplayItem, int], path_prefix: str):
     if isinstance(item, ReplayItem):
         return item
     else:
-        return ReplayItem.load_memmap(os.path.join(path_prefix, str(item)))
+        return load_replay_item_memmap(os.path.join(path_prefix, str(item)))
 
 
 class ReplayDataset:
@@ -56,7 +62,7 @@ class ReplayDataset:
             config = json.load(f)
             self.n_obs = config['n_obs']
 
-        mm_context_buffer = ReplayItem.load_memmap(self._stm_path)
+        mm_context_buffer = load_replay_item_memmap(self._stm_path)
         self._context_buffer = ReplayItem(**mm_context_buffer.to_tensordict(), batch_size=mm_context_buffer.batch_size)
 
         def load_disk_to_list(path: str, destination: List[Union[ReplayItem, int]], save_space: bool=False):
@@ -64,7 +70,7 @@ class ReplayDataset:
             sorted_dirnames = sorted(dirnames, key=lambda e: int(e))
             for dirname in sorted_dirnames:
                 load_path = os.path.join(path, dirname)
-                entry: ReplayItem = ReplayItem.load_memmap(load_path)
+                entry: ReplayItem = load_replay_item_memmap(load_path)
                 if save_space:
                     entry = entry.absolute_index_map[..., 0].item()
                 destination.append(entry)
@@ -77,17 +83,17 @@ class ReplayDataset:
     def save_state(self):
         # Update replay information to the latest state.
         pathlib.Path(self._stm_path).mkdir(parents=True, exist_ok=True)
-        self._context_buffer.memmap(self._stm_path, num_threads=0)
+        self._context_buffer.memmap_(self._stm_path, copy_existing=True)
 
         def sync_disk_to_list(path: str, source: List[Union[ReplayItem, int]], save_space: bool = False):
             pathlib.Path(path).mkdir(parents=True, exist_ok=True)
             persisted_file_idxs = set()
             for i, entry in enumerate(source):
                 if isinstance(entry, int):
-                    entry = ReplayItem.load_memmap(os.path.join(path, str(entry)))
+                    entry = load_replay_item_memmap(os.path.join(path, str(entry)))
                 file_idx = entry.absolute_index_map[..., 0].item()
                 save_path = os.path.join(path, str(file_idx))
-                entry.memmap(save_path, num_threads=0)
+                entry.memmap_(save_path, copy_existing=True)
                 if save_space:
                     source[i] = file_idx
                 persisted_file_idxs.add(file_idx)

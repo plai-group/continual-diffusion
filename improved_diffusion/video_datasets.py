@@ -98,7 +98,7 @@ def load_data(dataset_name, batch_size, T=None, deterministic=False, num_workers
     else:
         raise Exception("no dataset", dataset_name)
 
-    if resume_id and deterministic:
+    if resume_id and deterministic:  # start from specific data stream index.
         with open(os.path.join('checkpoints', resume_id, 'replay_state.json')) as f:
             n_observed = json.load(f)['n_obs']
             start_index = n_observed // dataset.T + 1

@@ -1,6 +1,10 @@
 from tensordict import tensorclass
+import json
+import os
+import pathlib
+import shutil
 import torch
-from typing import List
+from typing import List, Union
 
 
 
@@ -10,13 +14,25 @@ class ReplayItem:
     absolute_index_map: torch.Tensor
 
 
+def maybe_load_item_from_disk(item: Union[ReplayItem, int], path_prefix: str):
+    if isinstance(item, ReplayItem):
+        return item
+    else:
+        return ReplayItem.load_memmap(os.path.join(path_prefix, str(item)))
+
+
 class ReplayDataset:
-    def __init__(self, stm_size, ltm_size=-1, mem_batch_size=None, n_sample_stm=1, n_sample_ltm=1) -> None:
+    def __init__(self, stm_size, ltm_size=-1, mem_batch_size=None, n_sample_stm=1, n_sample_ltm=1, save_dir='/tmp') -> None:
         self.stm_size = stm_size
         self.mem_batch_size = mem_batch_size
         self.mem_buffer_size = ltm_size // mem_batch_size if ltm_size > 0 else 0
         self.n_sample_stm = n_sample_stm
         self.n_sample_ltm = n_sample_ltm
+
+        self._stm_path = f"{save_dir}/context"
+        self._tmp_ltm_path = f"{save_dir}/tmp_memory"
+        self._ltm_path = f"{save_dir}/memory"
+        self._json_path = f"{save_dir}/replay_state.json"
 
         self._context_buffer: ReplayItem = None
         if ltm_size == -1:
@@ -26,8 +42,68 @@ class ReplayDataset:
             assert mem_batch_size is not None and ltm_size % mem_batch_size == 0 and ltm_size > mem_batch_size
             self.has_mem = True
             self._tmp_memory_buffer: List[ReplayItem] = []
-            self._memory_buffer: List[ReplayItem] = []
+            self._memory_buffer: List[Union[ReplayItem, int]] = []
         self.n_obs = 0
+
+    def load_state(self, load_dir: str):
+        # Load replay information from last saved run state.
+        self._stm_path = f"{load_dir}/context"
+        self._tmp_ltm_path = f"{load_dir}/tmp_memory"
+        self._ltm_path = f"{load_dir}/memory"
+        self._json_path = f"{load_dir}/replay_state.json"
+
+        with open(self._json_path) as f:
+            config = json.load(f)
+            self.n_obs = config['n_obs']
+
+        mm_context_buffer = ReplayItem.load_memmap(self._stm_path)
+        self._context_buffer = ReplayItem(**mm_context_buffer.to_tensordict(), batch_size=mm_context_buffer.batch_size)
+
+        def load_disk_to_list(path: str, destination: List[Union[ReplayItem, int]], save_space: bool=False):
+            dirnames = os.listdir(path)
+            sorted_dirnames = sorted(dirnames, key=lambda e: int(e))
+            for dirname in sorted_dirnames:
+                load_path = os.path.join(path, dirname)
+                entry: ReplayItem = ReplayItem.load_memmap(load_path)
+                if save_space:
+                    entry = entry.absolute_index_map[..., 0].item()
+                destination.append(entry)
+
+        if self.has_mem:
+            load_disk_to_list(self._tmp_ltm_path, self._tmp_memory_buffer)
+            load_disk_to_list(self._ltm_path, self._memory_buffer, save_space=True)
+        print(f"loaded replay dataset state (after having observed {self.n_obs} datapoints) from disk.")
+
+    def save_state(self):
+        # Update replay information to the latest state.
+        pathlib.Path(self._stm_path).mkdir(parents=True, exist_ok=True)
+        self._context_buffer.memmap(self._stm_path, num_threads=0)
+
+        def sync_disk_to_list(path: str, source: List[Union[ReplayItem, int]], save_space: bool = False):
+            pathlib.Path(path).mkdir(parents=True, exist_ok=True)
+            persisted_file_idxs = set()
+            for i, entry in enumerate(source):
+                if isinstance(entry, int):
+                    entry = ReplayItem.load_memmap(os.path.join(path, str(entry)))
+                file_idx = entry.absolute_index_map[..., 0].item()
+                save_path = os.path.join(path, str(file_idx))
+                entry.memmap(save_path, num_threads=0)
+                if save_space:
+                    source[i] = file_idx
+                persisted_file_idxs.add(file_idx)
+            sorted_file_idxs = [int(e) for e in sorted(os.listdir(path), key=lambda e: int(e))]
+            for file_idx in sorted_file_idxs:
+                load_path = os.path.join(path, str(file_idx))
+                if file_idx not in persisted_file_idxs:
+                    shutil.rmtree(load_path, ignore_errors=True)
+
+        if self.has_mem:
+            sync_disk_to_list(self._tmp_ltm_path, self._tmp_memory_buffer)
+            sync_disk_to_list(self._ltm_path, self._memory_buffer, save_space=True)
+
+        config = {'n_obs': self.n_obs}
+        with open(self._json_path, "w") as f:
+            json.dump(config, f, indent=2)
 
     def _update_context(self, item: ReplayItem) -> None:
         """
@@ -118,4 +194,5 @@ class ReplayDataset:
             return self.get_context(n_sample=n_sample)
         else:
             items = [self._memory_buffer[i] for i in torch.randint(len(self._memory_buffer), (n_sample,))]
+            items = [maybe_load_item_from_disk(item, self._ltm_path) for item in items]
             return torch.cat(items, dim=0)

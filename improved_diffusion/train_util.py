@@ -104,6 +104,12 @@ class TrainLoop:
             self._setup_fp16()
 
         self.opt = AdamW(self.master_params, lr=self.lr, weight_decay=self.weight_decay)
+
+        logdir = get_blob_logdir(self.args)
+        if dist.get_rank() == 0:
+            Path(logdir).mkdir(parents=True, exist_ok=True)
+        self.replay_dataset: ReplayDataset = ReplayDataset(**replay_dataset_kwargs, save_dir=logdir)
+
         if self.args.resume_id != '':
             self._load_optimizer_state()
             # Model was resumed, either due to a restart or a checkpoint
@@ -111,6 +117,7 @@ class TrainLoop:
             self.ema_params = [
                 self._load_ema_parameters(rate) for rate in self.ema_rate
             ]
+            self.replay_dataset.load_state(load_dir=get_blob_logdir(args))
         else:
             self.ema_params = [
                 copy.deepcopy(self.master_params) for _ in range(len(self.ema_rate))
@@ -137,7 +144,6 @@ class TrainLoop:
         if dist.get_rank() == 0:
             logger.logkv("num_parameters", sum(p.numel() for p in model.parameters()), distributed=False)
 
-        self.replay_dataset: ReplayDataset = ReplayDataset(**replay_dataset_kwargs)
         self.steps_per_experience = steps_per_experience
         self.masking_mode = masking_mode
         self.continual_learning = continual_learning
@@ -505,6 +511,8 @@ class TrainLoop:
         save_checkpoint(0, self.master_params)
         for rate, params in zip(self.ema_rate, self.ema_params):
             save_checkpoint(rate, params)
+        self.replay_dataset.save_state()
+        print("updated disk with the replay data.")
 
         if dist.get_rank() == 0:
             with bf.BlobFile(

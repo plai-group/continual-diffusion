@@ -92,6 +92,7 @@ def main():
         "mem_batch_size": args.T if args.stm_size == -1 else args.stm_size,
         "n_sample_stm": args.batch_size if args.n_sample_stm == -1 else args.n_sample_stm,
         "n_sample_ltm": args.n_sample_ltm,
+        "save_mem": args.save_replay_mem
     }
     args.diffusion_space_kwargs = {
         "diffusion_space": args.diffusion_space,
@@ -179,6 +180,7 @@ def create_argparser():
         n_sample_ltm=1,
         steps_per_experience=1,
         masking_mode="flexible",
+        save_replay_mem=False,
         attentive_er=False,  # If true, the model attends to replay frames
     )
     defaults.update(model_and_diffusion_defaults())

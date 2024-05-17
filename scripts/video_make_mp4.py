@@ -39,7 +39,7 @@ if __name__ == "__main__":
         if args.eval_on_train:
             dataset.is_test = False
     out_dir = (Path(args.out_dir) if args.out_dir is not None else Path(args.eval_dir)) / videos_prefix
-    out_dir.mkdir(exist_ok=True)
+    out_dir.mkdir(parents=True, exist_ok=True)
     out_path = out_dir / f"{args.do_n}_{args.n_seeds}.{args.format}"
 
     videos = []

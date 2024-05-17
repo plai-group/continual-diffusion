@@ -14,24 +14,28 @@ class ReplayItem:
     absolute_index_map: torch.Tensor
 
 
-def load_replay_item_memmap(path) -> ReplayItem:
+def save_item_to_disk(item: ReplayItem, path: str) -> ReplayItem:
+    item.memmap_(path, copy_existing=True)
+    return ReplayItem(**item.to_tensordict(), batch_size=item.batch_size)
+
+
+def load_item_from_disk(path) -> ReplayItem:
     # Replacement for ReplayItem.load_memmap as it's not available in older versions...
     result = TensorDict.load_memmap(path)
     if isinstance(result, ReplayItem):
-        return result
-    else:
-        return ReplayItem(**result, batch_size=result.batch_size)
+        result = result.to_tensordict()
+    return ReplayItem(**result, batch_size=result.batch_size)
 
 
 def maybe_load_item_from_disk(item: Union[ReplayItem, int], path_prefix: str):
     if isinstance(item, ReplayItem):
         return item
     else:
-        return load_replay_item_memmap(os.path.join(path_prefix, str(item)))
+        return load_item_from_disk(os.path.join(path_prefix, str(item)))
 
 
 class ReplayDataset:
-    def __init__(self, stm_size, ltm_size=-1, mem_batch_size=None, n_sample_stm=1, n_sample_ltm=1, save_dir='/tmp') -> None:
+    def __init__(self, stm_size, ltm_size=-1, mem_batch_size=None, n_sample_stm=1, n_sample_ltm=1, save_dir='/tmp', save_mem=False) -> None:
         self.stm_size = stm_size
         self.mem_batch_size = mem_batch_size
         self.mem_buffer_size = ltm_size // mem_batch_size if ltm_size > 0 else 0
@@ -42,6 +46,7 @@ class ReplayDataset:
         self._tmp_ltm_path = f"{save_dir}/tmp_memory"
         self._ltm_path = f"{save_dir}/memory"
         self._json_path = f"{save_dir}/replay_state.json"
+        self._save_mem = save_mem  # If True, read long term memory entries from disk everytime. This can slow things down.
 
         self._context_buffer: ReplayItem = None
         if ltm_size == -1:
@@ -65,40 +70,43 @@ class ReplayDataset:
             config = json.load(f)
             self.n_obs = config['n_obs']
 
-        mm_context_buffer = load_replay_item_memmap(self._stm_path)
-        self._context_buffer = ReplayItem(**mm_context_buffer.to_tensordict(), batch_size=mm_context_buffer.batch_size)
+        self._context_buffer = load_item_from_disk(self._stm_path)
 
-        def load_disk_to_list(path: str, destination: List[Union[ReplayItem, int]], save_space: bool=False):
+        def load_disk_to_list(path: str, destination: List[Union[ReplayItem, int]], save_mem: bool=False):
             dirnames = os.listdir(path)
             sorted_dirnames = sorted(dirnames, key=lambda e: int(e))
             for dirname in sorted_dirnames:
                 load_path = os.path.join(path, dirname)
-                entry: ReplayItem = load_replay_item_memmap(load_path)
-                if save_space:
+                entry: ReplayItem = load_item_from_disk(load_path)
+                if save_mem:
                     entry = entry.absolute_index_map[..., 0].item()
                 destination.append(entry)
 
         if self.has_mem:
             load_disk_to_list(self._tmp_ltm_path, self._tmp_memory_buffer)
-            load_disk_to_list(self._ltm_path, self._memory_buffer, save_space=True)
+            load_disk_to_list(self._ltm_path, self._memory_buffer, save_mem=self._save_mem)
         print(f"loaded replay dataset state (after having observed {self.n_obs} datapoints) from disk.")
 
     def save_state(self):
         # Update replay information to the latest state.
         pathlib.Path(self._stm_path).mkdir(parents=True, exist_ok=True)
-        self._context_buffer.memmap_(self._stm_path, copy_existing=True)
+        self._context_buffer = save_item_to_disk(self._context_buffer, self._stm_path)
 
-        def sync_disk_to_list(path: str, source: List[Union[ReplayItem, int]], save_space: bool = False):
+        def sync_disk_to_list(path: str, source: List[Union[ReplayItem, int]], save_mem: bool = False):
             pathlib.Path(path).mkdir(parents=True, exist_ok=True)
             persisted_file_idxs = set()
             for i, entry in enumerate(source):
-                if isinstance(entry, int):
-                    entry = load_replay_item_memmap(os.path.join(path, str(entry)))
-                file_idx = entry.absolute_index_map[..., 0].item()
-                save_path = os.path.join(path, str(file_idx))
-                entry.memmap_(save_path, copy_existing=True)
-                if save_space:
-                    source[i] = file_idx
+                if isinstance(entry, ReplayItem):
+                    file_idx = entry.absolute_index_map[..., 0].item()
+                    save_path = os.path.join(path, str(file_idx))
+                    entry = save_item_to_disk(entry, save_path)
+                    source[i] = file_idx if save_mem else entry
+                elif isinstance(entry, int):
+                    file_idx = entry
+                    save_path = os.path.join(path, str(file_idx))
+                    source[i] = file_idx if save_mem else load_item_from_disk(save_path)
+                else:
+                    raise Exception(f"Invalid entry encountered when saving state after observing {self.n_obs} timesteps: {entry}.")
                 persisted_file_idxs.add(file_idx)
             sorted_file_idxs = [int(e) for e in sorted(os.listdir(path), key=lambda e: int(e))]
             for file_idx in sorted_file_idxs:
@@ -108,7 +116,7 @@ class ReplayDataset:
 
         if self.has_mem:
             sync_disk_to_list(self._tmp_ltm_path, self._tmp_memory_buffer)
-            sync_disk_to_list(self._ltm_path, self._memory_buffer, save_space=True)
+            sync_disk_to_list(self._ltm_path, self._memory_buffer, save_mem=self._save_mem)
 
         config = {'n_obs': self.n_obs}
         with open(self._json_path, "w") as f:

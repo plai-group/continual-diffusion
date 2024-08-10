@@ -139,7 +139,7 @@ def get_test_dataset(dataset_name, T=None):
         dataset = BallDataset(data_path, shard=0, num_shards=1, T=T)
     elif dataset_name == "wmaze":
         dataset = WindowsMazeDataset(data_path, shard=0, num_shards=1, T=T)
-    elif dataset_name == "streaming_wmaze":
+    elif dataset_name == "streaming_wmaze":  # NOTE: Even for offline model, test on streaming test set
         dataset = WindowsMazeDataset(data_path, shard=0, num_shards=1, T=T)
     elif dataset_name == "mine":
         dataset = MineDataset(data_path, shard=0, num_shards=1, T=T)

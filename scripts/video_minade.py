@@ -182,7 +182,7 @@ def compute_minADE(test_dataset, sample_datasets, n_obs, T, n_balls):
 
     minADE = sum(all_ADEs)/len(all_ADEs)
     max_color_acc = sum(all_accs)/len(all_accs)
-    
+
     total_transition_stats = sum(all_transitions).mean(dim=0)
     total_transition_stats = torch.nan_to_num(total_transition_stats/total_transition_stats.sum(dim=-1, keepdim=True))
     true_transition_stats = torch.tensor([[0.,0.5,0.5], [1.,0.,0.], [1.,0.,0.]])
@@ -194,7 +194,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--eval_dir", type=str, required=True)
     parser.add_argument("--n_obs", type=int, required=True, help="Number of observed frames at the beginning of the video. These are not counted.")
-    parser.add_argument("--num_videos", type=int, default=None, help="Number of generated samples per test video.")
+    parser.add_argument("--num_videos", type=int, default=None, help="Number of test video to evaluate on.")
     parser.add_argument("--n_balls", type=int, default=2, help="Number of bouncing balls in a video frame.")
     parser.add_argument("--sample_indices", type=int, nargs='+', default=[0])
     parser.add_argument("--T", type=int, default=None, help="Length of the videos. If not specified, it will be inferred from the dataset.")
@@ -239,8 +239,7 @@ if __name__ == "__main__":
         indices=list(range(args.num_videos)),
     )
 
-    T_sample = args.T - args.n_obs
-    minADE, max_color_acc, transition_kl = compute_minADE(test_dataset, sample_datasets, n_obs=args.n_obs, T=T_sample, n_balls=args.n_balls)
+    minADE, max_color_acc, transition_kl = compute_minADE(test_dataset, sample_datasets, n_obs=args.n_obs, T=args.T, n_balls=args.n_balls)
     np.savetxt(save_path, np.array([minADE]))
     np.savetxt(save_path_color, np.array([max_color_acc]))
     np.savetxt(save_path_transition, np.array([transition_kl]))

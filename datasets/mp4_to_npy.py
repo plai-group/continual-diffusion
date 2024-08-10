@@ -6,6 +6,27 @@ import os
 import random
 
 
+"""
+Maze data preprocessing
+
+== Video 1 ==
+yt-dlp "https://www.youtube.com/watch?v=MHGnSqr9kK8&ab_channel=Dprotp" -S res:256
+ffmpeg -i '10 Hours of Windows 3D Maze [MHGnSqr9kK8].webm' -filter:v "fps=30,crop=240:240:30:0,scale=64:64" windows_maze_10h_r64.mp4
+ffmpeg -to 35973.73 -i windows_maze_10h_r64_v1.mp4 windows_maze_10h_r64_v1_trimmed.mp4
+
+== Video 2 ==
+yt-dlp "https://www.youtube.com/watch?v=Hs5pyyPTzDE&ab_channel=TheBestClassic%26RetroScreensavers" -S res:720
+ffmpeg -i '10 Hours of Windows 3D Maze [MHGnSqr9kK8].webm' -filter:v fps=30 windows_maze_10h_r64_v2.mp4
+ffmpeg -i windows_maze_10h_r64_v2.mp4 -aspect 300:240 windows_maze_10h_r64_v2_edit.mp4
+ffmpeg -i windows_maze_10h_r64_v2_edit.mp4 -filter:v "fps=30,crop=240:240:30:0,scale=64:64" windows_maze_10h_r64_v2_final.mp4
+
+ffmpeg -ss 0.02 -to 71970.02 -i windows_maze_20h_r64.mp4 windows_maze_20h_r64_final1.mp4
+
+ffmpeg -i windows_maze_20h_r64_fps30.mp4 -filter:v "fps=20" windows_maze_20h_r64_fps20.mp4
+ffmpeg -ss 00:00:00 -to 18:00:00 -i windows_maze_20h_r64_fps20.mp4 -c copy windows_maze_20h_r64_fps20_train.mp4
+ffmpeg -ss 18:00:00 -to 19:59:30 -i windows_maze_20h_r64_fps20.mp4 -c copy windows_maze_20h_r64_fps20_test.mp4
+"""
+
 def video_to_npy(video_path, save_dir, resolution=(64, 64), chunk_size=10000):
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():

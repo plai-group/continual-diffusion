@@ -125,7 +125,7 @@ if __name__ == "__main__":
 
     # Prepare datasets
     sample_dataset = SampleDataset(samples_path=(Path(args.eval_dir) / samples_prefix), sample_idx=args.sample_idx, length=args.num_videos)
-    test_dataset_full = get_test_dataset(dataset_name=args.dataset, T=args.T)
+    test_dataset_full = get_test_dataset(dataset_name=args.dataset, T=args.T, n_data=args.num_videos)
     if args.eval_on_train:
         test_dataset_full.is_test = False
 

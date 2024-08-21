@@ -12,11 +12,12 @@ from mpi4py import MPI
 from .test_util import Protect
 
 
-CONTINUAL_DATASETS = ["streaming_ball", "streaming_wmaze", "streaming_mine"]
 
 video_data_paths_dict = {
-    "ball":                "datasets/2balls1m",  # "datasets/ball1m",
-    "streaming_ball":      "datasets/2balls1m",  # "datasets/ball1m",
+    "ball_stn":            "datasets/ball_stn",
+    "ball_nstn":           "datasets/ball_nstn",
+    "streaming_ball_stn":  "datasets/ball_stn",
+    "streaming_ball_nstn": "datasets/ball_nstn",
     "wmaze":               "datasets/windows_maze",
     "streaming_wmaze":     "datasets/windows_maze",
     "mine":                "datasets/continual_minecraft",
@@ -29,10 +30,12 @@ video_data_paths_dict = {
 }
 
 default_T_dict = {
-    "ball":                10,
-    "streaming_ball":      1,
+    "ball_stn":            10,
+    "ball_nstn":           10,
+    "streaming_ball_stn":  10,  # gets reset to 1 for the dataset
+    "streaming_ball_nstn": 10,  # gets reset to 1 for the dataset
     "wmaze":               20,
-    "streaming_wmaze":     1,
+    "streaming_wmaze":     20,
     "mine":                500,
     "streaming_mine":      1,
     "minerl":              500,
@@ -43,8 +46,10 @@ default_T_dict = {
 }
 
 default_image_size_dict = {
-    "ball":                32,
-    "streaming_ball":      32,
+    "ball_stn":            32,
+    "ball_nstn":           32,
+    "streaming_ball_stn":  32,
+    "streaming_ball_nstn": 32,
     "wmaze":               64,
     "streaming_wmaze":     64,
     "mine":                64,
@@ -61,23 +66,19 @@ data_encoding_stats_dict = {
 }
 
 
-def load_data(dataset_name, batch_size, T=None, deterministic=False, num_workers=1, return_dataset=False, resume_id=''):
+def load_data(dataset_name, batch_size, T=None, deterministic=False, num_workers=1, return_dataset=False, resume_id='', restart_index=None, seed=0):
     data_path = video_data_paths_dict[dataset_name]
     T = default_T_dict[dataset_name] if T is None else T
     shard = MPI.COMM_WORLD.Get_rank()
     num_shards = MPI.COMM_WORLD.Get_size()
-    if dataset_name == "ball":
-        # dataset = BallDataset(data_path, shard=shard, num_shards=num_shards, T=T)
-        dataset = OfflineVideoDataset(data_path, T=T)
-    elif dataset_name == "streaming_ball":
-        dataset = BallDataset(data_path, shard=shard, num_shards=num_shards, T=1)
-        deterministic = True
-    elif dataset_name == "wmaze":
-        # dataset = WindowsMazeDataset(data_path, shard=shard, num_shards=num_shards, T=T)
-        dataset = OfflineVideoDataset(data_path, T=T)
-    elif dataset_name == "streaming_wmaze":
-        dataset = WindowsMazeDataset(data_path, shard=shard, num_shards=num_shards, T=1)
-        deterministic = True
+    if dataset_name.startswith("streaming"):
+        T, deterministic = 1, True
+    if "ball_stn" in dataset_name:
+        dataset = ContinuousBaseDataset(data_path, T=T, seed=seed, restart_index=restart_index)
+    elif "ball_nstn" in dataset_name:
+        dataset = ContinuousBaseDataset(data_path, T=T, seed=seed)
+    elif "wmaze" in dataset_name:
+        dataset = ContinuousBaseDataset(data_path, T=T, seed=seed)
     elif dataset_name == "mine":
         dataset = MineDataset(data_path, shard=shard, num_shards=num_shards, T=T)
     elif dataset_name == "streaming_mine":
@@ -120,27 +121,24 @@ def load_data(dataset_name, batch_size, T=None, deterministic=False, num_workers
                 raise StopIteration()
 
 
-def get_train_dataset(dataset_name, T=None):
+def get_train_dataset(dataset_name, T=None, seed=0):
     return load_data(
-        dataset_name, return_dataset=False, T=T,
-        batch_size=None, deterministic=False, num_workers=None
+        dataset_name, return_dataset=False, T=T, batch_size=None, deterministic=False, num_workers=None, seed=0
     )
 
 
-def get_test_dataset(dataset_name, T=None):
+def get_test_dataset(dataset_name, T=None, seed=0, n_data=None):
     if dataset_name == "mazes":
         raise Exception('Deprecated dataset.')
     data_root = Path(os.environ["DATA_ROOT"]  if "DATA_ROOT" in os.environ and os.environ["DATA_ROOT"] != "" else ".")
     data_path = data_root / video_data_paths_dict[dataset_name]
     T = default_T_dict[dataset_name] if T is None else T
-    if dataset_name == "ball":
-        dataset = BallDataset(data_path, shard=0, num_shards=1, T=T)
-    elif dataset_name == "streaming_ball":
-        dataset = BallDataset(data_path, shard=0, num_shards=1, T=T)
-    elif dataset_name == "wmaze":
-        dataset = WindowsMazeDataset(data_path, shard=0, num_shards=1, T=T)
-    elif dataset_name == "streaming_wmaze":  # NOTE: Even for offline model, test on streaming test set
-        dataset = WindowsMazeDataset(data_path, shard=0, num_shards=1, T=T)
+    if "ball_stn" in dataset_name:
+        dataset = ChunkedBaseDataset(data_path, T=T, seed=seed)
+    elif "ball_nstn" in dataset_name:
+        dataset = SpacedBaseDataset(n_data, data_path, T=T, seed=seed)
+    elif "wmaze" in dataset_name:
+        dataset = ChunkedBaseDataset(data_path, T=T, seed=seed)
     elif dataset_name == "mine":
         dataset = MineDataset(data_path, shard=0, num_shards=1, T=T)
     elif dataset_name == "streaming_mine":
@@ -157,6 +155,24 @@ def get_test_dataset(dataset_name, T=None):
         dataset = Carla2xDataset(train=False, path=data_path, shard=0, num_shards=1, T=T)
     elif dataset_name == "carla_no_traffic_2x_encoded":
         dataset = Carla2xDataset(train=False, path=data_path, shard=0, num_shards=1, T=T, encoded=True)
+    else:
+        raise Exception("no dataset", dataset_name)
+    dataset.set_test()
+    return dataset
+
+
+def get_vis_dataset(dataset_name, T=None, seed=0):
+    if dataset_name == "mazes":
+        raise Exception('Deprecated dataset.')
+    data_root = Path(os.environ["DATA_ROOT"]  if "DATA_ROOT" in os.environ and os.environ["DATA_ROOT"] != "" else ".")
+    data_path = data_root / video_data_paths_dict[dataset_name]
+    T = default_T_dict[dataset_name] if T is None else T
+    if "ball_stn" in dataset_name:
+        dataset = ChunkedBaseDataset(data_path, T=T, seed=seed)
+    elif "ball_nstn" in dataset_name:
+        dataset = ChunkedBaseDataset(data_path, T=T, seed=seed)
+    elif "wmaze" in dataset_name:
+        dataset = ChunkedBaseDataset(data_path, T=T, seed=seed)
     else:
         raise Exception("no dataset", dataset_name)
     dataset.set_test()
@@ -254,92 +270,21 @@ class BaseDataset(Dataset):
         return video
 
 
-class ChunkedBaseDataset(Dataset):
-    # __getitem__ returns data of shape <1 x self.T x ...>
-    def __init__(self, path, T=1):
-        # NOTE: self.chunk_size denotes the number of frames present in each npy file.
-        #       self.T denotes the number of frames that the dataset should return to the model per item.
+class ContinuousBaseDataset(Dataset):
+    """
+    A dataset that takes one long video saved in multiple .npy files and returns a size T sliding window of
+    video frames indexed by the location of the sliding window's first frame in the video.
+
+    __getitem__ returns data of shape <1 x T x ...>
+    self.chunk_size denotes the number of frames present in each npy file.
+    T denotes the number of frames that the dataset should return to the model per item.
+    """
+    def __init__(self, path, T=1, seed=0, restart_index=None):
         super().__init__()
         self.T = T
         self.path = Path(path)
         self.is_test = False
-        
-        config = json.load(open(self.path / 'config.json'))
-        self.T_total = config['T_total']
-        self.chunk_size = config['chunk_size']
-        assert self.T_total % self.T == 0
-        assert self.T_total % self.chunk_size == 0
-        assert self.chunk_size % self.T == 0
-
-        self.train_path = self.path / 'train'
-        self.test_path = self.path / 'test'
-
-    def __len__(self):
-        return self.T_total // self.T
-
-    def __getitem__(self, idx):
-        path = self.getitem_path(idx)
-        self.cache_file(path)
-        try:
-            video = self.loaditem(path)
-        except Exception as e:
-            print(f"Failed on loading {path}")
-            raise e
-        video = self.postprocess_video(video)
-        return self.get_video_subsequence(video, idx), {}
-
-    def getitem_path(self, idx):
-        raise NotImplementedError
-
-    def loaditem(self, path):
-        raise NotImplementedError
-
-    def postprocess_video(self, video):
-        raise NotImplementedError
-
-    def cache_file(self, path):
-        # Given a path to a dataset item, makes sure that the item is cached in the temporary directory.
-        if not path.exists():
-            path.parent.mkdir(parents=True, exist_ok=True)
-            src_path = self.get_src_path(path)
-            with Protect(path):
-                shutil.copyfile(str(src_path), str(path))
-
-    @staticmethod
-    def get_src_path(path):
-        """ Returns the source path to a file. This function is mainly used to handle SLURM_TMPDIR on ComputeCanada.
-            If DATA_ROOT is defined as an environment variable, the datasets are copied to it as they are accessed. This function is called
-            when we need the source path from a given path under DATA_ROOT.
-        """
-        if "DATA_ROOT" in os.environ and os.environ["DATA_ROOT"] != "":
-            # Verify that the path is under
-            data_root = Path(os.environ["DATA_ROOT"])
-            assert data_root in path.parents, f"Expected dataset item path ({path}) to be located under the data root ({data_root})."
-            src_path = Path(*path.parts[len(data_root.parts):]) # drops the data_root part from the path, to get the relative path to the source file.
-            return src_path
-        return path
-
-    def set_test(self):
-        self.is_test = True
-        print('setting test mode')
-
-    def get_video_subsequence(self, video, idx):
-        # Take a subsequence of the video.
-        start_i = (idx * self.T) % self.chunk_size
-        video = video[start_i:start_i+self.T]
-        assert len(video) == self.T
-        return video
-
-
-class OfflineVideoDataset(Dataset):
-    # __getitem__ returns data of shape <1 x self.T x ...>
-    def __init__(self, path, T=1):
-        # NOTE: self.chunk_size denotes the number of frames present in each npy file.
-        #       self.T denotes the number of frames that the dataset should return to the model per item.
-        super().__init__()
-        self.T = T
-        self.path = Path(path)
-        self.is_test = False
+        self.restart_index = int(restart_index) if restart_index is not None else None
 
         config = json.load(open(self.path / 'config.json'))
         self.T_total = config['T_total']
@@ -347,14 +292,18 @@ class OfflineVideoDataset(Dataset):
         assert self.T_total % self.T == 0
         assert self.T_total % self.chunk_size == 0
         assert self.chunk_size % self.T == 0
+        assert self.restart_index is None or (self.restart_index > 0 and self.restart_index % self.T == 0)
 
-        self.train_path = self.path / 'train'
-        self.test_path = self.path / 'test'
+        self.train_path = self.path / 'train' / str(seed)
+        self.test_path = self.path / 'test' / str(seed)
 
     def __len__(self):
-        return self.T_total - self.T
+        return self.T_total - self.T + 1
 
     def __getitem__(self, idx):
+        if self.restart_index is not None:
+            idx = idx % self.restart_index
+
         paths = self.getitem_paths(idx)
         self.cache_files(paths)
         try:
@@ -366,12 +315,10 @@ class OfflineVideoDataset(Dataset):
         return self.postprocess_video(video), {}
 
     def getitem_paths(self, idx):
-        # chunk_idx = idx // self.chunk_size
-        # return self.path / (("test" if self.is_test else "train") + "/" + f"{chunk_idx}.npy")
         chunk_idxs = [idx // self.chunk_size]
-        if (idx % self.chunk_size) + self.T >= self.chunk_size:
+        if (idx % self.chunk_size) + self.T > self.chunk_size:
             chunk_idxs.append((idx // self.chunk_size) + 1)
-        return [self.path / (("test" if self.is_test else "train") + "/" + f"{chunk_idx}.npy") for chunk_idx in chunk_idxs]
+        return [(self.test_path if self.is_test else self.train_path) / f"{cidx}.npy" for cidx in chunk_idxs]
 
     def loaditem(self, paths):
         loaded = [np.load(path) for path in paths]
@@ -418,70 +365,82 @@ class OfflineVideoDataset(Dataset):
         return video
 
 
-class BallDataset(ChunkedBaseDataset):
-    def __init__(self, path, shard, num_shards, T):
-        assert shard == 0, "Distributed training is not supported by the Bouncing Ball dataset yet."
-        assert num_shards == 1, "Distributed training is not supported by the Bouncing Ball dataset yet."
-        super().__init__(path=path, T=T)
+class ChunkedBaseDataset(ContinuousBaseDataset):
+    """
+    A dataset that takes one long video saved in multiple .npy files and returns a size T video frame
+    subsequence indexed by the location of the sliding window's first frame in the video divided by T.
 
-    def getitem_path(self, idx):
-        chunk_idx = (idx * self.T) // self.chunk_size
-        return self.path / (("test" if self.is_test else "train") + "/" + f"{chunk_idx}.npy")
+    __getitem__ returns data of shape <1 x T x ...>
+    self.chunk_size denotes the number of frames present in each npy file.
+    T denotes the number of frames that the dataset should return to the model per item.
+    """
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
 
-    def loaditem(self, path):
-        return np.load(path)
+    def __len__(self):
+        return self.T_total // self.T
 
-    def postprocess_video(self, video):
-        byte_to_tensor = lambda x: ToTensor()(x)
-        video = th.stack([byte_to_tensor(frame).float() for frame in video])
-        video = 2 * video - 1
+    def getitem_paths(self, idx):
+        chunk_idxs = [(idx * self.T) // self.chunk_size]
+        return [(self.test_path if self.is_test else self.train_path) / f"{cidx}.npy" for cidx in chunk_idxs]
+
+    def get_video_subsequence(self, video, idx):
+        # Take a subsequence of the video.
+        start_i = (idx * self.T) % self.chunk_size
+        video = video[start_i:start_i+self.T]
+        assert len(video) == self.T
         return video
 
 
-class WindowsMazeDataset(ChunkedBaseDataset):
+class SpacedBaseDataset(ContinuousBaseDataset):
+    """
+    A dataset that takes one long video saved in multiple .npy files and returns a size T video frame
+    subsequence indexed by the location of the sliding window's first frame in the video divided by T.
+
+    __getitem__ returns data of shape <1 x T x ...>
+    self.chunk_size denotes the number of frames present in each npy file.
+    T denotes the number of frames that the dataset should return to the model per item.
+    """
+    def __init__(self, n_data: int, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.n_data = n_data
+        self.spacing = self.T_total // self.n_data
+        assert self.spacing % self.T == 0
+        assert self.restart_index is None
+
+    def __len__(self):
+        return self.n_data
+
+    def getitem_paths(self, idx):
+        chunk_idxs = [(idx * self.spacing) // self.chunk_size]
+        return [(self.test_path if self.is_test else self.train_path) / f"{cidx}.npy" for cidx in chunk_idxs]
+
+    def get_video_subsequence(self, video, idx):
+        # Take a subsequence of the video.
+        start_i = (idx * self.spacing) % self.chunk_size
+        video = video[start_i:start_i+self.T]
+        assert len(video) == self.T
+        return video
+
+
+class WindowsMazeDataset(ContinuousBaseDataset):
     """
     Youtube video download and preprocessing
 
     yt-dlp "https://www.youtube.com/watch?v=MHGnSqr9kK8&ab_channel=Dprotp" -S res:256
     ffmpeg -i '10 Hours of Windows 3D Maze [MHGnSqr9kK8].webm' -filter:v "fps=30,crop=240:240:30:0,scale=64:64" windows_maze_10h_r64.mp4
     """
-    def __init__(self, path, shard, num_shards, T):
+    def __init__(self, path, shard, num_shards, T, seed):
         assert shard == 0, "Distributed training is not supported by the Bouncing Ball dataset yet."
         assert num_shards == 1, "Distributed training is not supported by the Bouncing Ball dataset yet."
-        super().__init__(path=path, T=T)
-
-    def getitem_path(self, idx):
-        chunk_idx = (idx * self.T) // self.chunk_size
-        return self.path / (("test" if self.is_test else "train") + "/" + f"{chunk_idx}.npy")
-
-    def loaditem(self, path):
-        return np.load(path)
-
-    def postprocess_video(self, video):
-        byte_to_tensor = lambda x: ToTensor()(x)
-        video = th.stack([byte_to_tensor(frame).float() for frame in video])
-        video = 2 * video - 1
-        return video
+        super().__init__(path=path, T=T, seed=seed)
 
 
-class MineDataset(ChunkedBaseDataset):
-    def __init__(self, path, shard, num_shards, T):
+class MineDataset(ContinuousBaseDataset):
+    def __init__(self, path, shard, num_shards, T, seed):
         assert shard == 0, "Distributed training is not supported by the Bouncing Ball dataset yet."
         assert num_shards == 1, "Distributed training is not supported by the Bouncing Ball dataset yet."
-        super().__init__(path=path, T=T)
-
-    def getitem_path(self, idx):
-        chunk_idx = (idx * self.T) // self.chunk_size
-        return self.path / (("test" if self.is_test else "train") + "/" + f"{chunk_idx}.npy")
-
-    def loaditem(self, path):
-        return np.load(path)
-
-    def postprocess_video(self, video):
-        byte_to_tensor = lambda x: ToTensor()(x)
-        video = th.stack([byte_to_tensor(frame).float() for frame in video])
-        video = 2 * video - 1
-        return video
+        super().__init__(path=path, T=T, seed=seed)
 
 
 class CarlaDataset(BaseDataset):

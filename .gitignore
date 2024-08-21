@@ -1,7 +1,7 @@
 visualisations/
 datasets/cifar_*
-datasets/ball
-datasets/ball500k
+datasets/ball*
+!datasets/ball.py
 datasets/ball1m
 datasets/2balls1m
 datasets/continual_minecraft

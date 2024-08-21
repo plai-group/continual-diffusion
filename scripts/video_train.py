@@ -11,7 +11,7 @@ import torch.distributed as dist
 
 from improved_diffusion import dist_util
 from improved_diffusion.video_datasets import load_data, default_T_dict, default_image_size_dict,\
-                                              data_encoding_stats_dict, CONTINUAL_DATASETS
+                                              data_encoding_stats_dict
 from improved_diffusion.resample import create_named_schedule_sampler
 from improved_diffusion.script_util import (
     model_and_diffusion_defaults,
@@ -72,11 +72,9 @@ def main():
         print(f"num_workers is not specified. It is automatically set to \"number of cores - 1\" = {args.num_workers}")
 
     # Set T and image size
-    video_length = default_T_dict[args.dataset]
-    default_T = video_length
     default_image_size = default_image_size_dict[args.dataset]
     pre_encoded_dataset = args.diffusion_space == "latent" and args.dataset in data_encoding_stats_dict
-    args.T = default_T if args.T == -1 else args.T
+    args.T = default_T_dict[args.dataset] if args.T == -1 else args.T
     args.image_size = {
         "pixel": default_image_size,
         "latent": default_image_size // (1 if pre_encoded_dataset else 8),
@@ -118,8 +116,9 @@ def main():
         T=args.T,
         num_workers=args.num_workers,
         resume_id=args.resume_id,
+        seed=args.data_seed,
+        restart_index=args.restart_index,
     )
-    args.continual_learning = args.dataset in CONTINUAL_DATASETS
 
     print("training...")
     TrainLoop(
@@ -146,7 +145,6 @@ def main():
         replay_dataset_kwargs=args.replay_dataset_kwargs,
         steps_per_experience=args.steps_per_experience,
         masking_mode=args.masking_mode,
-        continual_learning=args.continual_learning,
         args=args,
     ).run_loop()
 
@@ -162,7 +160,7 @@ def create_argparser():
         microbatch=-1,  # -1 disables microbatches
         ema_rate="0.9999",  # comma-separated list of EMA values
         log_interval=10,
-        save_interval=50000,
+        save_interval=100000,
         resume_checkpoint="",
         use_fp16=False,
         fp16_scale_growth=1e-3,
@@ -179,9 +177,11 @@ def create_argparser():
         n_sample_stm=-1,
         n_sample_ltm=1,
         steps_per_experience=1,
-        masking_mode="flexible",
+        masking_mode="autoregressive",
         save_replay_mem=False,
         attentive_er=False,  # If true, the model attends to replay frames
+        data_seed=0,
+        restart_index=None,
     )
     defaults.update(model_and_diffusion_defaults())
     parser = argparse.ArgumentParser()

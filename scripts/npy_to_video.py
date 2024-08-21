@@ -1,8 +1,10 @@
 import argparse
 import numpy as np
+import sys
 import torch as th
 import uuid
 
+sys.path.append('..')
 from improved_diffusion.test_util import tensor2mp4
 
 parser = argparse.ArgumentParser()

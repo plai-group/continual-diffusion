@@ -60,7 +60,6 @@ class TrainLoop:
         replay_dataset_kwargs,
         steps_per_experience,
         masking_mode,
-        continual_learning,
         args,
     ):
         self.args = args
@@ -146,7 +145,6 @@ class TrainLoop:
 
         self.steps_per_experience = steps_per_experience
         self.masking_mode = masking_mode
-        self.continual_learning = continual_learning
 
     def _load_and_sync_parameters(self):
         resume_checkpoint = find_resume_checkpoint(self.args) or self.resume_checkpoint

@@ -9,8 +9,8 @@ http://www.cs.utoronto.ca/~ilya/code/2008/RTRBM.T_totalar
 
 import argparse
 import json
-from numpy import *
 import os
+from numpy import *
 
 
 
@@ -23,8 +23,10 @@ COLOR_TRANSITION = {('green','red'): 'yellow', ('yellow','red'): 'green',
 BALL_POSITIONS_FILENAME = "ball_positions.npy"
 
 
-def norm(x): return sqrt((x**2).sum())
-def sigmoid(x): return 1./(1.+exp(-x))
+def norm(x):
+    return sqrt((x**2).sum())
+def sigmoid(x):
+    return 1./(1.+exp(-x))
 
 
 def new_speeds(m1, m2, v1, v2):
@@ -38,10 +40,11 @@ def new_speeds(m1, m2, v1, v2):
 def direction_changed(v1, v2):
     v1_x, v1_y = v1
     v2_x, v2_y = v2
-    return ((v1_x > 0) != (v2_x > 0)) or ((v1_y > 0) != (v2_y > 0))
+    return (v1_x != v2_x) or (v1_y != v2_y)
+    # return ((v1_x > 0) != (v2_x > 0)) or ((v1_y > 0) != (v2_y > 0))
 
 
-def bounce_n(T=128, n=2, r=None, m=None):
+def bounce_n(T=128, n=2, color_shift=None, r=None, m=None):
     if r is None:
         r = array([4.0]*n)
     if m is None:
@@ -83,7 +86,13 @@ def bounce_n(T=128, n=2, r=None, m=None):
 
             X[t, i] = x[i]
             V[t, i] = v[i]
-            C[t, i] = COLORS[curr_color]
+
+            if color_shift:
+                # Slowly add blue to all the ball colors
+                adjusted_color = (*COLORS[curr_color][:-1], COLORS[curr_color][-1]+t/T)
+            else:
+                adjusted_color = COLORS[curr_color]
+            C[t, i] = adjusted_color
 
             if t>0 and direction_changed(V[t-1,i], V[t,i]):
                 next_color = COLOR_TRANSITION[(prev_color, curr_color)]
@@ -172,10 +181,10 @@ def matricize(X, V, res, chunk_size, save_dir, r=None, C=None):
                 save(f, A_c)
 
 
-def bounce_vec(save_dir, res, n=2, T=128, chunk_size=100, r=None, m=None):
+def bounce_vec(save_dir, res, n=2, color_shift=False, T=128, chunk_size=100, r=None, m=None):
     if r is None:
         r = array([1.2]*n)
-    x, v, c = bounce_n(T, n, r, m)  # x: <seq_len x num_balls x 2>
+    x, v, c = bounce_n(T, n, color_shift, r, m)  # x: <seq_len x num_balls x 2>
     if save_dir is not None:
         with open(f"{save_dir}/{BALL_POSITIONS_FILENAME}", 'wb') as f:
             save(f, x)
@@ -187,16 +196,17 @@ def unsigmoid(x): return log(x) - log(1-x)
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--save_dir", type=str, default="datasets/ball")
-    parser.add_argument("--T_total", type=int, default=100000)
-    parser.add_argument("--chunk_size", type=int, default=10000)
+    parser.add_argument("--save_dir", type=str, default="datasets/ball_stn")
+    parser.add_argument("--T_total", type=int, default=1000000)
+    parser.add_argument("--chunk_size", type=int, default=1000)
     parser.add_argument("--resolution", type=int, default=32)
     parser.add_argument("--seed", type=int, default=0)
-    parser.add_argument("--num_balls", type=int, default=1)
+    parser.add_argument("--num_balls", type=int, default=2)
+    parser.add_argument("--color_shift", action='store_true')
     args = parser.parse_args()
 
     random.seed(args.seed)
-    train_path, test_path = f"{args.save_dir}/train", f"{args.save_dir}/test"
+    train_path, test_path = f"{args.save_dir}/train/{args.seed}", f"{args.save_dir}/test/{args.seed}"
     os.makedirs(train_path, exist_ok=True)
     os.makedirs(test_path, exist_ok=True)
     assert args.T_total % args.chunk_size == 0
@@ -205,7 +215,9 @@ if __name__ == "__main__":
         json.dump(args.__dict__, f, indent=2)
 
     # save train data
-    bounce_vec(train_path, args.resolution, args.num_balls, args.T_total, args.chunk_size)
+    bounce_vec(train_path, args.resolution, args.num_balls, args.color_shift,
+               args.T_total, args.chunk_size)
 
     # save test data
-    bounce_vec(test_path, args.resolution, args.num_balls, args.T_total, args.chunk_size)
+    bounce_vec(test_path, args.resolution, args.num_balls, args.color_shift,
+               args.T_total, args.chunk_size)

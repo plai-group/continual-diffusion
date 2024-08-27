@@ -212,7 +212,8 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     # HACK: Do this for now
-    assert args.start_index == 0, "Start index must be 0 due to the test set potentially being evenly spaced out from the entire test video."
+    if not args.visualize_mode:
+        assert args.start_index == 0, "Start index must be 0 due to the test set potentially being evenly spaced out from the entire test video."
 
     # Prepare which indices to sample (for unconditional generation index does nothing except change file name)
     if args.stop_index is None:

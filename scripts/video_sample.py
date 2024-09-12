@@ -212,8 +212,8 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     # HACK: Do this for now
-    if not args.visualize_mode:
-        assert args.start_index == 0, "Start index must be 0 due to the test set potentially being evenly spaced out from the entire test video."
+    # if not args.visualize_mode:
+    #     assert args.start_index == 0, "Start index must be 0 due to the test set potentially being evenly spaced out from the entire test video."
 
     # Prepare which indices to sample (for unconditional generation index does nothing except change file name)
     if args.stop_index is None:
@@ -247,24 +247,20 @@ if __name__ == "__main__":
     if args.max_latent_frames is None:
         args.max_latent_frames = args.max_frames // 2 
 
-
-    # Load the dataset (to get observations from)
-    dataset = get_test_dataset(dataset_name=model_args.dataset, T=args.T, n_data=len(args.indices))
-
-    if args.eval_on_train:
-        dataset.is_test = False
-
-    # if args.just_visualise:
-    #     visualise(args, model, diffusion, dataset)
-    #     exit()
-
     # Prepare samples directory
     args.eval_dir = get_model_results_path(args) / get_eval_run_identifier(args)
     samples_prefix = "samples_train" if args.eval_on_train else "samples"
 
+    # Load the dataset (to get observations from)
     if args.visualize_mode:
         dataset = get_vis_dataset(dataset_name=model_args.dataset, T=args.T)
         samples_prefix += "_vis"
+    else:
+        dataset = get_test_dataset(dataset_name=model_args.dataset, T=args.T, n_data=len(args.indices))
+
+    if args.eval_on_train:
+        dataset.is_test = False
+
 
     (args.eval_dir / samples_prefix).mkdir(parents=True, exist_ok=True)
     print(f"Saving samples to {args.eval_dir / samples_prefix}")

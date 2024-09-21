@@ -5,7 +5,7 @@ from pathlib import Path
 import torch
 from typing import List
 
-from improved_diffusion.video_datasets import get_test_dataset
+from improved_diffusion.video_datasets import get_test_dataset, video_data_paths_dict
 from improved_diffusion.script_util import str2bool
 from video_fvd import SampleDataset
 
@@ -73,7 +73,7 @@ def get_kernel_maxacts(frame, kernels, n_max=1):
         topk_result = torch.topk(distances, k=n_max * 4, largest=False)
         best_match_indices, min_dists = topk_result.indices, topk_result.values
         min_locs = torch.unravel_index(best_match_indices, (width - kernel_size + 1, height - kernel_size + 1))
-        min_locs = torch.stack(min_locs, dim=0).transpose(0, 1)
+        min_locs = torch.stack(min_locs[::-1], dim=0).transpose(0, 1)
         curr_stats = [(loc.tolist(), dist.item(), k) for loc, dist in zip(min_locs, min_dists)]
 
         # HACK: Ensure the centers of balls are at least 4 pixels away from the best match location for this ball.
@@ -172,10 +172,15 @@ def compute_minADE(test_dataset, sample_datasets, n_obs, T, n_balls):
     # TODO: Have 3 kernels for red, white, yellow
 
     all_ADEs, all_accs, all_transitions = [], [], []
-    for _ in range(len(test_dataset)):
+    dataset_obj = test_dataset.dataset
+    for i in range(len(test_dataset)):
         test_frames = next(test_loader)[0]
         sample_frames = [next(sample_loader)[0] for sample_loader in sample_loaders]
-        ADE, acc, transitions = compute_minADE_exemplar(test_frames, sample_frames, kernels, T, n_balls, n_obs)
+        exemplar_kernel = kernels.clone()
+        if str(dataset_obj.path) == video_data_paths_dict["ball_nstn"]:
+            #  HACK: For adjusting kernel blue channels to account for nonstationarity
+            exemplar_kernel[:,-1] += i/dataset_obj.n_data
+        ADE, acc, transitions = compute_minADE_exemplar(test_frames, sample_frames, exemplar_kernel, T, n_balls, n_obs)
         all_ADEs.append(ADE)
         all_accs.append(acc)
         all_transitions.append(transitions)

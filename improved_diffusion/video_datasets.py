@@ -139,6 +139,7 @@ def get_test_dataset(dataset_name, T=None, seed=0, n_data=None):
         dataset = SpacedBaseDataset(n_data, data_path, T=T, seed=seed)
     elif "wmaze" in dataset_name:
         dataset = ChunkedBaseDataset(data_path, T=T, seed=seed)
+        # dataset = SpacedBaseDataset(n_data, data_path, T=T, seed=seed)
     elif dataset_name == "mine":
         dataset = MineDataset(data_path, shard=0, num_shards=1, T=T)
     elif dataset_name == "streaming_mine":

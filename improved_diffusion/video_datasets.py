@@ -10,6 +10,7 @@ import shutil
 from mpi4py import MPI
 
 from .test_util import Protect
+from .plaicraft_dataset import PlaicraftDataset
 
 
 
@@ -20,8 +21,8 @@ video_data_paths_dict = {
     "streaming_ball_nstn": "datasets/ball_nstn",
     "wmaze":               "datasets/windows_maze",
     "streaming_wmaze":     "datasets/windows_maze",
-    "mine":                "datasets/continual_minecraft",
-    "streaming_mine":      "datasets/continual_minecraft",
+    "plaicraft":           "datasets/plaicraft",
+    "streaming_plaicraft": "datasets/plaicraft",
     "minerl":              "datasets/minerl_navigate-torch",
     "mazes_cwvae":         "datasets/gqn_mazes-torch",
     "carla_no_traffic":    "datasets/carla/no-traffic",
@@ -36,8 +37,8 @@ default_T_dict = {
     "streaming_ball_nstn": 10,  # gets reset to 1 for the dataset
     "wmaze":               20,
     "streaming_wmaze":     20,
-    "mine":                500,
-    "streaming_mine":      1,
+    "plaicraft":           20,
+    "streaming_plaicraft": 20,
     "minerl":              500,
     "mazes_cwvae":         300,
     "carla_no_traffic":    1000,
@@ -52,6 +53,8 @@ default_image_size_dict = {
     "streaming_ball_nstn": 32,
     "wmaze":               64,
     "streaming_wmaze":     64,
+    "plaicraft":           160,
+    "streaming_plaicraft": 160,
     "mine":                64,
     "streaming_mine":      64,
     "minerl":              64,
@@ -59,10 +62,6 @@ default_image_size_dict = {
     "carla_no_traffic":    128,
     "carla_no_traffic_2x": 256,
     "carla_no_traffic_2x_encoded": 32,
-}
-
-data_encoding_stats_dict = {
-    "carla_no_traffic_2x_encoded": "datasets/carla/no-traffic-encoded/encoded_train_norm_stats.pt",
 }
 
 
@@ -79,6 +78,10 @@ def load_data(dataset_name, batch_size, T=None, deterministic=False, num_workers
         dataset = ContinuousBaseDataset(data_path, T=T, seed=seed)
     elif "wmaze" in dataset_name:
         dataset = ContinuousBaseDataset(data_path, T=T, seed=seed)
+    elif dataset_name == "streaming_plaicraft":
+        dataset = PlaicraftDataset(data_path, window_length=100)
+    elif dataset_name == "plaicraft":
+        dataset = PlaicraftDataset(data_path, window_length=1000)
     elif dataset_name == "mine":
         dataset = MineDataset(data_path, shard=shard, num_shards=num_shards, T=T)
     elif dataset_name == "streaming_mine":
@@ -140,6 +143,9 @@ def get_test_dataset(dataset_name, T=None, seed=0, n_data=None):
     elif "wmaze" in dataset_name:
         dataset = ChunkedBaseDataset(data_path, T=T, seed=seed)
         # dataset = SpacedBaseDataset(n_data, data_path, T=T, seed=seed)
+    elif "plaicraft" in dataset_name:
+        # FIXME: No difference to the train set!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+        dataset = PlaicraftDataset(data_path, window_length=10000)
     elif dataset_name == "mine":
         dataset = MineDataset(data_path, shard=0, num_shards=1, T=T)
     elif dataset_name == "streaming_mine":

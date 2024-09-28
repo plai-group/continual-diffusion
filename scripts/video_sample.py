@@ -1,6 +1,9 @@
 """
 Generate a large batch of image samples from a model and save them as a large
 numpy array. This can be used to produce samples for FID evaluation.
+
+Sample Command
+python scripts/video_sample.py checkpoints/p9lrebju/ema_0.9999_050000.pt --T=50 --stop_index=3 --max_frames=10 --n_obs=5 --sampling_scheme=autoreg --batch_size=1 --eval_on_train=True --sampler=heun-80-inf-0-1-1000-0.002-7-100
 """
 
 import argparse
@@ -36,6 +39,10 @@ def sample_video(args, model, diffusion, batch, just_get_indices=False):
     B, T, C, H, W = batch.shape
     samples = th.zeros_like(batch)
     samples[:, :args.n_obs] = batch[:, :args.n_obs]
+
+    # Observation-level samples
+    visualized_samples = None
+
     # Intilise sampling scheme
     optimal_schedule_path = None if args.optimality is None else args.eval_dir / "optimal_schedule.pt"
     frame_indices_iterator = iter(sampling_schemes[args.sampling_scheme](
@@ -98,12 +105,32 @@ def sample_video(args, model, diffusion, batch, just_get_indices=False):
                 return_attn_weights=False,
                 **sampler_kwargs,
             )
+
+            if isinstance(local_samples, tuple):
+                # Edge case: Encoded sample
+                visualized_local_samples = local_samples[1]
+                local_samples = local_samples[0]
+            else:
+                # No encoded samples
+                visualized_local_samples = local_samples
+
+            if visualized_samples is None:
+                if local_samples.shape == visualized_local_samples.shape:
+                    decoded_obs_batch = batch[:, args.n_obs].to(batch.device)
+                else:
+                    decoded_obs_batch = diffusion.decode(batch[:, :args.n_obs].to(th.float16)).to(batch.device)
+                C_d, H_d, W_d = decoded_obs_batch.shape[2:]
+                visualized_samples = th.zeros(B, T, *decoded_obs_batch.shape[2:]).to(batch.device).to(batch.dtype)
+                visualized_samples[:, :args.n_obs] = decoded_obs_batch
+
             print('local samples', local_samples.min(), local_samples.max())
-            # Fill in the generated frames
+
+        # Fill in the generated frames
         for i, li in enumerate(latent_frame_indices):
             samples[i, li] = local_samples[i, -len(li):].cpu().to(samples.dtype)
+            visualized_samples[i, li] = visualized_local_samples[i, -len(li):].cpu().to(visualized_local_samples.dtype)
         indices_used.append((obs_frame_indices, latent_frame_indices))
-    return samples, indices_used
+    return visualized_samples, indices_used
 
 
 def main(args, model, diffusion, dataset, samples_prefix):
@@ -269,8 +296,9 @@ if __name__ == "__main__":
     json_path = args.eval_dir / "model_config.json"
     if not json_path.exists():
         with Protect(json_path): # avoids race conditions
+            to_save = vars(model_args)
             with open(json_path, "w") as f:
-                json.dump(vars(model_args), f, indent=4)
+                json.dump(to_save, f, indent=4)
         print(f"Saved model config at {json_path}")
 
     main(args, model, diffusion, dataset, samples_prefix)

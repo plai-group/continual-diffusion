@@ -340,7 +340,7 @@ class TrainLoop:
         while not self.lr_anneal_steps or self.step < self.lr_anneal_steps:
             try:
                 ctx_batch = self.get_ctx_batch()
-            except Exception as e:
+            except StopIteration as e:
                 print(e)
                 break
 
@@ -581,7 +581,8 @@ class TrainLoop:
                 return_attn_weights=True,
                 return_decoded=False,
             )
-            samples = self.decode(samples.cpu() * latent_mask + batch * obs_mask).float()
+            # NOTE: Don't decode latent samples
+            samples = (samples.cpu() * latent_mask + batch * obs_mask).float()
             _mark_as_observed(samples[:, :n_obs])
             samples = ((samples + 1) * 127.5).clamp(0, 255).to(th.uint8).cpu().numpy()
             for i, video in enumerate(samples):

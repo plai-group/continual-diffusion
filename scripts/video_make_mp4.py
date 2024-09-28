@@ -8,7 +8,12 @@ import json
 
 from improved_diffusion.video_datasets import get_test_dataset, get_vis_dataset
 from improved_diffusion.test_util import mark_as_observed, tensor2gif, tensor2mp4
-from improved_diffusion.script_util import str2bool
+from improved_diffusion.script_util import str2bool, create_model_and_diffusion, model_and_diffusion_defaults, args_to_dict
+
+"""
+Sample Command
+python scripts/video_make_mp4.py --eval_dir=results/p9lrebju/ema_0.9999_050000_heun-80-inf-0-1-1000-0.002-7-100/autoreg_10_5_50_5 --do_n=3 --obs_length=5 --eval_on_train=True --num_sampled_videos=3 --add_gt=False
+"""
 
 
 if __name__ == "__main__":
@@ -55,11 +60,18 @@ if __name__ == "__main__":
     out_path = out_dir / f"{args.do_n}_{args.n_seeds}.{args.format}"
 
     videos = []
+    decode_fn = None
     for data_idx in range(args.start_idx, args.start_idx+args.do_n):
         if args.add_gt:
 
             gt_drange = [-1, 1]
             gt_video, _ = dataset[data_idx]
+
+            if gt_video.shape[-3] == 4:
+                if decode_fn is None:
+                    decode_fn = create_model_and_diffusion(**args_to_dict(model_args, model_and_diffusion_defaults().keys()))[1].decode
+                gt_video = decode_fn(gt_video.to(th.float16), chunk_size=10).to(gt_video.device).squeeze()
+
             gt_video = (gt_video.numpy() - gt_drange[0]) / (gt_drange[1] - gt_drange[0])  * 255
             gt_video = gt_video.astype(np.uint8)
             mark_as_observed(gt_video)

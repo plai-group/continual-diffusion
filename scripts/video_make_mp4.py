@@ -70,7 +70,7 @@ if __name__ == "__main__":
             if gt_video.shape[-3] == 4:
                 if decode_fn is None:
                     decode_fn = create_model_and_diffusion(**args_to_dict(model_args, model_and_diffusion_defaults().keys()))[1].decode
-                gt_video = decode_fn(gt_video.to(th.float16), chunk_size=10).to(gt_video.device).squeeze()
+                gt_video = decode_fn(gt_video.to(th.float16).unsqueeze(0), chunk_size=10).to(gt_video.device).squeeze()
 
             gt_video = (gt_video.numpy() - gt_drange[0]) / (gt_drange[1] - gt_drange[0])  * 255
             gt_video = gt_video.astype(np.uint8)

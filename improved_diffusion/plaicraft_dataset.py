@@ -3,7 +3,6 @@ import torch
 from pathlib import Path
 from torch.utils.data import Dataset, DataLoader
 import math
-import time
 import cv2
 import numpy as np
 from diffusers import AutoencoderKL
@@ -11,21 +10,28 @@ import ffmpeg
 import os
 
 
+"""
+Sample command for zipping .db and encoded_video subdirectories.
+
+find plaicraft_test/ -type f \( -name '*.db' \) -o -type d \( -name encoded_video  \) | zip -r plaicraft_debug.zip -@
+"""
+
 class PlaicraftDataset(Dataset):
+    # Fixed constants
     LATENT_FPS = 10  # FPS of the encoded latents
     LATENTS_PER_BATCH = 100  # Each .pt file stores 100 latents (10 seconds of data at 10 fps)
     USE_FP16 = True
 
-    def __init__(self, dataset_path, player_names=["Kyrie"], window_length=1000, output_fps=10):
+    def __init__(self, dataset_path, player_names, window_length=100, output_fps=10):
         """
         Initialize the dataset with parameters.
         :param dataset_path: Path to the dataset folder.
         :param player_names: List of player names to retrieve data for.
-        :param window_length: Length of each data window in milliseconds.
+        :param window_length: Number of latent frames in each data window.
         :param output_fps: Desired latents per second for output (default: 10, subsampled from stored latents).
         """
         self.dataset_path = Path(dataset_path)
-        self.window_length = window_length  # Window length in ms
+        self.window_length = window_length  # Window length in number of latent frames
         self.global_db_path = self.dataset_path / "global_database.db"
         self.player_names = player_names
         self.output_fps = output_fps
@@ -34,17 +40,16 @@ class PlaicraftDataset(Dataset):
         # Validate parameters
         self._validate_parameters()
 
+        # Initialize sessions and frame indices
+        self._initialize_sessions()
+
     def _validate_parameters(self):
+        """Ensure that input parameters are valid and within expected ranges."""
         assert isinstance(self.window_length, int) and self.window_length > 0, f"window_length must be a positive integer, but got {self.window_length}."
         assert isinstance(self.output_fps, int) and self.output_fps > 0, f"output_fps must be a positive integer, but got {self.output_fps}."
 
-        """Ensure that input parameters are valid and within expected ranges."""
         # Check if output_fps is valid (max is 10 fps, minimum should be 1 fps)
         assert 1 <= self.output_fps <= self.LATENT_FPS, f"output_fps must be between 1 and {self.LATENT_FPS}, but got {self.output_fps}."
-
-        # Check if window_length is valid (must allow at least one frame)
-        min_window_length = 1000 / self.output_fps  # Minimum window length in ms for 1 frame
-        assert self.window_length >= min_window_length, f"window_length must be at least {math.ceil(min_window_length)} ms for the chosen output_fps of {self.output_fps}, but got {self.window_length}."
 
     def _open_connection(self):
         """Open a connection to the global database for session metadata."""
@@ -73,57 +78,142 @@ class PlaicraftDataset(Dataset):
 
         return sessions
 
-    def _get_player_session_index(self, idx):
-        """Map the global index to the corresponding player and session."""
-        count = 0
-        for player_idx, (_, sessions) in enumerate(self.sessions):
-            session_len = sum(math.ceil((frame_count // 3) /
-                                        (self.window_length * self.LATENT_FPS // (1000)))
-                              for session_id, start_time, frame_count, fps, db_path in sessions)
-            if idx < count + session_len:
-                return player_idx, idx - count
-            count += session_len
-        raise IndexError(f"Index {idx} out of range.")
+    def _initialize_sessions(self):
+        """Initialize sessions and compute cumulative frame counts."""
+        self.session_info_list = []
+        self.session_boundaries = []
+        total_frames = 0
 
-    def _load_session_info(self, session_id, db_path):
-        """Load session metadata from the individual session database."""
-        con = sqlite3.connect(db_path)
-        cur = con.cursor()
-        cur.execute("""
-            SELECT session_id, video_usable, fps, frame_count, start_time
-            FROM session WHERE session_id = ?
-        """, (session_id,))
-        session_info = cur.fetchone()
-        con.close()
+        sessions = self._get_sessions()
+        for player_name, player_sessions in sessions:
+            for session in player_sessions:
+                session_id, start_time, frame_count, fps, player_email = session
+                latent_frames = frame_count // 3  # Latent frames at 10 fps
 
-        if not session_info:
-            raise ValueError(f"No session info found for session ID: {session_id}")
+                session_start_frame = total_frames
+                session_end_frame = total_frames + latent_frames
 
-        session_folder = Path(db_path).parent
-        return {
-            "session_id": session_info[0],
-            "fps": session_info[2],  # This is the original 30 fps
-            "frame_count": session_info[3],  # This is the original 30 fps frame count
-            "start_time": session_info[4],
-            "paths": {
-                "video_encodings": session_folder / "encoded_video"  # Latents at 10 fps
-            }
-        }
+                session_info = {
+                    'player_name': player_name,
+                    'session_id': session_id,
+                    'player_email': player_email,
+                    'start_time': start_time,
+                    'frame_count': latent_frames,
+                    'session_start_frame': session_start_frame,
+                    'session_end_frame': session_end_frame,
+                    'paths': {
+                        'video_encodings': self.dataset_path / player_email / session_id / "encoded_video"
+                    }
+                }
+                self.session_info_list.append(session_info)
+                self.session_boundaries.append((session_start_frame, session_end_frame, session_info))
 
-    def _load_video_encodings(self, session_info, relative_start_time):
+                total_frames = session_end_frame
+        self.total_frames = total_frames
+
+        # Calculate the total number of windows and discard the last incomplete window if necessary
+        self.total_windows = self.total_frames // self.window_length
+
+    def _dequantize_from_int8(self, quantized_tensor, min_val, scale):
         """
-        Load the video latents for a specific time window based on relative start time.
+        Dequantize latents from int8 to float32, broadcasting min_val and scale correctly.
+        """
+        # Ensure min_val and scale are broadcastable to quantized_tensor's shape
+        while min_val.dim() < quantized_tensor.dim():
+            min_val = min_val.unsqueeze(-1)  # Expand dimensions
+        while scale.dim() < quantized_tensor.dim():
+            scale = scale.unsqueeze(-1)  # Expand dimensions
+
+        # Dequantize the latents
+        dequantized = quantized_tensor.to(torch.float32) * scale + min_val
+        return dequantized.half() if self.USE_FP16 else dequantized
+
+    def __len__(self):
+        """Return the total number of windows across all sessions."""
+        return self.total_windows
+
+    def __getitem__(self, idx):
+        """
+        Retrieve a data item by index.
+        """
+        start_frame = idx * self.window_length
+        end_frame = start_frame + self.window_length
+
+        if end_frame > self.total_frames:
+            # This should not happen as we discarded the last incomplete window
+            raise IndexError(f"Index {idx} out of range.")
+
+        frames = []
+        session_segments = []
+        window_frame_idx = 0  # Index within the window
+
+        current_frame = start_frame
+        frames_needed = self.window_length
+
+        # Iterate over session boundaries to collect frames
+        for session_start, session_end, session_info in self.session_boundaries:
+            if current_frame >= session_end:
+                continue  # Current frame is beyond this session
+            elif current_frame < session_start:
+                continue  # Current frame is before this session
+
+            # Calculate the number of frames to load from this session
+            session_frame_start = max(current_frame, session_start)
+            session_frame_end = min(end_frame, session_end)
+            num_frames = session_frame_end - session_frame_start
+
+            # Local frame indices within the session
+            local_start_frame = session_frame_start - session_start
+            local_end_frame = local_start_frame + num_frames
+
+            # Load frames from the session
+            session_frames = self._load_video_encodings(session_info, local_start_frame, num_frames)
+            frames.append(session_frames)
+
+            # Record session segment information
+            session_segment = {
+                'player_name': session_info['player_name'],
+                'session_id': session_info['session_id'],
+                'window_start_idx': window_frame_idx,
+                'window_end_idx': window_frame_idx + num_frames,
+                'session_start_idx': local_start_frame,
+                'session_end_idx': local_end_frame
+            }
+            session_segments.append(session_segment)
+
+            window_frame_idx += num_frames
+            current_frame += num_frames
+            frames_needed -= num_frames
+
+            if frames_needed <= 0:
+                break
+
+        # Now assemble the frames
+        frames = torch.cat(frames, dim=0)
+
+        # Ensure we have the correct number of frames
+        if frames.shape[0] < self.window_length:
+            # This should only happen at the very end, which we discard
+            raise IndexError(f"Incomplete window at index {idx}, should have been discarded.")
+
+        # Collect unique player names and session IDs
+        player_names = list({segment['player_name'] for segment in session_segments})
+        session_ids = list({segment['session_id'] for segment in session_segments})
+
+        return frames, {}
+
+    def _load_video_encodings(self, session_info, start_frame, num_frames):
+        """
+        Load the video latents for a specific window based on start frame and number of frames.
         This function handles loading the required latents and dequantizing them.
         """
         encodings_dir = session_info['paths']['video_encodings']
-        latent_frame_count = session_info['frame_count'] // 3  # Downsampled to 10 fps
+        latent_frame_count = session_info['frame_count']  # Already latent frames
 
-        start_frame = int(relative_start_time / 1000 * self.output_fps)  # Latent start frame
-        end_frame = start_frame + int(self.window_length / 1000 * self.output_fps)  # Latent end frame
+        end_frame = start_frame + num_frames
 
-        max_frame = latent_frame_count
-        if end_frame > max_frame:
-            end_frame = max_frame
+        if end_frame > latent_frame_count:
+            end_frame = latent_frame_count  # Adjust end_frame if it exceeds the session's frame count
 
         batch_idx_start = start_frame // self.LATENTS_PER_BATCH
         batch_idx_end = (end_frame - 1) // self.LATENTS_PER_BATCH  # Adjust for zero-based indexing
@@ -151,9 +241,9 @@ class PlaicraftDataset(Dataset):
         accumulated_min_vals = torch.cat(accumulated_min_vals, dim=0)
         accumulated_scales = torch.cat(accumulated_scales, dim=0)
 
-        # Calculate the global indices
+        # Calculate the global indices within the accumulated arrays
         global_start_idx = start_frame - batch_idx_start * self.LATENTS_PER_BATCH
-        global_end_idx = global_start_idx + (end_frame - start_frame)
+        global_end_idx = global_start_idx + num_frames
 
         sliced_latents = accumulated_latents[global_start_idx:global_end_idx]
         sliced_min_vals = accumulated_min_vals[global_start_idx:global_end_idx]
@@ -162,104 +252,16 @@ class PlaicraftDataset(Dataset):
         # Dequantize latents (but don't decode them)
         dequantized_latents = self._dequantize_from_int8(sliced_latents, sliced_min_vals, sliced_scales)
 
-        # Handle padding if the window length exceeds the available frames
-        expected_length = int(self.window_length / 1000 * self.output_fps)
-        current_length = dequantized_latents.shape[0]
-        if current_length < expected_length:
-            padding_size = expected_length - current_length
-            pad_shape = (padding_size,) + dequantized_latents.shape[1:]
-            padding = torch.zeros(pad_shape, dtype=dequantized_latents.dtype)
-            dequantized_latents = torch.cat([dequantized_latents, padding], dim=0)
-
         return dequantized_latents
-
-    def _dequantize_from_int8(self, quantized_tensor, min_val, scale):
-        """
-        Dequantize latents from int8 to float32, broadcasting min_val and scale correctly.
-        """
-        # Ensure min_val and scale are broadcastable to quantized_tensor's shape
-        while min_val.dim() < quantized_tensor.dim():
-            min_val = min_val.unsqueeze(-1)  # Expand dimensions
-        while scale.dim() < quantized_tensor.dim():
-            scale = scale.unsqueeze(-1)  # Expand dimensions
-
-        # Dequantize the latents
-        dequantized = quantized_tensor.to(torch.float32) * scale + min_val
-        return dequantized.half() if self.USE_FP16 else dequantized
-
-    def __len__(self):
-        """Return the total number of windows across all sessions."""
-        if self.sessions is None:
-            self.sessions = self._get_sessions()
-
-        total_windows = 0
-
-        for _, sessions in self.sessions:
-            for session_id, start_time, frame_count, fps, db_path in sessions:
-                # Total number of latent frames processed (frame_count is for 30 fps)
-                latent_frames = frame_count // 3  # Downsampled to 10 fps
-
-                # Each frame generates latents, calculate the number of windows based on window length
-                latents_per_window = self.window_length * self.LATENT_FPS // 1000
-                num_windows = math.ceil(latent_frames / latents_per_window)
-
-                total_windows += num_windows
-
-        return total_windows
-
-    def __getitem__(self, idx):
-        """
-        Retrieve a data item by index, loading the corresponding player and session data,
-        then loading the video encodings for the relevant window.
-        """
-        if self.sessions is None:
-            self.sessions = self._get_sessions()
-
-        player_idx, session_offset = self._get_player_session_index(idx)
-        player_name, session_data = self.sessions[player_idx]
-
-        # Map the offset to the correct session
-        session_cumulative_idx = 0
-        for session_idx, session in enumerate(session_data):
-            session_id, session_start_time, frame_count, fps, player_email = session
-            latent_frames = frame_count // 3  # Latent frames at 10 fps
-            latents_per_window = self.window_length * self.LATENT_FPS // 1000
-            num_windows = math.ceil(latent_frames / latents_per_window)
-            if session_cumulative_idx + num_windows > session_offset:
-                # This is the correct session
-                window_idx = session_offset - session_cumulative_idx
-                break
-            session_cumulative_idx += num_windows
-
-        db_path = self.dataset_path / player_email / session_id / f"{session_id}.db"
-
-        # Load session info
-        session_info = self._load_session_info(session_id, db_path)
-
-        # Calculate relative start time for the current window (in ms)
-        relative_start_time = window_idx * self.window_length
-
-        # Load video encodings for the current window using the relative start time
-        video_encodings = self._load_video_encodings(session_info, relative_start_time)
-        return video_encodings, {}
-
-        # return {
-        #     "player_name": player_name,
-        #     "session_id": session_id,
-        #     "session_start_time": session_start_time,  # Absolute session start time
-        #     "window_start_time": relative_start_time,  # Relative time with respect to the start of the video
-        #     "video_encodings": video_encodings,
-        # }
 
     @staticmethod
     def collate_fn(batch):
         """Combine multiple data items into a batch."""
         return {
-            "player_name": [item["player_name"] for item in batch],
-            "session_id": [item["session_id"] for item in batch],
-            "session_start_time": [item["session_start_time"] for item in batch],
-            "window_start_time": [item["window_start_time"] for item in batch],
-            "video_encodings": torch.stack([item["video_encodings"] for item in batch])  # Stack the tensors directly
+            "frames": torch.stack([item["frames"] for item in batch]),
+            "player_names": [item["player_names"] for item in batch],
+            "session_ids": [item["session_ids"] for item in batch],
+            "session_segments": [item["session_segments"] for item in batch],
         }
 
     def __del__(self):

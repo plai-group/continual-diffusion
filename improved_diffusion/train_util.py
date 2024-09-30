@@ -342,6 +342,7 @@ class TrainLoop:
                 ctx_batch = self.get_ctx_batch()
             except StopIteration as e:
                 print(e)
+                self.step += 1
                 break
 
             for _ in range(self.steps_per_experience):
@@ -429,6 +430,9 @@ class TrainLoop:
             else:
                 with self.ddp_model.no_sync():
                     losses = compute_losses()
+
+            if losses['loss'].isnan().sum() > 0:
+                raise Exception("Loss is nan.")
 
             if isinstance(self.schedule_sampler, LossAwareSampler):
                 self.schedule_sampler.update_with_local_losses(

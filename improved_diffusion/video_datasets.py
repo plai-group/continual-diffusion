@@ -23,6 +23,7 @@ video_data_paths_dict = {
     "streaming_wmaze":     "datasets/windows_maze",
     "plaicraft":           "datasets/plaicraft",
     "streaming_plaicraft": "datasets/plaicraft",
+    # "streaming_plaicraft": "datasets/plaicraft_debug",
     "minerl":              "datasets/minerl_navigate-torch",
     "mazes_cwvae":         "datasets/gqn_mazes-torch",
     "carla_no_traffic":    "datasets/carla/no-traffic",
@@ -79,9 +80,13 @@ def load_data(dataset_name, batch_size, T=None, deterministic=False, num_workers
     elif "wmaze" in dataset_name:
         dataset = ContinuousBaseDataset(data_path, T=T, seed=seed)
     elif dataset_name == "streaming_plaicraft":
-        dataset = PlaicraftDataset(data_path, window_length=100)
+        # TODO JASON: Read SLURM_TMPDIR path and set the data_path appropriately.
+        # dataset = PlaicraftDataset(data_path, window_length=1, player_names=["Hiroshi"])
+        dataset = PlaicraftDataset(data_path, window_length=1, player_names=["Kyrie"])
+        dataset.T = 1
     elif dataset_name == "plaicraft":
-        dataset = PlaicraftDataset(data_path, window_length=1000)
+        dataset = PlaicraftDataset(data_path, window_length=T, player_names=["Kyrie"])
+        dataset.T = T
     elif dataset_name == "mine":
         dataset = MineDataset(data_path, shard=shard, num_shards=num_shards, T=T)
     elif dataset_name == "streaming_mine":
@@ -102,11 +107,12 @@ def load_data(dataset_name, batch_size, T=None, deterministic=False, num_workers
     else:
         raise Exception("no dataset", dataset_name)
 
+
     if resume_id and deterministic:  # start from specific data stream index.
         with open(os.path.join('checkpoints', resume_id, 'replay_state.json')) as f:
             n_observed = json.load(f)['n_obs']
-            start_index = n_observed // dataset.T + 1
-            print(f"starting deterministic dataloader from {n_observed+1}-th datapoint.")
+            start_index = n_observed // dataset.T
+            print(f"starting deterministic dataloader from datapoint with index {n_observed}.")
         dataset = th.utils.data.Subset(dataset, indices=range(start_index, len(dataset)))
 
     if return_dataset:
@@ -145,7 +151,7 @@ def get_test_dataset(dataset_name, T=None, seed=0, n_data=None):
         # dataset = SpacedBaseDataset(n_data, data_path, T=T, seed=seed)
     elif "plaicraft" in dataset_name:
         # FIXME: No difference to the train set!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-        dataset = PlaicraftDataset(data_path, window_length=10000)
+        dataset = PlaicraftDataset(data_path, window_length=T)
     elif dataset_name == "mine":
         dataset = MineDataset(data_path, shard=0, num_shards=1, T=T)
     elif dataset_name == "streaming_mine":
@@ -352,6 +358,7 @@ class ContinuousBaseDataset(Dataset):
             If DATA_ROOT is defined as an environment variable, the datasets are copied to it as they are accessed. This function is called
             when we need the source path from a given path under DATA_ROOT.
         """
+        # TODO JASON: ONLY COPY NON MP4 FILES!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
         if "DATA_ROOT" in os.environ and os.environ["DATA_ROOT"] != "":
             # Verify that the path is under
             data_root = Path(os.environ["DATA_ROOT"])

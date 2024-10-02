@@ -114,7 +114,6 @@ def main():
         num_workers=args.num_workers,
         resume_id=args.resume_id,
         seed=args.data_seed,
-        restart_index=args.restart_index,
     )
 
     print("training...")
@@ -178,7 +177,6 @@ def create_argparser():
         save_replay_mem=False,
         attentive_er=False,  # If true, the model attends to replay frames
         data_seed=0,
-        restart_index=None,
     )
     defaults.update(model_and_diffusion_defaults())
     parser = argparse.ArgumentParser()

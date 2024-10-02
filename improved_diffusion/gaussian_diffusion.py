@@ -1057,6 +1057,8 @@ class GaussianDiffusion:
         if self.diffusion_space == "pixel":
             return
         elif self.diffusion_space == "latent":
+            # NOTE: Since we are not plotting during runtime, no need to load Stable Diffusion Encoder.
+            return
             print('Loading VAE encoder and decoder.')
             from diffusers import AutoencoderKL
             self.enc_dec_dtype = th.float16

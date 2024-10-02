@@ -20,7 +20,7 @@ Then, when running `scripts/video_train.py` provide the flag `--dataset=carla_no
 # Full overview
 # Usage
 
-Tested with Python 3.10 in a conda environment. We require the Python packages `tensordict mpi4py torch torchvision wandb blobfile tqdm moviepy imageio diffusers` as well as the command line tool `ffmpeg`. This repository itself should also be installed by running
+Tested with Python 3.10 in a conda environment. We require the Python packages `tensordict mpi4py torch torchvision wandb blobfile tqdm moviepy imageio diffusers opencv-python` as well as the command line tool `ffmpeg`. This repository itself should also be installed by running
 ```
 pip install -e .
 ```

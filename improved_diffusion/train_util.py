@@ -11,6 +11,7 @@ import numpy as np
 import torch as th
 import torch.distributed as dist
 from torch.nn.parallel.distributed import DistributedDataParallel as DDP
+from torch.nn.parallel import DataParallel as DP
 from torch.optim import AdamW
 
 from . import dist_util
@@ -124,14 +125,15 @@ class TrainLoop:
 
         if th.cuda.is_available():
             self.use_ddp = True
-            self.ddp_model = DDP(
-                self.model,
-                device_ids=[dist_util.dev()],
-                output_device=dist_util.dev(),
-                broadcast_buffers=False,
-                bucket_cap_mb=128,
-                find_unused_parameters=False,
-            )
+            # self.ddp_model = DDP(
+            #     self.model,
+            #     device_ids=[dist_util.dev()],
+            #     output_device=dist_util.dev(),
+            #     broadcast_buffers=False,
+            #     bucket_cap_mb=128,
+            #     find_unused_parameters=False,
+            # )
+            self.ddp_model = DP(self.model)
         else:
             if dist.get_world_size() > 1:
                 print(

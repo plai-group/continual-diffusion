@@ -32,8 +32,8 @@ default_T_dict = {
     "streaming_ball_nstn": 10,  # gets reset to 1 for the dataset
     "wmaze":               20,
     "streaming_wmaze":     20,
-    "plaicraft":           20,
-    "streaming_plaicraft": 20,
+    "plaicraft":           10,
+    "streaming_plaicraft": 10,
 }
 
 default_image_size_dict = {

@@ -172,10 +172,6 @@ class GaussianDiffusion:
 
         self.diffusion_space = diffusion_space_kwargs.get("diffusion_space")
         self.pre_encoded = diffusion_space_kwargs.get("pre_encoded")
-        self.pre_encoded_stats_dict = diffusion_space_kwargs.get("pre_encoded_stats_dict")
-        if self.pre_encoded:
-            self.pre_encoded_stats_dict["mean"] = self.pre_encoded_stats_dict["mean"].reshape(1, 1, -1, 1, 1)
-            self.pre_encoded_stats_dict["std"] = self.pre_encoded_stats_dict["std"].reshape(1, 1, -1, 1, 1)
 
         self.original_dtype = None
         self.setup_enc_dec()
@@ -851,7 +847,7 @@ class GaussianDiffusion:
                 d_prime = (x_next - denoised) / s_next
                 x_next = x_hat + (s_next - s_hat) * (0.5 * d_cur + 0.5 * d_prime)
 
-        return (self.decode(x_next) if return_decoded else x_next), None
+        return ((x_next, self.decode(x_next)) if return_decoded else x_next), None
 
 
     def _vb_terms_bpd(
@@ -1061,17 +1057,13 @@ class GaussianDiffusion:
         if self.diffusion_space == "pixel":
             return
         elif self.diffusion_space == "latent":
+            # NOTE: Since we are not plotting during runtime, no need to load Stable Diffusion Encoder.
+            return
             print('Loading VAE encoder and decoder.')
-            from diffusers import StableVideoDiffusionPipeline
-            self.enc_dec_dtype, variant = th.float16, "fp16"
-            pipe = StableVideoDiffusionPipeline.from_pretrained(
-                "stabilityai/stable-video-diffusion-img2vid",
-                torch_dtype=self.enc_dec_dtype, variant=variant 
-            )
-            pipe.enable_model_cpu_offload()
-            self.image_processor = pipe.image_processor
-            self.vae = pipe.vae
-            del pipe
+            from diffusers import AutoencoderKL
+            self.enc_dec_dtype = th.float16
+            self.vae = AutoencoderKL.from_pretrained("madebyollin/sdxl-vae-fp16-fix", torch_dtype=self.enc_dec_dtype).cuda()
+            self.vae.eval()
             for p in self.vae.parameters():
                 p.requires_grad = False
             print('Loaded encoder and decoder.')
@@ -1105,12 +1097,13 @@ class GaussianDiffusion:
         if self.diffusion_space == "pixel":
             return video
         elif self.diffusion_space == "latent":
-            if self.pre_encoded:
-                video = video * self.pre_encoded_stats_dict['std'] + self.pre_encoded_stats_dict['mean']
             original_shape, original_device = video.shape, video.device
             video = video.flatten(0, 1).to(self.enc_dec_dtype).cuda()
+
             def decode_chunk(chunk):
-                return self.vae.decode(chunk, num_frames=1).sample
+                chunk = chunk / 0.13025  # Scaling factor from sample code
+                chunk = self.vae.decode(chunk).sample
+                return chunk
             result = th.cat([decode_chunk(video[i:i+chunk_size]) for i in range(0, video.shape[0], chunk_size)])
             return result.unflatten(0, (original_shape[0], original_shape[1])).to(original_device).to(self.original_dtype)
         elif self.diffusion_space == "wavelet":

@@ -10,8 +10,7 @@ import torch
 import torch.distributed as dist
 
 from improved_diffusion import dist_util
-from improved_diffusion.video_datasets import load_data, default_T_dict, default_image_size_dict,\
-                                              data_encoding_stats_dict
+from improved_diffusion.video_datasets import load_data, default_T_dict, default_image_size_dict
 from improved_diffusion.resample import create_named_schedule_sampler
 from improved_diffusion.script_util import (
     model_and_diffusion_defaults,
@@ -73,11 +72,10 @@ def main():
 
     # Set T and image size
     default_image_size = default_image_size_dict[args.dataset]
-    pre_encoded_dataset = args.diffusion_space == "latent" and args.dataset in data_encoding_stats_dict
     args.T = default_T_dict[args.dataset] if args.T == -1 else args.T
     args.image_size = {
         "pixel": default_image_size,
-        "latent": default_image_size // (1 if pre_encoded_dataset else 8),
+        "latent": default_image_size,
     }[args.diffusion_space]
     args.in_channels = {
         "pixel": 3,
@@ -94,8 +92,7 @@ def main():
     }
     args.diffusion_space_kwargs = {
         "diffusion_space": args.diffusion_space,
-        "pre_encoded": pre_encoded_dataset,
-        "pre_encoded_stats_dict": torch.load(data_encoding_stats_dict[args.dataset]) if pre_encoded_dataset else None
+        "pre_encoded": args.diffusion_space == "latent",
     }
 
     dist_util.setup_dist()
@@ -117,7 +114,6 @@ def main():
         num_workers=args.num_workers,
         resume_id=args.resume_id,
         seed=args.data_seed,
-        restart_index=args.restart_index,
     )
 
     print("training...")
@@ -181,7 +177,6 @@ def create_argparser():
         save_replay_mem=False,
         attentive_er=False,  # If true, the model attends to replay frames
         data_seed=0,
-        restart_index=None,
     )
     defaults.update(model_and_diffusion_defaults())
     parser = argparse.ArgumentParser()

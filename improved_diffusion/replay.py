@@ -21,10 +21,12 @@ def save_item_to_disk(item: ReplayItem, path: str) -> ReplayItem:
 
 def load_item_from_disk(path) -> ReplayItem:
     # Replacement for ReplayItem.load_memmap as it's not available in older versions...
-    result = TensorDict.load_memmap(path)
-    if isinstance(result, ReplayItem):
-        result = result.to_tensordict()
-    return ReplayItem(**result, batch_size=result.batch_size)
+    loaded = TensorDict.load_memmap(path)
+    if isinstance(loaded, ReplayItem):
+        loaded = loaded.to_tensordict()
+    result = ReplayItem(**loaded, batch_size=loaded.batch_size)
+    del loaded
+    return result
 
 
 def maybe_load_item_from_disk(item: Union[ReplayItem, int], path_prefix: str):

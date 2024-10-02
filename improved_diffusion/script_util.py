@@ -23,7 +23,7 @@ def model_and_diffusion_defaults():
         sigma_small=False,
         class_cond=False,
         diffusion_steps=1000,
-        diffusion_space_kwargs=dict(diffusion_space=None, pre_encoded=False, pre_encoded_stats_dict=None),
+        diffusion_space_kwargs=dict(diffusion_space=None, pre_encoded=False),
         noise_schedule="linear",
         timestep_respacing="",
         use_kl=False,
@@ -113,6 +113,8 @@ def create_model(
 ):
     if image_size == 256:
         channel_mult = (1, 1, 2, 2, 4, 4)
+    elif image_size == 160:
+        channel_mult = (1, 2, 3, 4)
     elif image_size == 128:
         channel_mult = (1, 1, 2, 3, 4)
     elif image_size == 64:
@@ -156,7 +158,7 @@ def create_gaussian_diffusion(
     rescale_timesteps=False,
     rescale_learned_sigmas=False,
     timestep_respacing="",
-    diffusion_space_kwargs={"diffusion_space": "pixel", "pre_encoded": False, "pre_encoded_stats_dict": None},
+    diffusion_space_kwargs={"diffusion_space": "pixel", "pre_encoded": False},
 ):
     betas = gd.get_named_beta_schedule(noise_schedule, steps)
     if use_kl:

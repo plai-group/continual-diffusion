@@ -32,8 +32,8 @@ default_T_dict = {
     "streaming_ball_nstn": 10,  # gets reset to 1 for the dataset
     "wmaze":               20,
     "streaming_wmaze":     20,
-    "plaicraft":           10,
-    "streaming_plaicraft": 10,
+    "plaicraft":           20,
+    "streaming_plaicraft": 20,
 }
 
 default_image_size_dict = {
@@ -119,7 +119,7 @@ def get_test_dataset(dataset_name, T=None, seed=0, n_data=None):
         # dataset = SpacedBaseDataset(n_data, data_path, T=T, seed=seed)
     elif "plaicraft" in dataset_name:
         # FIXME: No difference to the train set!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-        dataset = PlaicraftDataset(data_path, window_length=T)
+        dataset = PlaicraftDataset(data_path, window_length=T, player_names=["Kyrie"])
     else:
         raise Exception("no dataset", dataset_name)
     dataset.set_test()

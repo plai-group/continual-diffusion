@@ -23,7 +23,7 @@ def model_and_diffusion_defaults():
         sigma_small=False,
         class_cond=False,
         diffusion_steps=1000,
-        diffusion_space_kwargs=dict(diffusion_space=None, pre_encoded=False),
+        diffusion_space_kwargs=dict(diffusion_space=None, pre_encoded=False, enable_decoding=False),
         noise_schedule="linear",
         timestep_respacing="",
         use_kl=False,

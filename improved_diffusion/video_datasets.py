@@ -3,12 +3,15 @@ import json
 import os
 import numpy as np
 import torch as th
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import DataLoader, Dataset, DistributedSampler
 from torchvision.transforms import ToTensor
+import torch.distributed as dist
 from pathlib import Path
 import shutil
 from mpi4py import MPI
+from improved_diffusion.replay_sampler import DistributedReplaySampler
 
+from .train_util import get_blob_logdir
 from .test_util import Protect
 from .plaicraft_dataset import PlaicraftDataset
 
@@ -59,14 +62,15 @@ def get_data_path(dataset_name):
     return data_path
 
 
-def load_data(dataset_name, batch_size, T=None, deterministic=False, num_workers=1, return_dataset=False, resume_id='', seed=0):
+def load_data(dataset_name, batch_size, T=None, deterministic=False, num_workers=1, return_dataset=False,
+              resume_id='', seed=0, buffer_size=None, n_sequential=1, save_every=None):
     data_path = get_data_path(dataset_name)
     T = default_T_dict[dataset_name] if T is None else T
     shard = MPI.COMM_WORLD.Get_rank()
     num_shards = MPI.COMM_WORLD.Get_size()
 
     if dataset_name.startswith("streaming"):
-        T, deterministic = 1, True
+        deterministic = True
     if "ball_stn" in dataset_name:
         dataset = ContinuousBaseDataset(data_path, T=T, seed=seed)
     elif "ball_nstn" in dataset_name:
@@ -83,18 +87,23 @@ def load_data(dataset_name, batch_size, T=None, deterministic=False, num_workers
     else:
         raise Exception("no dataset", dataset_name)
 
-    if resume_id and deterministic:  # start from specific data stream index.
-        with open(os.path.join('checkpoints', resume_id, 'replay_state.json')) as f:
-            n_observed = json.load(f)['n_obs']
-            start_index = n_observed // dataset.T
-            print(f"starting deterministic dataloader from datapoint with index {n_observed}.")
-        dataset = th.utils.data.Subset(dataset, indices=range(start_index, len(dataset)))
-
     if return_dataset:
         return dataset
 
-    loader = DataLoader(dataset, batch_size=batch_size, shuffle=(not deterministic),
-                        num_workers=num_workers, drop_last=True)
+    if deterministic:
+        save_path = os.path.join(get_blob_logdir(resume_id), 'replay_state.pt') if dist.get_rank() == 0 else ''
+        sampler = DistributedReplaySampler(dataset, batch_size, buffer_size=buffer_size, seed=seed,
+                                           n_sequential=n_sequential, save_args=dict(path=save_path, every=save_every))
+        if resume_id:
+            load_path = os.path.join(get_blob_logdir(resume_id), 'replay_state.pt')
+            sampler.load_sampler(path)
+            print(f"starting replay dataloader from data index {sampler.curr_index}.")
+    else:
+        sampler = DistributedSampler(dataset, shuffle=True, seed=seed)
+        sampler.set_epoch(0)
+
+    batch_size = batch_size // dist.get_world_size()
+    loader = DataLoader(dataset, batch_size=batch_size, num_workers=num_workers, sampler=sampler)
     while True:
         yield from loader
         if deterministic:
@@ -183,7 +192,9 @@ class ContinuousBaseDataset(Dataset):
             print(f"Failed on loading {paths}")
             raise e
         video = self.get_video_subsequence(video, idx)
-        return self.postprocess_video(video), {}
+        frames = self.postprocess_video(video)
+        absolute_index_map = th.arange(idx, idx+self.T)
+        return frames, absolute_index_map
 
     def getitem_paths(self, idx):
         chunk_idxs = [idx // self.chunk_size]

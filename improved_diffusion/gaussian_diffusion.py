@@ -174,7 +174,7 @@ class GaussianDiffusion:
         self.pre_encoded = diffusion_space_kwargs.get("pre_encoded")
 
         self.original_dtype = None
-        self.setup_enc_dec()
+        self.setup_enc_dec(enable_decoding=diffusion_space_kwargs.get("enable_decoding"))
 
     def q_mean_variance(self, x_start, t):
         """
@@ -1053,12 +1053,13 @@ class GaussianDiffusion:
             model_kwargs=model_kwargs, latent_mask=latent_mask,
             t_seq=list(range(self.num_timesteps))[::-1])
 
-    def setup_enc_dec(self):
+    def setup_enc_dec(self, enable_decoding=False):
         if self.diffusion_space == "pixel":
             return
         elif self.diffusion_space == "latent":
-            # NOTE: Since we are not plotting during runtime, no need to load Stable Diffusion Encoder.
-            return
+            # NOTE: Since we are not plotting during train time, no need to load Stable Diffusion Encoder.
+            if not enable_decoding:
+                return
             print('Loading VAE encoder and decoder.')
             from diffusers import AutoencoderKL
             self.enc_dec_dtype = th.float16

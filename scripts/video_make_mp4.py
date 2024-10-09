@@ -69,10 +69,11 @@ if __name__ == "__main__":
 
             if gt_video.shape[-3] == 4:
                 if decode_fn is None:
+                    model_args.diffusion_space_kwargs["enable_decoding"] = True
                     decode_fn = create_model_and_diffusion(**args_to_dict(model_args, model_and_diffusion_defaults().keys()))[1].decode
                 gt_video = decode_fn(gt_video.to(th.float16).unsqueeze(0), chunk_size=10).to(gt_video.device).squeeze()
 
-            gt_video = (gt_video.numpy() - gt_drange[0]) / (gt_drange[1] - gt_drange[0])  * 255
+            gt_video = (gt_video.clamp(*gt_drange).numpy() - gt_drange[0]) / (gt_drange[1] - gt_drange[0])  * 255
             gt_video = gt_video.astype(np.uint8)
             mark_as_observed(gt_video)
             videos.append([gt_video])

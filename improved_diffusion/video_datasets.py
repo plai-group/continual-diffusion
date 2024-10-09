@@ -128,7 +128,7 @@ def get_test_dataset(dataset_name, T=None, seed=0, n_data=None):
         # dataset = SpacedBaseDataset(n_data, data_path, T=T, seed=seed)
     elif "plaicraft" in dataset_name:
         # FIXME: No difference to the train set!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-        dataset = PlaicraftDataset(data_path, window_length=T)
+        dataset = PlaicraftDataset(data_path, window_length=T, player_names=["Kyrie"])
     else:
         raise Exception("no dataset", dataset_name)
     dataset.set_test()

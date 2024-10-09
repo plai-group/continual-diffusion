@@ -24,8 +24,7 @@ def load_item_from_disk(path) -> ReplayItem:
     loaded = TensorDict.load_memmap(path)
     if isinstance(loaded, ReplayItem):
         loaded = loaded.to_tensordict()
-    result = ReplayItem(**loaded, batch_size=loaded.batch_size)
-    del loaded
+    result = ReplayItem(**loaded.as_tensor(), batch_size=loaded.batch_size)
     return result
 
 

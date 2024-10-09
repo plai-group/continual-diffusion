@@ -146,7 +146,7 @@ def main(args, model, diffusion, dataset, samples_prefix):
         batch = th.stack([dataset[i][0] for i in batch_indices])
         samples, _ = sample_video(args, model, diffusion, batch)
         drange = [-1, 1]
-        samples = (samples.numpy() - drange[0]) / (drange[1] - drange[0]) * 255
+        samples = (samples.clamp(*drange).numpy() - drange[0]) / (drange[1] - drange[0]) * 255
         samples = samples.astype(np.uint8)
         for i in range(len(batch_indices)):
             if todo[i]:
@@ -261,6 +261,7 @@ if __name__ == "__main__":
     model_args = data["config"]
     model_args.update({"use_ddim": args.sampler == "ddim",
                        "timestep_respacing": args.timestep_respacing})
+    model_args["diffusion_space_kwargs"]["enable_decoding"] = True
     model_args = argparse.Namespace(**model_args)
     model, diffusion = create_model_and_diffusion(
         **args_to_dict(model_args, model_and_diffusion_defaults().keys())

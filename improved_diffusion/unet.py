@@ -427,7 +427,17 @@ class UNetVideoModel(nn.Module):
         """
         Get the dtype used by the torso of the model.
         """
-        return next(self.input_blocks.parameters()).dtype
+        # return next(self.input_blocks.parameters()).dtype
+        try:
+            return next(self.input_blocks.parameters()).dtype
+        except StopIteration:
+            # For nn.DataParallel compatibility in PyTorch 1.5
+            def find_tensor_attributes(module: nn.Module):
+                tuples = [(k, v) for k, v in module.__dict__.items() if th.is_tensor(v)]
+                return tuples
+            gen = self._named_members(get_members_fn=find_tensor_attributes)
+            first_tuple = next(gen)
+            return first_tuple[1].dtype
 
     def forward(self, x, *, x0, timesteps, frame_indices=None,
                 obs_mask=None, latent_mask=None, return_attn_weights=False

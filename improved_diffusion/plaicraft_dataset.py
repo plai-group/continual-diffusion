@@ -5,7 +5,6 @@ from torch.utils.data import Dataset, DataLoader
 import math
 import cv2
 import numpy as np
-from diffusers import AutoencoderKL
 import ffmpeg
 import os
 
@@ -16,13 +15,13 @@ Sample command for zipping .db and encoded_video subdirectories.
 find plaicraft_test/ -type f \( -name '*.db' \) -o -type d \( -name encoded_video  \) | zip -r plaicraft_debug.zip -@
 """
 
-class PlaicraftDataset(Dataset):
+class ContinuousPlaicraftDataset(Dataset):
     # Fixed constants
     LATENT_FPS = 10  # FPS of the encoded latents
     LATENTS_PER_BATCH = 100  # Each .pt file stores 100 latents (10 seconds of data at 10 fps)
     USE_FP16 = True
 
-    def __init__(self, dataset_path, player_names, window_length=100, output_fps=10):
+    def __init__(self, dataset_path, player_names_train, player_names_test, window_length=100, output_fps=10):
         """
         Initialize the dataset with parameters.
         :param dataset_path: Path to the dataset folder.
@@ -31,11 +30,13 @@ class PlaicraftDataset(Dataset):
         :param output_fps: Desired latents per second for output (default: 10, subsampled from stored latents).
         """
         self.dataset_path = Path(dataset_path)
-        self.window_length = window_length  # Window length in number of latent frames
+        self.window_length = self.T = window_length  # Window length in number of latent frames
         self.global_db_path = self.dataset_path / "global_database.db"
-        self.player_names = player_names
+        self.player_names_train = player_names_train
+        self.player_names_test = player_names_test
         self.output_fps = output_fps
         self.sessions = None  # Will be initialized in __getitem__
+        self.is_test = False
 
         # Validate parameters
         self._validate_parameters()
@@ -55,7 +56,7 @@ class PlaicraftDataset(Dataset):
         """Open a connection to the global database for session metadata."""
         self.connection = sqlite3.connect(self.global_db_path)
 
-    def _get_sessions(self):
+    def _get_sessions(self, player_names):
         """Retrieve all sessions belonging to the specified players that have the 'video' modality."""
         if not hasattr(self, 'connection'):
             self._open_connection()
@@ -64,7 +65,7 @@ class PlaicraftDataset(Dataset):
 
         # Get sessions for each player where video is usable
         sessions = []
-        for player_name in self.player_names:
+        for player_name in player_names:
             cur.execute("""
                 SELECT session_id, start_time, frame_count, fps, player_email
                 FROM session_metadata
@@ -84,7 +85,7 @@ class PlaicraftDataset(Dataset):
         self.session_boundaries = []
         total_frames = 0
 
-        sessions = self._get_sessions()
+        sessions = self._get_sessions(self.player_names_test if self.is_test else self.player_names_train)
         for player_name, player_sessions in sessions:
             for session in player_sessions:
                 session_id, start_time, frame_count, fps, player_email = session
@@ -111,9 +112,6 @@ class PlaicraftDataset(Dataset):
                 total_frames = session_end_frame
         self.total_frames = total_frames
 
-        # Calculate the total number of windows and discard the last incomplete window if necessary
-        self.total_windows = self.total_frames // self.window_length
-
     def _dequantize_from_int8(self, quantized_tensor, min_val, scale):
         """
         Dequantize latents from int8 to float32, broadcasting min_val and scale correctly.
@@ -130,13 +128,13 @@ class PlaicraftDataset(Dataset):
 
     def __len__(self):
         """Return the total number of windows across all sessions."""
-        return self.total_windows
+        return self.total_frames - self.window_length + 1
 
     def __getitem__(self, idx):
         """
         Retrieve a data item by index.
         """
-        start_frame = idx * self.window_length
+        start_frame = self._get_start_frame_index(idx)
         end_frame = start_frame + self.window_length
 
         if end_frame > self.total_frames:
@@ -190,6 +188,7 @@ class PlaicraftDataset(Dataset):
 
         # Now assemble the frames
         frames = torch.cat(frames, dim=0)
+        absolute_index_map = torch.arange(start_frame, end_frame)
 
         # Ensure we have the correct number of frames
         if frames.shape[0] < self.window_length:
@@ -200,7 +199,10 @@ class PlaicraftDataset(Dataset):
         player_names = list({segment['player_name'] for segment in session_segments})
         session_ids = list({segment['session_id'] for segment in session_segments})
 
-        return frames, {}
+        return frames, absolute_index_map
+
+    def _get_start_frame_index(self, idx):
+        return idx
 
     def _load_video_encodings(self, session_info, start_frame, num_frames):
         """
@@ -269,9 +271,42 @@ class PlaicraftDataset(Dataset):
         if hasattr(self, 'connection'):
             self.connection.close()
 
+    def set_train(self):
+        self.is_test = False
+        self._initialize_sessions()
+        print('setting train mode')
+
     def set_test(self):
-        # FIXME: IMPLEMENT TEST SET LOGIC HERE!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-        pass
+        self.is_test = True
+        self._initialize_sessions()
+        print('setting test mode')
+
+
+class ChunkedPlaicraftDataset(ContinuousPlaicraftDataset):
+    def _get_start_frame_index(self, idx):
+        return idx * self.window_length
+
+    def __len__(self):
+        """Return the total number of windows across all sessions."""
+        return self.total_frames // self.window_length
+
+
+class SpacedPlaicraftDataset(ContinuousPlaicraftDataset):
+    def __init__(self, n_data: int, *args, **kwargs):
+        self.n_data = n_data
+        super().__init__(*args, **kwargs)
+
+    def _get_start_frame_index(self, idx):
+        return idx * self.spacing
+
+    def __len__(self):
+        """Return the total number of windows across all sessions."""
+        return self.n_data
+
+    def _initialize_sessions(self):
+        super()._initialize_sessions()
+        self.spacing = self.total_frames // self.n_data
+        self.spacing = self.spacing - self.spacing % self.window_length
 
 
 
@@ -292,6 +327,7 @@ if __name__ == "__main__":
     dataloader = DataLoader(dataset, batch_size=1, num_workers=2)
 
     # Load the AutoencoderKL model for decoding
+    from diffusers import AutoencoderKL
     vae = AutoencoderKL.from_pretrained("madebyollin/sdxl-vae-fp16-fix", torch_dtype=torch.float16 if use_fp16 else torch.float32)
     vae = vae.to(device)
     vae.eval()  # Set to evaluation mode

@@ -120,15 +120,15 @@ class TrainLoop:
 
         if th.cuda.is_available():
             self.use_ddp = True
-            # self.ddp_model = DDP(
-            #     self.model,
-            #     device_ids=[dist_util.dev()],
-            #     output_device=dist_util.dev(),
-            #     broadcast_buffers=False,
-            #     bucket_cap_mb=128,
-            #     find_unused_parameters=False,
-            # )
-            self.ddp_model = DP(self.model)
+            self.ddp_model = DDP(
+                self.model,
+                device_ids=[dist_util.dev()],
+                output_device=dist_util.dev(),
+                broadcast_buffers=False,
+                bucket_cap_mb=128,
+                find_unused_parameters=False,
+            )
+            # self.ddp_model = DP(self.model)
         else:
             if dist.get_world_size() > 1:
                 print(
@@ -327,7 +327,7 @@ class TrainLoop:
         while not self.lr_anneal_steps or self.step < self.lr_anneal_steps:
             try:
                 frames, absolute_index_map = self.get_next_batch()
-                print(f"rank: {dist.get_rank()}, indices: {absolute_index_map[:,0].tolist()}, device: {dist_util.dev()}")
+                # print(f"rank: {dist.get_rank()}, indices: {absolute_index_map[:,0].tolist()}, device: {dist_util.dev()}")
             except RuntimeError as e:
                 print(e)
                 self.step += 1
@@ -541,10 +541,10 @@ class TrainLoop:
             n_obs = self.max_frames // 3
             obs_mask[0, :n_obs] = 1.
             latent_mask[0, n_obs:self.max_frames] = 1.
-            if self.batch_size > 1:
-                spacing = len(self.vis_batch[0]) // self.max_frames
-                obs_mask[1, :n_obs*spacing:spacing] = 1.
-                latent_mask[1, n_obs*spacing:self.max_frames*spacing:spacing] = 1.
+            # if self.batch_size > 1:
+            #     spacing = len(self.vis_batch[0]) // self.max_frames
+            #     obs_mask[1, :n_obs*spacing:spacing] = 1.
+            #     latent_mask[1, n_obs*spacing:self.max_frames*spacing:spacing] = 1.
             batch, frame_indices, obs_mask, latent_mask = self.sample_all_masks(
                 self.vis_batch, None, gather=True,
                  set_masks={'obs': obs_mask, 'latent': latent_mask}

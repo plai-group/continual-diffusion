@@ -13,7 +13,7 @@ from improved_diffusion.replay_sampler import DistributedReplaySampler
 
 from .train_util import get_blob_logdir
 from .test_util import Protect
-from .plaicraft_dataset import PlaicraftDataset
+from .plaicraft_dataset import ContinuousPlaicraftDataset, SpacedPlaicraftDataset
 
 
 
@@ -77,15 +77,14 @@ def load_data(dataset_name, batch_size, T=None, deterministic=False, num_workers
         dataset = ContinuousBaseDataset(data_path, T=T, seed=seed)
     elif "wmaze" in dataset_name:
         dataset = ContinuousBaseDataset(data_path, T=T, seed=seed)
-    elif dataset_name == "streaming_plaicraft":
-        # dataset = PlaicraftDataset(data_path, window_length=1, player_names=["Hiroshi"])
-        dataset = PlaicraftDataset(data_path, window_length=1, player_names=["Kyrie"])
-        dataset.T = 1
-    elif dataset_name == "plaicraft":
-        dataset = PlaicraftDataset(data_path, window_length=T, player_names=["Kyrie"])
-        dataset.T = T
+    elif "plaicraft" in dataset_name:
+        dataset = ContinuousPlaicraftDataset(data_path, window_length=T,
+                                             player_names_train=["Alex"],
+                                             player_names_test=["Kyrie"])
     else:
         raise Exception("no dataset", dataset_name)
+
+    # dataset = th.utils.data.Subset(dataset, [0]) # FIXME JASON!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
 
     if return_dataset:
         return dataset
@@ -96,8 +95,8 @@ def load_data(dataset_name, batch_size, T=None, deterministic=False, num_workers
                                            n_sequential=n_sequential, save_args=dict(path=save_path, every=save_every))
         if resume_id:
             load_path = os.path.join(get_blob_logdir(resume_id), 'replay_state.pt')
-            sampler.load_sampler(path)
-            print(f"starting replay dataloader from data index {sampler.curr_index}.")
+            sampler.load_sampler(path=load_path)
+            print(f"starting replay dataloader from data index {sampler.start_index}.")
     else:
         sampler = DistributedSampler(dataset, shuffle=True, seed=seed)
         sampler.set_epoch(0)
@@ -111,9 +110,7 @@ def load_data(dataset_name, batch_size, T=None, deterministic=False, num_workers
 
 
 def get_train_dataset(dataset_name, T=None, seed=0):
-    return load_data(
-        dataset_name, return_dataset=False, T=T, batch_size=None, deterministic=False, num_workers=None, seed=0
-    )
+    return load_data(dataset_name, T=T, batch_size=None, seed=0, return_dataset=True)
 
 
 def get_test_dataset(dataset_name, T=None, seed=0, n_data=None):
@@ -125,10 +122,10 @@ def get_test_dataset(dataset_name, T=None, seed=0, n_data=None):
         dataset = SpacedBaseDataset(n_data, data_path, T=T, seed=seed)
     elif "wmaze" in dataset_name:
         dataset = ChunkedBaseDataset(data_path, T=T, seed=seed)
-        # dataset = SpacedBaseDataset(n_data, data_path, T=T, seed=seed)
     elif "plaicraft" in dataset_name:
-        # FIXME: No difference to the train set!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-        dataset = PlaicraftDataset(data_path, window_length=T, player_names=["Kyrie"])
+        dataset = SpacedPlaicraftDataset(n_data, data_path, window_length=T,
+                                         player_names_train=["Alex"],
+                                         player_names_test=["Kyrie"])
     else:
         raise Exception("no dataset", dataset_name)
     dataset.set_test()
@@ -144,6 +141,10 @@ def get_vis_dataset(dataset_name, T=None, seed=0):
         dataset = ChunkedBaseDataset(data_path, T=T, seed=seed)
     elif "wmaze" in dataset_name:
         dataset = ChunkedBaseDataset(data_path, T=T, seed=seed)
+    elif "plaicraft" in dataset_name:
+        dataset = ChunkedPlaicraftDataset(data_path, window_length=T,
+                                          player_names_train=["Alex"],
+                                          player_names_test=["Kyrie"])
     else:
         raise Exception("no dataset", dataset_name)
     dataset.set_test()
@@ -243,6 +244,10 @@ class ContinuousBaseDataset(Dataset):
             assert data_root in path.parents, f"Expected dataset item path ({path}) to be located under the data root ({data_root})."
             path = Path(*path.parts[len(data_root.parts):]) # drops the data_root part from the path, to get the relative path to the source file.
         return json.load(open(path))
+
+    def set_train(self):
+        self.is_test = False
+        print('setting train mode')
 
     def set_test(self):
         self.is_test = True

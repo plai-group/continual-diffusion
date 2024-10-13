@@ -54,7 +54,7 @@ if __name__ == "__main__":
         else:
             dataset = get_test_dataset(model_args.dataset, T=T, n_data=args.num_sampled_videos)
         if args.eval_on_train:
-            dataset.is_test = False
+            dataset.set_train()
     out_dir = (Path(args.out_dir) if args.out_dir is not None else Path(args.eval_dir)) / videos_prefix
     out_dir.mkdir(parents=True, exist_ok=True)
     out_path = out_dir / f"{args.do_n}_{args.n_seeds}.{args.format}"
@@ -70,7 +70,8 @@ if __name__ == "__main__":
             if gt_video.shape[-3] == 4:
                 if decode_fn is None:
                     model_args.diffusion_space_kwargs["enable_decoding"] = True
-                    decode_fn = create_model_and_diffusion(**args_to_dict(model_args, model_and_diffusion_defaults().keys()))[1].decode
+                    diffusion = create_model_and_diffusion(**args_to_dict(model_args, model_and_diffusion_defaults().keys()))[1]
+                    decode_fn = diffusion.decode
                 gt_video = decode_fn(gt_video.to(th.float16).unsqueeze(0), chunk_size=10).to(gt_video.device).squeeze()
 
             gt_video = (gt_video.clamp(*gt_drange).numpy() - gt_drange[0]) / (gt_drange[1] - gt_drange[0])  * 255

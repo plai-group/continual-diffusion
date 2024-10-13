@@ -109,16 +109,16 @@ def sample_video(args, model, diffusion, batch, just_get_indices=False):
             if isinstance(local_samples, tuple):
                 # Edge case: Encoded sample
                 visualized_local_samples = local_samples[1]
-                local_samples = local_samples[0]
+                local_samples = local_samples[0].to(x0.dtype)
             else:
                 # No encoded samples
-                visualized_local_samples = local_samples
+                visualized_local_samples = local_samples.to(x0.dtype)
 
             if visualized_samples is None:
                 if local_samples.shape == visualized_local_samples.shape:
                     decoded_obs_batch = batch[:, args.n_obs].to(batch.device)
                 else:
-                    decoded_obs_batch = diffusion.decode(batch[:, :args.n_obs].to(th.float16)).to(batch.device)
+                    decoded_obs_batch = diffusion.decode(batch[:, :args.n_obs].to(th.float16), chunk_size=5).to(batch.device)
                 C_d, H_d, W_d = decoded_obs_batch.shape[2:]
                 visualized_samples = th.zeros(B, T, *decoded_obs_batch.shape[2:]).to(batch.device).to(batch.dtype)
                 visualized_samples[:, :args.n_obs] = decoded_obs_batch
@@ -154,64 +154,6 @@ def main(args, model, diffusion, dataset, samples_prefix):
                 print(f"*** Saved {output_filenames[i]} ***")
 
 
-# def visualise(args, model, diffusion, dataset):
-#     """
-#     batch has a shape of BxTxCxHxW where
-#     B: batch size
-#     T: video length
-#     CxWxH: image size
-#     """
-#     is_adaptive = "adaptive" in args.sampling_scheme
-#     bs = args.batch_size if is_adaptive else 1
-#     batch = next(iter(th.utils.data.DataLoader(dataset, batch_size=bs, shuffle=False, drop_last=False)))[0]
-#     _, indices = sample_video(args, model, diffusion, batch, just_get_indices=True)
-
-#     def visualise_obs_lat_sequence(sequence, index):
-#         """ if index is None, expects sequence to be a list of tuples of form (list, list)
-#             if index is given, expects sequence to be a list of tuples of form (list of lists (from which index i is taken), list of lists (from which index i is taken))
-#         """
-#         vis = []
-#         exist_indices = list(range(args.n_obs))
-#         for obs_frame_indices, latent_frame_indices in sequence:
-#             obs_frame_indices, latent_frame_indices = obs_frame_indices[index], latent_frame_indices[index]
-#             exist_indices.extend(latent_frame_indices)
-#             new_layer = th.zeros((args.T, 3)).int()
-#             border_colour = th.tensor([0, 0, 0]).int()
-#             not_sampled_colour = th.tensor([255, 255, 255]).int()
-#             exist_colour = th.tensor([50, 50, 50]).int()
-#             obs_colour = th.tensor([50, 50, 255]).int()
-#             latent_colour = th.tensor([255, 69, 0]).int()
-#             new_layer = th.zeros((args.T, 3)).int()
-#             new_layer[:, :] = not_sampled_colour
-#             new_layer[exist_indices, :] = exist_colour
-#             new_layer[obs_frame_indices, :] = obs_colour
-#             new_layer[latent_frame_indices, :] = latent_colour
-#             scale = 4
-#             new_layer = new_layer.repeat_interleave(scale+1, dim=0)
-#             new_layer[::(scale+1)] = border_colour
-#             new_layer = th.cat([new_layer, new_layer[:1]], dim=0)
-#             vis.extend([new_layer.clone() for _ in range(scale+1)])
-#             vis[-1][:] = border_colour
-#         vis = th.stack([vis[-1], *vis])
-#         if not is_adaptive:
-#             assert index == 0
-#         fname = f"vis_{args.sampling_scheme}_sampling-{args.T}-given-{args.n_obs}_{args.max_latent_frames}-{args.max_frames}-chunks"
-#         if args.optimality is not None:
-#             fname += f"_optimal-{args.optimality}"
-#         if is_adaptive:
-#             fname += f"_index-{index}"
-#         else:
-#             assert index == 0
-#         fname += '.png'
-#         dir = Path("visualisations")
-#         dir.mkdir(parents=True, exist_ok=True)
-#         Image.fromarray(vis.numpy().astype(np.uint8)).save(dir / fname)
-#         print(f"Saved to {str(dir / fname)}")
-
-#     for i in range(len(batch)):
-#         visualise_obs_lat_sequence(indices, i)
-
-
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("checkpoint_path", type=str)
@@ -229,7 +171,7 @@ if __name__ == "__main__":
     parser.add_argument("--use_ddim", type=str2bool, default=False)
     parser.add_argument("--eval_on_train", type=str2bool, default=False)
     parser.add_argument("--timestep_respacing", type=str, default="")
-    parser.add_argument("--clip_denoised", type=str2bool, default=True)
+    parser.add_argument("--clip_denoised", type=str2bool, default=True, help="If true, diffusion model generates data between [-1,1].")
     parser.add_argument("--sample_idx", type=int, default=0, help="Sampled images will have this specific index. Used for sampling multiple videos with the same observations.")
     parser.add_argument("--optimality", type=str, default=None,
                         choices=["linspace-t", "random-t", "linspace-t-force-nearby", "random-t-force-nearby"],
@@ -274,6 +216,8 @@ if __name__ == "__main__":
         args.max_frames = model_args.max_frames
     if args.max_latent_frames is None:
         args.max_latent_frames = args.max_frames // 2 
+    # if model_args.diffusion_space == "latent":
+    #     args.clip_denoised = False
 
     # Prepare samples directory
     args.eval_dir = get_model_results_path(args) / get_eval_run_identifier(args)
@@ -287,7 +231,7 @@ if __name__ == "__main__":
         dataset = get_test_dataset(dataset_name=model_args.dataset, T=args.T, n_data=len(args.indices))
 
     if args.eval_on_train:
-        dataset.is_test = False
+        dataset.set_train()
 
 
     (args.eval_dir / samples_prefix).mkdir(parents=True, exist_ok=True)

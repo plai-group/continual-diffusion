@@ -102,7 +102,7 @@ class DistributedReplaySampler(Sampler[T_co]):
             # update buffer
             if len(self.buffer_indices) < self.buffer_size:
                 self.buffer_indices.append(i)
-            else:
+            elif self.buffer_size > 0:
                 idx = torch.randint(i, (1,), generator=self.update_generator).item()
                 if idx < len(self.buffer_indices):
                     self.buffer_indices[idx] = i

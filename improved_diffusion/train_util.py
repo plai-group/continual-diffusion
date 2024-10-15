@@ -14,6 +14,9 @@ from torch.nn.parallel.distributed import DistributedDataParallel as DDP
 from torch.nn.parallel import DataParallel as DP
 from torch.optim import AdamW
 
+import torch_xla as xla
+import torch_xla.core.xla_model as xm
+
 from . import dist_util
 from .logger import logger
 from .fp16_util import (
@@ -122,8 +125,9 @@ class TrainLoop:
             self.use_ddp = True
             self.ddp_model = DDP(
                 self.model,
-                device_ids=[dist_util.dev()],
-                output_device=dist_util.dev(),
+                # device_ids=[dist_util.dev()],
+                # output_device=dist_util.dev(),
+                gradient_as_bucket_view=True,
                 broadcast_buffers=False,
                 bucket_cap_mb=128,
                 find_unused_parameters=False,
@@ -363,6 +367,7 @@ class TrainLoop:
         self.log_step()
         logger.logkv("timing/step_time", time() - t0)
     
+    @xla.step()
     def forward_backward(self, batch1, batch2, absolute_index_map=None):
         zero_grad(self.model_params)
 
@@ -438,7 +443,7 @@ class TrainLoop:
         self.master_params[0].grad.mul_(1.0 / (2 ** self.lg_loss_scale))
         self._log_grad_norm()
         self._anneal_lr()
-        self.opt.step()
+        xm.optimizer_step(self.opt)
         for rate, params in zip(self.ema_rate, self.ema_params):
             update_ema(params, self.master_params, rate=rate)
         master_params_to_model_params(self.model_params, self.master_params)
@@ -447,7 +452,7 @@ class TrainLoop:
     def optimize_normal(self):
         self._log_grad_norm()
         self._anneal_lr()
-        self.opt.step()
+        xm.optimizer_step(self.opt)
         for rate, params in zip(self.ema_rate, self.ema_params):
             update_ema(params, self.master_params, rate=rate)
 

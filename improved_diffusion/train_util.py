@@ -350,8 +350,9 @@ class TrainLoop:
                 self.step += 1
 
         # Save the last checkpoint if it wasn't already saved.
-        if (self.step - 1) % self.save_interval != 0:
-            self.save()
+        self.save()
+        # if (self.step - 1) % self.save_interval != 0:
+        #     self.save()
 
     def run_step(self, batch1, batch2, absolute_index_map=None):
         t0 = time()

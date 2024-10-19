@@ -12,6 +12,7 @@ import torch as th
 import torch.distributed as dist
 import torch_xla
 import torch_xla.core.xla_model as xm
+import torch_xla.distributed.xla_backend
 
 # Change this to reflect your cluster layout.
 # The GPU for a given rank is (rank % GPUS_PER_NODE).
@@ -56,7 +57,7 @@ def dev():
     """
     Get the device to use for th.distributed.
     """
-    if torch_xla.devices()>0:
+    if len(torch_xla.devices())>0:
         return xm.xla_device()
     if th.cuda.is_available():
         return th.device(f"cuda:{MPI.COMM_WORLD.Get_rank() % GPUS_PER_NODE}")

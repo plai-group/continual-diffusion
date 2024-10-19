@@ -35,6 +35,20 @@ from .rng_util import rng_decorator, RNG
 # 20-21 within the first ~1K steps of training.
 INITIAL_LOG_LOSS_SCALE = 20.0
 
+from functools import wraps
+from time import time
+
+def timing(f):
+    @wraps(f)
+    def wrap(*args, **kw):
+        ts = time()
+        result = f(*args, **kw)
+        te = time()
+        msg = 'func:%r took: %2.4f sec' % (f.__name__, te-ts)
+        if dist.get_rank() == 0:
+            print(msg)
+        return result
+    return wrap
 
 class TrainLoop:
     def __init__(
@@ -121,26 +135,14 @@ class TrainLoop:
                 copy.deepcopy(self.master_params) for _ in range(len(self.ema_rate))
             ]
 
-        if th.cuda.is_available():
-            self.use_ddp = True
-            self.ddp_model = DDP(
-                self.model,
-                # device_ids=[dist_util.dev()],
-                # output_device=dist_util.dev(),
-                gradient_as_bucket_view=True,
-                broadcast_buffers=False,
-                bucket_cap_mb=128,
-                find_unused_parameters=False,
-            )
-            # self.ddp_model = DP(self.model)
-        else:
-            if dist.get_world_size() > 1:
-                print(
-                    "Distributed training requires CUDA. "
-                    "Gradients will not be synchronized properly!"
-                )
-            self.use_ddp = False
-            self.ddp_model = self.model
+        self.use_ddp = True
+        self.ddp_model = DDP(
+             self.model,
+             # device_ids=[dist_util.dev()],
+             # output_device=dist_util.dev(),
+             gradient_as_bucket_view=True,
+             find_unused_parameters=False,
+        )
         if dist.get_rank() == 0:
             logger.logkv("num_parameters", sum(p.numel() for p in model.parameters()), distributed=False)
 
@@ -234,6 +236,7 @@ class TrainLoop:
 
         return batch, frame_indices, obs_mask, latent_mask
 
+    @timing
     def get_autoregressive_masks(self, batch1, gather=True, set_masks={'obs': (), 'latent': ()}):
         # Same as above, but always sets the last element as latent and all others as observed
         masks = {'latent': th.zeros_like(batch1[:, :, :1, :1, :1]), 'obs': th.ones_like(batch1[:, :, :1, :1, :1])}
@@ -366,9 +369,10 @@ class TrainLoop:
             self.optimize_normal()
         self.log_step()
         logger.logkv("timing/step_time", time() - t0)
-    
-    @xla.step()
+
+    @timing 
     def forward_backward(self, batch1, batch2, absolute_index_map=None):
+        tss = time()
         zero_grad(self.model_params)
 
         batch_size = batch1.shape[0]
@@ -386,7 +390,7 @@ class TrainLoop:
                 micro, frame_indices, obs_mask, latent_mask = self.get_autoregressive_flexible_masks(micro1)
             else:
                 raise ValueError(f"Unknown masking mode: {self.masking_mode}")
-
+            
             if absolute_index_map is not None:
                 # Convert frame indices to indices in one long video frame for RPE attention to work with.
                 frame_indices = th.stack([idx_map[idx] for idx_map, idx in zip(absolute_index_map, frame_indices)], dim=0)
@@ -395,7 +399,6 @@ class TrainLoop:
             frame_indices = frame_indices.to(dist_util.dev())
             obs_mask = obs_mask.to(dist_util.dev())
             latent_mask = latent_mask.to(dist_util.dev())
-
             last_batch = (i + self.microbatch) >= batch1.shape[0]
             t, weights = self.schedule_sampler.sample(micro.shape[0], dist_util.dev())
 
@@ -415,15 +418,14 @@ class TrainLoop:
                 with self.ddp_model.no_sync():
                     losses = compute_losses()
 
-            if losses['loss'].isnan().sum() > 0:
-                raise Exception("Loss is nan.")
-
+            # if losses['loss'].isnan().sum() > 0:
+            #     raise Exception("Loss is nan.")
             if isinstance(self.schedule_sampler, LossAwareSampler):
                 self.schedule_sampler.update_with_local_losses(
                     t, losses["loss"].detach()
                 )
-
             loss = (losses["loss"] * weights).mean()
+
             log_loss_dict(
                 self.diffusion, t, {k: v * weights for k, v in losses.items()}
             )
@@ -432,29 +434,39 @@ class TrainLoop:
                 (loss * loss_scale).backward()
             else:
                 loss.backward()
+        print(f"{dist.get_rank()}: total time: {time()-tss}")
 
     def optimize_fp16(self):
         if any(not th.isfinite(p.grad).all() for p in self.model_params):
             self.lg_loss_scale -= 1
             print(f"Found NaN, decreased lg_loss_scale to {self.lg_loss_scale}")
             return
-
         model_grads_to_master_grads(self.model_params, self.master_params)
         self.master_params[0].grad.mul_(1.0 / (2 ** self.lg_loss_scale))
         self._log_grad_norm()
         self._anneal_lr()
-        xm.optimizer_step(self.opt)
+        self.opt.step()
+        xm.mark_step()
         for rate, params in zip(self.ema_rate, self.ema_params):
             update_ema(params, self.master_params, rate=rate)
         master_params_to_model_params(self.model_params, self.master_params)
         self.lg_loss_scale += self.fp16_scale_growth
 
+    @timing
     def optimize_normal(self):
-        self._log_grad_norm()
+        t0 = time()
+        # self._log_grad_norm()
+        t1 = time()
         self._anneal_lr()
-        xm.optimizer_step(self.opt)
+        t2 = time()
+        self.opt.step()
+        t3 = time()
+        xm.mark_step()
+        t4 = time()
         for rate, params in zip(self.ema_rate, self.ema_params):
             update_ema(params, self.master_params, rate=rate)
+        tlast = time()
+        print((t1-t0, t2-t1, t3-t2, t4-t3, tlast-t4))
 
     def _log_grad_norm(self):
         sqsum = 0.0
@@ -536,7 +548,9 @@ class TrainLoop:
         if dist.get_rank() == 0:
             sample_start = time()
             self.model.eval()
+            print("copying model")
             orig_state_dict = copy.deepcopy(self.model.state_dict())
+            print("done copy, loading ema")
             self.model.load_state_dict(copy.deepcopy(self._master_params_to_state_dict(self.ema_params[0])))
 
             print("sampling...")
@@ -633,8 +647,9 @@ def find_ema_checkpoint(main_checkpoint, step, rate):
         return path
     return None
 
-
+@timing
 def log_loss_dict(diffusion, ts, losses):
+    return
     for key, values in losses.items():
         logger.logkv_mean(key, values.mean().item())
         # Log the quantiles (four quartiles, in particular).

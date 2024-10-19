@@ -13,6 +13,7 @@ from collections import defaultdict
 from contextlib import contextmanager
 import wandb
 from mpi4py import MPI
+import torch.distributed as dist
 
 
 class Logger(object):
@@ -20,7 +21,6 @@ class Logger(object):
         self.name2val = defaultdict(float)  # values this iteration
         self.name2cnt = defaultdict(int)
         self.nondistributed_name2val = defaultdict(float)
-        self.comm = MPI.COMM_WORLD
 
     def logkv(self, key, val, distributed=True):
         if distributed:
@@ -34,20 +34,9 @@ class Logger(object):
         self.name2cnt[key] = cnt + 1
 
     def dumpkvs(self):
-        if self.comm is None:
-            d = self.name2val
-        else:
-            d = mpi_weighted_mean(
-                self.comm,
-                {
-                    name: (val, self.name2cnt.get(name, 1))
-                    for (name, val) in self.name2val.items()
-                },
-            )
-            if self.comm.rank != 0:
-                d["dummy"] = 1  # so we don't get a warning about empty dict
+        d = self.name2val
         out = d.copy()  # Return the dict for unit testing purposes
-        if self.comm is None or self.comm.rank == 0:
+        if dist.get_rank() == 0:
             wandb.log({**self.name2val, **self.nondistributed_name2val})
         self.name2val.clear()
         self.name2cnt.clear()

@@ -8,6 +8,8 @@ import argparse
 import wandb
 import torch
 import torch.distributed as dist
+import torch_xla.core.xla_model as xm
+import torch_xla.distributed.xla_multiprocessing as xmp
 
 from improved_diffusion import dist_util
 from improved_diffusion.video_datasets import load_data, default_T_dict, default_image_size_dict
@@ -29,8 +31,8 @@ if "--unobserve" in sys.argv:
         os.environ["MY_WANDB_DIR"] = os.environ["WANDB_DIR_DRYRUN"]
 
 
-def init_wandb(config, id):
-    if dist.get_rank() != 0:
+def init_wandb(config, id, index):
+    if index != 0:
         return
     wandb_dir = os.environ.get("MY_WANDB_DIR", "none")
     if wandb_dir == "none":
@@ -63,7 +65,8 @@ def num_available_cores():
     return max_num_worker_suggest or 1
 
 
-def main():
+def main(index):
+    print(index)
     args = create_argparser().parse_args()
     if args.num_workers == -1:
         # Set the number of workers automatically.
@@ -87,9 +90,9 @@ def main():
         "pre_encoded": args.diffusion_space == "latent",
     }
 
-    dist_util.setup_dist()
+    dist_util.setup_dist_xla()
     resume = bool(args.resume_id)
-    init_wandb(config=args, id=args.resume_id if resume else None)
+    init_wandb(config=args, id=args.resume_id if resume else None, index=index)
 
     print("creating model and diffusion...")
     model, diffusion = create_model_and_diffusion(
@@ -179,5 +182,5 @@ def create_argparser():
 
 
 if __name__ == "__main__":
-    xla.launch(main, args=())
-    # main()
+    xmp.spawn(main, args=(), start_method='fork')
+    # main(0)

@@ -5,6 +5,22 @@ Helpers to train with 16-bit precision.
 import torch.nn as nn
 from torch._utils import _flatten_dense_tensors, _unflatten_dense_tensors
 
+import torch.distributed as dist
+from functools import wraps
+from time import time
+
+def timing(f):
+    @wraps(f)
+    def wrap(*args, **kw):
+        ts = time()
+        result = f(*args, **kw)
+        te = time()
+        msg = 'func:%r took: %2.4f sec' % (f.__name__, te-ts)
+        if dist.get_rank() == 0:
+            print(msg)
+        return result
+    return wrap
+
 
 def convert_module_to_f16(l):
     """
@@ -36,7 +52,7 @@ def make_master_params(model_params):
     master_params.requires_grad = True
     return [master_params]
 
-
+@timing
 def model_grads_to_master_grads(model_params, master_params):
     """
     Copy the gradients from the model parameters into the master parameters
@@ -72,5 +88,5 @@ def zero_grad(model_params):
     for param in model_params:
         # Taken from https://pytorch.org/docs/stable/_modules/torch/optim/optimizer.html#Optimizer.add_param_group
         if param.grad is not None:
-            param.grad.detach_()
-            param.grad.zero_()
+            # param.grad.zero_()
+            param.grad = None

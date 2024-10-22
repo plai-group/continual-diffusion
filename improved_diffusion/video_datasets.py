@@ -13,7 +13,7 @@ from improved_diffusion.replay_sampler import DistributedReplaySampler
 
 from .train_util import get_blob_logdir
 from .test_util import Protect
-from .plaicraft_dataset import ContinuousPlaicraftDataset, SpacedPlaicraftDataset
+from .plaicraft_dataset import ContinuousPlaicraftDataset, SpacedPlaicraftDataset, ChunkedPlaicraftDataset
 
 
 
@@ -83,8 +83,6 @@ def load_data(dataset_name, batch_size, T=None, deterministic=False, num_workers
                                              player_names_test=["Kyrie"])
     else:
         raise Exception("no dataset", dataset_name)
-
-    # dataset = th.utils.data.Subset(dataset, [0]) # FIXME JASON!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
 
     if return_dataset:
         return dataset

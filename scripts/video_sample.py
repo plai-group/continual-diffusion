@@ -62,7 +62,6 @@ def sample_video(args, model, diffusion, batch, just_get_indices=False):
         # Prepare network's input
         frame_indices = th.cat([th.tensor(obs_frame_indices), th.tensor(latent_frame_indices)], dim=1).long()
         x0 = th.stack([samples[i, fi] for i, fi in enumerate(frame_indices)], dim=0).clone()
-        x0 = diffusion.encode(x0)
         obs_mask = th.cat([th.ones_like(th.tensor(obs_frame_indices)),
                               th.zeros_like(th.tensor(latent_frame_indices))], dim=1).view(B, -1, 1, 1, 1).float()
         latent_mask = 1 - obs_mask
@@ -116,7 +115,7 @@ def sample_video(args, model, diffusion, batch, just_get_indices=False):
 
             if visualized_samples is None:
                 if local_samples.shape == visualized_local_samples.shape:
-                    decoded_obs_batch = batch[:, args.n_obs].to(batch.device)
+                    decoded_obs_batch = batch[:, :args.n_obs].to(batch.device)
                 else:
                     decoded_obs_batch = diffusion.decode(batch[:, :args.n_obs].to(th.float16), chunk_size=5).to(batch.device)
                 C_d, H_d, W_d = decoded_obs_batch.shape[2:]
@@ -128,7 +127,7 @@ def sample_video(args, model, diffusion, batch, just_get_indices=False):
         # Fill in the generated frames
         for i, li in enumerate(latent_frame_indices):
             samples[i, li] = local_samples[i, -len(li):].cpu().to(samples.dtype)
-            visualized_samples[i, li] = visualized_local_samples[i, -len(li):].cpu().to(visualized_local_samples.dtype)
+            visualized_samples[i, li] = visualized_local_samples[i, -len(li):].cpu().to(visualized_samples.dtype)
         indices_used.append((obs_frame_indices, latent_frame_indices))
     return visualized_samples, indices_used
 
@@ -154,32 +153,7 @@ def main(args, model, diffusion, dataset, samples_prefix):
                 print(f"*** Saved {output_filenames[i]} ***")
 
 
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument("checkpoint_path", type=str)
-    parser.add_argument("--sampling_scheme", required=True, choices=sampling_schemes.keys())
-    parser.add_argument("--batch_size", type=int, default=8)
-    parser.add_argument("--eval_dir", type=str, default=None)
-    parser.add_argument("--n_obs", type=int, default=36, help="Number of observed frames at the beginning of the video. The rest are sampled.")
-    parser.add_argument("--T", type=int, default=None, help="Length of the videos. If not specified, it will be inferred from the dataset.")
-    parser.add_argument("--max_frames", type=int, default=None,
-                        help="Denoted K in the paper. Maximum number of (observed or latent) frames input to the model at once. Defaults to what the model was trained with.")
-    parser.add_argument("--max_latent_frames", type=int, default=None, help="Number of frames to sample in each stage. Defaults to max_frames/2.")
-    parser.add_argument("--start_index", type=int, default=0)
-    parser.add_argument("--stop_index", type=int, default=None)
-    parser.add_argument("--sampler", type=str, default="heun-80-inf-0-1-1000-0.002-7-50")
-    parser.add_argument("--use_ddim", type=str2bool, default=False)
-    parser.add_argument("--eval_on_train", type=str2bool, default=False)
-    parser.add_argument("--timestep_respacing", type=str, default="")
-    parser.add_argument("--clip_denoised", type=str2bool, default=True, help="If true, diffusion model generates data between [-1,1].")
-    parser.add_argument("--sample_idx", type=int, default=0, help="Sampled images will have this specific index. Used for sampling multiple videos with the same observations.")
-    parser.add_argument("--optimality", type=str, default=None,
-                        choices=["linspace-t", "random-t", "linspace-t-force-nearby", "random-t-force-nearby"],
-                        help="Type of optimised sampling scheme to use for choosing observed frames. By default uses non-optimized sampling scheme. The optimal indices should be computed before use via video_optimal_schedule.py.")
-    parser.add_argument("--device", default="cuda" if th.cuda.is_available() else "cpu")
-    parser.add_argument("--visualize_mode", type=str2bool, default=False, help="Used to produce videos of specific video subsequences.")
-    args = parser.parse_args()
-
+def main_outer(args):
     # HACK: Do this for now
     # if not args.visualize_mode:
     #     assert args.start_index == 0, "Start index must be 0 due to the test set potentially being evenly spaced out from the entire test video."
@@ -216,8 +190,8 @@ if __name__ == "__main__":
         args.max_frames = model_args.max_frames
     if args.max_latent_frames is None:
         args.max_latent_frames = args.max_frames // 2 
-    # if model_args.diffusion_space == "latent":
-    #     args.clip_denoised = False
+    if model_args.diffusion_space == "latent":
+        args.clip_denoised = False
 
     # Prepare samples directory
     args.eval_dir = get_model_results_path(args) / get_eval_run_identifier(args)
@@ -247,3 +221,36 @@ if __name__ == "__main__":
         print(f"Saved model config at {json_path}")
 
     main(args, model, diffusion, dataset, samples_prefix)
+
+
+def create_sampling_parser():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("checkpoint_path", type=str)
+    parser.add_argument("--sampling_scheme", required=True, choices=sampling_schemes.keys())
+    parser.add_argument("--batch_size", type=int, default=8)
+    parser.add_argument("--eval_dir", type=str, default=None)
+    parser.add_argument("--n_obs", type=int, default=36, help="Number of observed frames at the beginning of the video. The rest are sampled.")
+    parser.add_argument("--T", type=int, default=None, help="Length of the videos. If not specified, it will be inferred from the dataset.")
+    parser.add_argument("--max_frames", type=int, default=None,
+                        help="Denoted K in the paper. Maximum number of (observed or latent) frames input to the model at once. Defaults to what the model was trained with.")
+    parser.add_argument("--max_latent_frames", type=int, default=None, help="Number of frames to sample in each stage. Defaults to max_frames/2.")
+    parser.add_argument("--start_index", type=int, default=0)
+    parser.add_argument("--stop_index", type=int, default=None)
+    parser.add_argument("--sampler", type=str, default="heun-80-inf-0-1-1000-0.002-7-50")
+    parser.add_argument("--use_ddim", type=str2bool, default=False)
+    parser.add_argument("--eval_on_train", type=str2bool, default=False)
+    parser.add_argument("--timestep_respacing", type=str, default="")
+    parser.add_argument("--clip_denoised", type=str2bool, default=True, help="If true, diffusion model generates data between [-1,1].")
+    parser.add_argument("--sample_idx", type=int, default=0, help="Sampled images will have this specific index. Used for sampling multiple videos with the same observations.")
+    parser.add_argument("--optimality", type=str, default=None,
+                        choices=["linspace-t", "random-t", "linspace-t-force-nearby", "random-t-force-nearby"],
+                        help="Type of optimised sampling scheme to use for choosing observed frames. By default uses non-optimized sampling scheme. The optimal indices should be computed before use via video_optimal_schedule.py.")
+    parser.add_argument("--device", default="cuda" if th.cuda.is_available() else "cpu")
+    parser.add_argument("--visualize_mode", type=str2bool, default=False, help="Used to produce videos of specific video subsequences.")
+    return parser
+
+
+if __name__ == "__main__":
+    parser = create_sampling_parser()
+    args = parser.parse_args()
+    main_outer(args)

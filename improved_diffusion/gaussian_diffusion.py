@@ -174,7 +174,7 @@ class GaussianDiffusion:
         self.pre_encoded = diffusion_space_kwargs.get("pre_encoded")
 
         self.original_dtype = None
-        self.setup_enc_dec()
+        self.setup_enc_dec(enable_decoding=diffusion_space_kwargs.get("enable_decoding"))
 
     def q_mean_variance(self, x_start, t):
         """
@@ -450,6 +450,7 @@ class GaussianDiffusion:
         latent_mask=None,
         return_attn_weights=False,
         return_decoded=True,
+        decode_chunk_size=10,
     ):
         """
         Generate samples from the model.
@@ -505,7 +506,9 @@ class GaussianDiffusion:
                             reshaped = reshaped / reshaped.mean() * attn_layer.mean()  # renormalise
                         attns[tag] = attns[tag] + reshaped/(self.num_timesteps/4)
             final = sample
-        return self.decode(final["sample"]) if return_decoded else final["sample"], attns
+        # return self.decode(final["sample"]) if return_decoded else final["sample"], attns
+        return ((final["sample"], self.decode(final["sample"], chunk_size=decode_chunk_size))
+                if return_decoded else final["sample"]), None
 
     def p_sample_loop_progressive(
         self,
@@ -767,6 +770,7 @@ class GaussianDiffusion:
         sigma_min=0.001,
         rho=7,
         num_steps=50,
+        decode_chunk_size=10,
     ):
         del return_attn_weights, progress, latent_mask
 
@@ -846,8 +850,10 @@ class GaussianDiffusion:
             if t_next > 0:
                 d_prime = (x_next - denoised) / s_next
                 x_next = x_hat + (s_next - s_hat) * (0.5 * d_cur + 0.5 * d_prime)
+            # print(f"Heun: {(x_next[0,10:].min(), x_next[0,10:].max())}")
 
-        return ((x_next, self.decode(x_next)) if return_decoded else x_next), None
+        return ((x_next, self.decode(x_next, chunk_size=decode_chunk_size))
+                if return_decoded else x_next), None
 
 
     def _vb_terms_bpd(
@@ -1053,12 +1059,13 @@ class GaussianDiffusion:
             model_kwargs=model_kwargs, latent_mask=latent_mask,
             t_seq=list(range(self.num_timesteps))[::-1])
 
-    def setup_enc_dec(self):
+    def setup_enc_dec(self, enable_decoding=False):
         if self.diffusion_space == "pixel":
             return
         elif self.diffusion_space == "latent":
-            # NOTE: Since we are not plotting during runtime, no need to load Stable Diffusion Encoder.
-            return
+            # NOTE: Since we are not plotting during train time, no need to load Stable Diffusion Encoder.
+            if not enable_decoding:
+                return
             print('Loading VAE encoder and decoder.')
             from diffusers import AutoencoderKL
             self.enc_dec_dtype = th.float16
@@ -1081,11 +1088,11 @@ class GaussianDiffusion:
                 return video
             self.original_dtype = video.dtype
             original_shape, original_device = video.shape, video.device
-            video = self.image_processor.preprocess((video.flatten(0, 1)+1)/2)  # expects range [0,1]
-            video = video.to(self.enc_dec_dtype).cuda()  # shape: <n_timesteps x n_channels x height x width>
+            video = video.flatten(0, 1).to(self.enc_dec_dtype).cuda()
+            # video = self.image_processor.preprocess((video.flatten(0, 1)+1)/2)  # expects range [0,1]
+            # video = video.to(self.enc_dec_dtype).cuda()  # shape: <n_timesteps x n_channels x height x width>
             def encode_chunk(chunk):
-                dist = self.vae.encode(chunk).latent_dist
-                return (dist.mean + th.randn_like(dist.std) * dist.std)
+                return self.vae.encode(chunk).latent_dist.sample() * 0.13025
             result = th.cat([encode_chunk(video[i:i+chunk_size]) for i in range(0, video.shape[0], chunk_size)])
             return result.unflatten(0, (original_shape[0], original_shape[1])).to(original_device)
         elif self.diffusion_space == "wavelet":
@@ -1098,7 +1105,7 @@ class GaussianDiffusion:
             return video
         elif self.diffusion_space == "latent":
             original_shape, original_device = video.shape, video.device
-            video = video.flatten(0, 1).to(self.enc_dec_dtype).cuda()
+            video = video.flatten(0, 1).to(self.enc_dec_dtype).to(self.vae.device)
 
             def decode_chunk(chunk):
                 chunk = chunk / 0.13025  # Scaling factor from sample code

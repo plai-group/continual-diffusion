@@ -8,17 +8,18 @@ from collections import defaultdict
 import tensorflow.compat.v1 as tf
 
 # Metrics
-from improved_diffusion.video_datasets import get_test_dataset
+from improved_diffusion.video_datasets import get_eval_dataset, eval_dataset_configs
 import improved_diffusion.frechet_video_distance as fvd
-from improved_diffusion import test_util
+from improved_diffusion.test_util import parse_eval_run_identifier, Protect
 from improved_diffusion.script_util import str2bool
 
 tf.disable_eager_execution() # Required for our FVD computation code
 
 
 class SampleDataset(th.utils.data.Dataset):
-    def __init__(self, samples_path, sample_idx, length):
+    def __init__(self, samples_path, sample_idx, length, start_idx=0):
         self.samples_path = Path(samples_path)
+        self.start_idx = start_idx
         self.sample_idx = sample_idx
         self.length = length
 
@@ -26,10 +27,73 @@ class SampleDataset(th.utils.data.Dataset):
         return self.length
 
     def __getitem__(self, idx):
-        path = self.samples_path / f"sample_{idx:04d}-{self.sample_idx}.npy"
+        path = self.samples_path / f"sample_{self.start_idx+idx:04d}-{self.sample_idx}.npy"
         npy = np.load(path).astype(np.float32)
         normed = -1 + 2 * npy / 255
         return th.tensor(normed).type(th.float32), {}
+
+
+class DecodedDataset(th.utils.data.Dataset):
+    def __init__(self, encoded_dataset, cache_path, decode_chunk_size,
+                 pre_decode=False, subset_indices=None):
+        self.encoded_dataset = encoded_dataset
+        self.cache_path = Path(cache_path)
+        self.decode_chunk_size = decode_chunk_size
+        self.vae = None
+        if pre_decode:
+            self.pre_decode(subset_indices)
+
+    def __len__(self):
+        return len(self.encoded_dataset)
+
+    def __getitem__(self, idx):
+        path = self.cache_path / f"sample_{idx:04d}.npy"
+        with Protect(path, timeout=1800):
+            if not path.exists():
+                print(f"Decoding data item {idx}...")
+                encoding, _ = self.encoded_dataset[idx]
+                video = self._decode(encoding)
+                np.save(path, video)
+                print(f"Finished decoding data item {idx}.")
+        npy = np.load(path).astype(np.float32)
+        normed = -1 + 2 * npy / 255
+        return th.tensor(normed).type(th.float32), {}
+
+    @th.no_grad()
+    def _decode(self, encoding):
+        no_vae = self.vae is None
+        if no_vae:
+            self._initialize_vae()
+        with th.no_grad():
+            decoded = [self.vae.decode(encoding[j:j+self.decode_chunk_size].to(self.vae.device)/0.13025
+                       ).sample for j in range(0, encoding.shape[0], self.decode_chunk_size)]
+        drange = [-1, 1]
+        decoded = th.cat(decoded, dim=0).cpu().clamp(*drange).numpy()
+        decoded = (decoded - drange[0]) / (drange[1] - drange[0]) * 255
+        if no_vae:
+            self._remove_vae()
+        return decoded.astype(np.uint8)
+
+    def pre_decode(self, subset_indices=None):
+        self._initialize_vae()
+        init_indices = [i for i in range(len(self))] if subset_indices is None else subset_indices
+        for i in np.random.permutation(init_indices):  # random ordering
+            self[i]
+        self._remove_vae()
+
+    def _initialize_vae(self):
+        from diffusers import AutoencoderKL
+        self.vae = AutoencoderKL.from_pretrained("madebyollin/sdxl-vae-fp16-fix", torch_dtype=th.float16)
+        self.vae.eval()
+        if th.cuda.is_available():
+            self.vae = self.vae.cuda()
+
+    def _remove_vae(self):
+        del self.vae
+        self.vae = None
+        import gc
+        gc.collect()
+        th.cuda.empty_cache()
 
 
 class FVD:
@@ -62,8 +126,9 @@ class FVD:
     def compute_fvd(vid1_features, vid2_features):
         return fvd.fid_features_to_metric(vid1_features, vid2_features)
 
+
 def compute_fvd(test_dataset, sample_dataset, T, num_videos, batch_size=16):
-    _, C, H, W = test_dataset[0][0].shape
+    _, C, H, W = sample_dataset[0][0].shape
     fvd_handler = FVD(batch_size=batch_size, T=T, frame_shape=[H, W, C])
     test_loader = th.utils.data.DataLoader(test_dataset, batch_size=batch_size, shuffle=False, drop_last=False)
     sample_loader = th.utils.data.DataLoader(sample_dataset, batch_size=batch_size, shuffle=False, drop_last=False)
@@ -93,16 +158,19 @@ if __name__ == "__main__":
                         help="Number of generated samples per test video.")
     parser.add_argument("--batch_size", type=int, default=None,
                         help="Batch size for extracting video features the I3D model.")
-    parser.add_argument("--sample_idx", type=int, default=0)
-    parser.add_argument("--T", type=int, default=None, help="Length of the videos. If not specified, it will be inferred from the dataset.")
-    parser.add_argument("--eval_on_train", type=str2bool, default=False)
+    parser.add_argument("--sample_idx", type=int, default=0, help="sample seed")
+    parser.add_argument("--decode_chunk_size", type=int, default=5)
+    parser.add_argument("--decode_cache_dir", type=str, default="./tmp/plaicraft_decoded")
     args = parser.parse_args()
 
-    if args.eval_on_train:
-        save_path = Path(args.eval_dir) / f"fvd-{args.num_videos}-{args.sample_idx}-train.txt"
-    else:
-        save_path = Path(args.eval_dir) / f"fvd-{args.num_videos}-{args.sample_idx}.txt"
+    parsed = parse_eval_run_identifier(os.path.basename(args.eval_dir))
+    T, obs_length, eval_on_train = parsed["T"], parsed["n_obs"], parsed["eval_on_train"]
+    lower_frame_range, upper_frame_range = parsed["lower_frame_range"], parsed["upper_frame_range"]
+    eval_dataset_config = parsed["eval_dataset_config"]
+    if eval_dataset_config == eval_dataset_configs["default"]:
+        assert args.num_videos is not None, "You must specified how many videos were generated by video_sample.py if not using visualization mode."
 
+    save_path = Path(args.eval_dir) / f"fvd-{args.num_videos}-{args.sample_idx}.txt"
     if save_path.exists():
         fvd = np.loadtxt(save_path).squeeze()
         print(f"FVD already computed: {fvd}")
@@ -113,26 +181,33 @@ if __name__ == "__main__":
     with open(model_args_path, "r") as f:
         model_args = argparse.Namespace(**json.load(f))
 
+    # Load the dataset (to get observations from)
+    eval_dataset_args = dict(dataset_name=model_args.dataset, T=T, train=eval_on_train,
+                             eval_dataset_config=eval_dataset_config)
+    if eval_dataset_config == eval_dataset_configs["default"]:
+        spacing_kwargs = dict(frame_range=(parsed["lower_frame_range"], parsed["upper_frame_range"]),
+                              n_data=args.num_videos)
+        eval_dataset_args["spacing_kwargs"] = spacing_kwargs
+    test_dataset_full = get_eval_dataset(**eval_dataset_args)
+    sample_dataset = SampleDataset(samples_path=(Path(args.eval_dir) / "samples"), sample_idx=args.sample_idx, length=args.num_videos)
+
     # Set batch size given dataset if not specified
-    args.dataset = model_args.dataset
     if args.batch_size is None:
         args.batch_size = {'mazes_cwvae': 16, 'minerl': 8, 'carla_no_traffic': 4, 'carla_no_traffic_2x': 4, 'carla_no_traffic_2x_encoded': 4}[args.dataset]
 
-    if args.T is None:
-        args.T = model_args.T
-
-    samples_prefix = "samples_train" if args.eval_on_train else "samples"        
-
-    # Prepare datasets
-    sample_dataset = SampleDataset(samples_path=(Path(args.eval_dir) / samples_prefix), sample_idx=args.sample_idx, length=args.num_videos)
-    test_dataset_full = get_test_dataset(dataset_name=args.dataset, T=args.T, n_data=args.num_videos)
-    if args.eval_on_train:
-        test_dataset_full.is_test = False
-
+    # Decode ground truth data and save them if it is encoded
+    encoded_test_data = test_dataset_full[0][0].shape != sample_dataset[0][0].shape
+    subset_indices = list(range(args.num_videos))
+    if encoded_test_data:
+        cache_dir = Path(args.decode_cache_dir) / f"{T}_{eval_dataset_config}_{lower_frame_range}_{upper_frame_range}_{eval_on_train}"
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        test_dataset_full = DecodedDataset(test_dataset_full, cache_dir, args.decode_chunk_size,
+                                           pre_decode=True, subset_indices=subset_indices)
     test_dataset = th.utils.data.Subset(
         dataset=test_dataset_full,
-        indices=list(range(args.num_videos)),
+        indices=subset_indices,
     )
-    fvd = compute_fvd(test_dataset, sample_dataset, T=args.T, num_videos=args.num_videos, batch_size=args.batch_size)
+
+    fvd = compute_fvd(test_dataset, sample_dataset, T=T, num_videos=args.num_videos, batch_size=args.batch_size)
     np.savetxt(save_path, np.array([fvd]))
     print(f"FVD: {fvd}")

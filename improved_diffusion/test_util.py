@@ -61,12 +61,22 @@ def get_model_results_path(args):
 
 def get_eval_run_identifier(args):
     res = args.sampling_scheme
-    if hasattr(args, "optimality") and args.optimality is not None:
-        res += f"_optimal-{args.optimality}"
-    res += f"_{args.max_frames}_{args.max_latent_frames}_{args.T}_{args.n_obs}"
-    if hasattr(args, "dataset_partition") and args.dataset_partition == "train":
-        res = "trainset_" + res
+    # if hasattr(args, "optimality") and args.optimality is not None:
+    #     res += f"_optimal-{args.optimality}"
+    res += f"_{args.max_frames}_{args.T}_{args.n_obs}_{args.eval_dataset_config}"
+    res += f"_{args.lower_frame_range}_{args.upper_frame_range}"
+    res += f"_train" if args.eval_on_train else "_test"
     return res
+
+
+def parse_eval_run_identifier(identifier):
+    split = identifier.split("_")
+    return dict(
+        sampling_scheme=split[0], max_frames=int(split[1]), T=int(split[2]), n_obs=int(split[3]),
+        eval_dataset_config=split[4], lower_frame_range=int(split[5]),
+        upper_frame_range=None if split[6]=="None" else int(split[6]),
+        eval_on_train=split[7] == "train"
+    )
 
 
 ################################################################################

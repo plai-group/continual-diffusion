@@ -22,6 +22,9 @@ def setup_dist():
     """
     Setup a distributed process group.
     """
+    print(f"SLURM_NODEID: {os.environ.get('SLURM_NODEID')}")
+    print(f"SLURM_NPROCS: {os.environ.get('SLURM_NPROCS')}")
+    print(f"SLURM_PROCID: {os.environ.get('SLURM_PROCID')}")
     if dist.is_initialized():
         return
 
@@ -39,6 +42,8 @@ def setup_dist():
     port = comm.bcast(_find_free_port(), root=0)
     os.environ["MASTER_PORT"] = str(port)
     dist.init_process_group(backend=backend, init_method="env://")
+
+    print(f'Master Address: {os.environ["MASTER_ADDR"]}:{os.environ["MASTER_PORT"]}')
 
 
 def dev():

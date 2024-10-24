@@ -82,14 +82,6 @@ def main():
         "latent": 4,
     }[args.diffusion_space]
 
-    args.replay_dataset_kwargs = {
-        "stm_size": args.T if args.stm_size == -1 else args.stm_size,
-        "ltm_size": args.ltm_size,
-        "mem_batch_size": args.T if args.stm_size == -1 else args.stm_size,
-        "n_sample_stm": args.batch_size if args.n_sample_stm == -1 else args.n_sample_stm,
-        "n_sample_ltm": args.n_sample_ltm,
-        "save_mem": args.save_replay_mem
-    }
     args.diffusion_space_kwargs = {
         "diffusion_space": args.diffusion_space,
         "pre_encoded": args.diffusion_space == "latent",
@@ -114,6 +106,9 @@ def main():
         num_workers=args.num_workers,
         resume_id=args.resume_id,
         seed=args.data_seed,
+        buffer_size=args.ltm_size,
+        n_sequential=args.n_sample_stm,
+        save_every=args.save_interval,
     )
 
     print("training...")
@@ -138,7 +133,6 @@ def main():
         pad_with_random_frames=args.pad_with_random_frames,
         max_frames=args.max_frames,
         enc_dec_chunk_size=args.enc_dec_chunk_size,
-        replay_dataset_kwargs=args.replay_dataset_kwargs,
         steps_per_experience=args.steps_per_experience,
         masking_mode=args.masking_mode,
         args=args,

@@ -11,6 +11,7 @@ import numpy as np
 import torch as th
 import torch.distributed as dist
 from torch.nn.parallel.distributed import DistributedDataParallel as DDP
+from torch.nn.parallel import DataParallel as DP
 from torch.optim import AdamW
 
 from . import dist_util
@@ -23,7 +24,6 @@ from .fp16_util import (
     zero_grad,
 )
 from .nn import update_ema
-from .replay import ReplayDataset
 from .resample import LossAwareSampler, UniformSampler
 from .rng_util import rng_decorator, RNG
 
@@ -57,7 +57,6 @@ class TrainLoop:
         pad_with_random_frames,
         max_frames,
         enc_dec_chunk_size,
-        replay_dataset_kwargs,
         steps_per_experience,
         masking_mode,
         args,
@@ -104,10 +103,8 @@ class TrainLoop:
 
         self.opt = AdamW(self.master_params, lr=self.lr, weight_decay=self.weight_decay)
 
-        logdir = get_blob_logdir(self.args)
         if dist.get_rank() == 0:
-            Path(logdir).mkdir(parents=True, exist_ok=True)
-        self.replay_dataset: ReplayDataset = ReplayDataset(**replay_dataset_kwargs, save_dir=logdir)
+            Path(get_blob_logdir(self.args.resume_id)).mkdir(parents=True, exist_ok=True)
 
         if self.args.resume_id != '':
             self._load_optimizer_state()
@@ -116,7 +113,6 @@ class TrainLoop:
             self.ema_params = [
                 self._load_ema_parameters(rate) for rate in self.ema_rate
             ]
-            self.replay_dataset.load_state(load_dir=get_blob_logdir(args))
         else:
             self.ema_params = [
                 copy.deepcopy(self.master_params) for _ in range(len(self.ema_rate))
@@ -132,6 +128,7 @@ class TrainLoop:
                 bucket_cap_mb=128,
                 find_unused_parameters=False,
             )
+            # self.ddp_model = DP(self.model)
         else:
             if dist.get_world_size() > 1:
                 print(
@@ -318,44 +315,26 @@ class TrainLoop:
                 new_t[b, instance_T:] = t[b][indices[b, instance_T:]]
         return new_batch, new_tensors, indices
 
-    def get_ctx_batch(self):
-        batch = next(self.data)[0]
-        batch = self.encode(batch).to(batch.device)
-
-        self.replay_dataset.update(data=batch)  # Update context and memory
-        result = self.replay_dataset.get_context()
-
+    def get_next_batch(self):
+        frames, absolute_index_map = next(self.data)
         if self.vis_batch is None or self.vis_batch.size(1) < self.max_frames:
             with RNG(0):  # Initialize datapoint to log here in case data is deterministic
-                self.vis_batch = result[:2].frames.to(batch.device)
-        return result
-
-    def append_mem_batch(self, ctx_batch):
-        mem_batch = self.replay_dataset.sample_memory()
-        cat_dim = 1 if self.args.attentive_er else 0
-        return ctx_batch if mem_batch is None else th.cat((ctx_batch, mem_batch), dim=cat_dim)
+                self.vis_batch = frames
+        return frames, absolute_index_map
 
     def run_loop(self):
         last_sample_time = None
         while not self.lr_anneal_steps or self.step < self.lr_anneal_steps:
             try:
-                ctx_batch = self.get_ctx_batch()
-            except StopIteration as e:
+                frames, absolute_index_map = self.get_next_batch()
+                # print(f"rank: {dist.get_rank()}, indices: {absolute_index_map[:,0].tolist()}, device: {dist_util.dev()}")
+            except RuntimeError as e:
                 print(e)
-                self.step += 1
+                # self.step += 1
                 break
 
             for _ in range(self.steps_per_experience):
-                batch_info = self.append_mem_batch(ctx_batch)
-                batch, absolute_index_map = batch_info.frames, batch_info.absolute_index_map
-
-                if self.pad_with_random_frames:
-                    assert self.replay_dataset.has_mem
-                    filler_batch = self.replay_dataset.sample_memory()
-                    filler_batch = filler_batch.repeat(len(batch)//len(filler_batch), *[1]*len(batch.shape[1:]))
-                else:
-                    filler_batch = None
-                self.run_step(batch, filler_batch, absolute_index_map)
+                self.run_step(frames, None, absolute_index_map)
                 if self.step % self.log_interval == 0:
                     logger.dumpkvs()
                 if self.step % self.save_interval == 0:
@@ -369,10 +348,7 @@ class TrainLoop:
                     self.log_samples()
                     last_sample_time = time()
                 self.step += 1
-
-        # Save the last checkpoint if it wasn't already saved.
-        if (self.step - 1) % self.save_interval != 0:
-            self.save()
+        self.save()
 
     def run_step(self, batch1, batch2, absolute_index_map=None):
         t0 = time()
@@ -494,7 +470,7 @@ class TrainLoop:
 
     def save(self):
         if dist.get_rank() == 0:
-            Path(get_blob_logdir(self.args)).mkdir(parents=True, exist_ok=True)
+            Path(get_blob_logdir(self.args.resume_id)).mkdir(parents=True, exist_ok=True)
         def save_checkpoint(rate, params):
             if dist.get_rank() == 0:
                 print(f"saving model {rate}...")
@@ -507,18 +483,16 @@ class TrainLoop:
                     "config": self.args.__dict__,
                     "step": self.step
                 }
-                with bf.BlobFile(bf.join(get_blob_logdir(self.args), filename), "wb") as f:
+                with bf.BlobFile(bf.join(get_blob_logdir(self.args.resume_id), filename), "wb") as f:
                     th.save(to_save, f)
 
         save_checkpoint(0, self.master_params)
         for rate, params in zip(self.ema_rate, self.ema_params):
             save_checkpoint(rate, params)
-        self.replay_dataset.save_state()
-        print("updated disk with the replay data.")
 
         if dist.get_rank() == 0:
             with bf.BlobFile(
-                bf.join(get_blob_logdir(self.args), f"opt{self.step:06d}.pt"),
+                bf.join(get_blob_logdir(self.args.resume_id), f"opt{self.step:06d}.pt"),
                 "wb",
             ) as f:
                 th.save(self.opt.state_dict(), f)
@@ -564,10 +538,10 @@ class TrainLoop:
             n_obs = self.max_frames // 3
             obs_mask[0, :n_obs] = 1.
             latent_mask[0, n_obs:self.max_frames] = 1.
-            if self.batch_size > 1:
-                spacing = len(self.vis_batch[0]) // self.max_frames
-                obs_mask[1, :n_obs*spacing:spacing] = 1.
-                latent_mask[1, n_obs*spacing:self.max_frames*spacing:spacing] = 1.
+            # if self.batch_size > 1:
+            #     spacing = len(self.vis_batch[0]) // self.max_frames
+            #     obs_mask[1, :n_obs*spacing:spacing] = 1.
+            #     latent_mask[1, n_obs*spacing:self.max_frames*spacing:spacing] = 1.
             batch, frame_indices, obs_mask, latent_mask = self.sample_all_masks(
                 self.vis_batch, None, gather=True,
                  set_masks={'obs': obs_mask, 'latent': latent_mask}
@@ -623,10 +597,10 @@ def parse_resume_step_from_filename(filename):
         return 0
 
 
-def get_blob_logdir(args):
+def get_blob_logdir(resume_id=''):
     root_dir = "checkpoints"
     assert os.path.exists(root_dir), "Must create directory 'checkpoints'"
-    wandb_id = args.resume_id if len(args.resume_id) > 0 else wandb.run.id
+    wandb_id = resume_id if len(resume_id) > 0 else wandb.run.id
     return os.path.join(root_dir, wandb_id)
 
 
@@ -635,7 +609,7 @@ def find_resume_checkpoint(args):
     # discover the latest checkpoint on your blob storage, etc.
     if not args.resume_id:
         return
-    ckpts = glob.glob(os.path.join(get_blob_logdir(args), "model*.pt"))
+    ckpts = glob.glob(os.path.join(get_blob_logdir(args.resume_id), "model*.pt"))
     if len(ckpts) == 0:
         return None
     iters_fnames = {int(Path(fname).stem.replace('model', '')): fname for fname in ckpts}

@@ -3,14 +3,18 @@ import json
 import os
 import numpy as np
 import torch as th
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import DataLoader, Dataset, DistributedSampler
 from torchvision.transforms import ToTensor
+import torch.distributed as dist
 from pathlib import Path
 import shutil
+from typing import Tuple
 from mpi4py import MPI
+from improved_diffusion.replay_sampler import DistributedReplaySampler
 
+from .train_util import get_blob_logdir
 from .test_util import Protect
-from .plaicraft_dataset import PlaicraftDataset
+from .plaicraft_dataset import ContinuousPlaicraftDataset, SpacedPlaicraftDataset, ChunkedPlaicraftDataset
 
 
 
@@ -47,6 +51,8 @@ default_image_size_dict = {
     "streaming_plaicraft": 160,
 }
 
+eval_dataset_configs = {"default": "default", "continuous": "continuous", "chunked": "chunked"}
+
 
 def get_data_path(dataset_name):
     # If DATA_ROOT environment variable is specified, it is assumed to point at local node storage. If the data is already there,
@@ -59,52 +65,95 @@ def get_data_path(dataset_name):
     return data_path
 
 
-def load_data(dataset_name, batch_size, T=None, deterministic=False, num_workers=1, return_dataset=False, resume_id='', seed=0):
+def load_data(dataset_name, batch_size, T=None, deterministic=False, num_workers=1, return_dataset=False,
+              resume_id='', seed=0, buffer_size=None, n_sequential=1, save_every=None):
     data_path = get_data_path(dataset_name)
     T = default_T_dict[dataset_name] if T is None else T
     shard = MPI.COMM_WORLD.Get_rank()
     num_shards = MPI.COMM_WORLD.Get_size()
 
     if dataset_name.startswith("streaming"):
-        T, deterministic = 1, True
+        deterministic = True
     if "ball_stn" in dataset_name:
         dataset = ContinuousBaseDataset(data_path, T=T, seed=seed)
     elif "ball_nstn" in dataset_name:
         dataset = ContinuousBaseDataset(data_path, T=T, seed=seed)
     elif "wmaze" in dataset_name:
         dataset = ContinuousBaseDataset(data_path, T=T, seed=seed)
-    elif dataset_name == "streaming_plaicraft":
-        # dataset = PlaicraftDataset(data_path, window_length=1, player_names=["Hiroshi"])
-        dataset = PlaicraftDataset(data_path, window_length=1, player_names=["Kyrie"])
-        dataset.T = 1
-    elif dataset_name == "plaicraft":
-        dataset = PlaicraftDataset(data_path, window_length=T, player_names=["Kyrie"])
-        dataset.T = T
+    elif "plaicraft" in dataset_name:
+        dataset = ContinuousPlaicraftDataset(data_path, window_length=T,
+                                             player_names_train=["Alex"],
+                                             player_names_test=["Kyrie"])
     else:
         raise Exception("no dataset", dataset_name)
-
-    if resume_id and deterministic:  # start from specific data stream index.
-        with open(os.path.join('checkpoints', resume_id, 'replay_state.json')) as f:
-            n_observed = json.load(f)['n_obs']
-            start_index = n_observed // dataset.T
-            print(f"starting deterministic dataloader from datapoint with index {n_observed}.")
-        dataset = th.utils.data.Subset(dataset, indices=range(start_index, len(dataset)))
 
     if return_dataset:
         return dataset
 
-    loader = DataLoader(dataset, batch_size=batch_size, shuffle=(not deterministic),
-                        num_workers=num_workers, drop_last=True)
+    if deterministic:
+        save_path = os.path.join(get_blob_logdir(resume_id), 'replay_state.pt') if dist.get_rank() == 0 else ''
+        sampler = DistributedReplaySampler(dataset, batch_size, buffer_size=buffer_size, seed=seed,
+                                           n_sequential=n_sequential, save_args=dict(path=save_path, every=save_every))
+        if resume_id:
+            load_path = os.path.join(get_blob_logdir(resume_id), 'replay_state.pt')
+            sampler.load_sampler(path=load_path)
+            print(f"starting replay dataloader from data index {sampler.start_index}.")
+    else:
+        sampler = DistributedSampler(dataset, shuffle=True, seed=seed)
+        sampler.set_epoch(0)
+
+    batch_size = batch_size // dist.get_world_size()
+    loader = DataLoader(dataset, batch_size=batch_size, num_workers=num_workers, sampler=sampler)
     while True:
         yield from loader
         if deterministic:
             raise StopIteration()
 
 
+def get_eval_dataset(dataset_name, T=None, seed=0, train=False, eval_dataset_config=eval_dataset_configs["default"],
+                     spacing_kwargs=dict(n_data=None, frame_range=(0, None))):
+    """
+    """
+    data_path = get_data_path(dataset_name)
+    T = default_T_dict[dataset_name] if T is None else T
+    if "ball_stn" in dataset_name:
+        shared_args = dict(dataset_path=data_path,  T=T, seed=seed)
+        if eval_dataset_config == eval_dataset_configs["continuous"]:
+            dataset = ContinuousBaseDataset(**shared_args)
+        else:
+            dataset = ChunkedBaseDataset(frame_range=spacing_kwargs["frame_range"], **shared_args)
+    elif "ball_nstn" in dataset_name:
+        shared_args = dict(dataset_path=data_path, window_length=T, seed=seed)
+        if eval_dataset_config == eval_dataset_configs["continuous"]:
+            dataset = ContinuousBaseDataset(**shared_args)
+        elif eval_dataset_config == eval_dataset_configs["chunked"]:
+            dataset = ChunkedBaseDataset(frame_range=spacing_kwargs["frame_range"], **shared_args)
+        else:
+            dataset = SpacedBaseDataset(**spacing_kwargs, **shared_args)
+    elif "wmaze" in dataset_name:
+        shared_args = dict(dataset_path=data_path,  T=T, seed=seed)
+        if eval_dataset_config == eval_dataset_configs["continuous"]:
+            dataset = ContinuousBaseDataset(**shared_args)
+        else:
+            dataset = ChunkedBaseDataset(frame_range=spacing_kwargs["frame_range"], **shared_args)
+    elif "plaicraft" in dataset_name:
+        shared_args = dict(dataset_path=data_path, window_length=T,
+                           player_names_train=["Alex"], player_names_test=["Kyrie"])
+        if eval_dataset_config == eval_dataset_configs["continuous"]:
+            dataset = ContinuousPlaicraftDataset(**shared_args)
+        elif eval_dataset_config == eval_dataset_configs["chunked"]:
+            dataset = ChunkedPlaicraftDataset(frame_range=spacing_kwargs["frame_range"], **shared_args)
+        else:
+            dataset = SpacedPlaicraftDataset(**spacing_kwargs, **shared_args)
+    else:
+        raise Exception("no dataset", dataset_name)
+    if not train:
+        dataset.set_test()
+    return dataset
+
+
 def get_train_dataset(dataset_name, T=None, seed=0):
-    return load_data(
-        dataset_name, return_dataset=False, T=T, batch_size=None, deterministic=False, num_workers=None, seed=0
-    )
+    return load_data(dataset_name, T=T, batch_size=None, seed=0, return_dataset=True)
 
 
 def get_test_dataset(dataset_name, T=None, seed=0, n_data=None):
@@ -116,10 +165,10 @@ def get_test_dataset(dataset_name, T=None, seed=0, n_data=None):
         dataset = SpacedBaseDataset(n_data, data_path, T=T, seed=seed)
     elif "wmaze" in dataset_name:
         dataset = ChunkedBaseDataset(data_path, T=T, seed=seed)
-        # dataset = SpacedBaseDataset(n_data, data_path, T=T, seed=seed)
     elif "plaicraft" in dataset_name:
-        # FIXME: No difference to the train set!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-        dataset = PlaicraftDataset(data_path, window_length=T)
+        dataset = SpacedPlaicraftDataset(n_data, data_path, window_length=T,
+                                         player_names_train=["Alex"],
+                                         player_names_test=["Kyrie"])
     else:
         raise Exception("no dataset", dataset_name)
     dataset.set_test()
@@ -135,6 +184,10 @@ def get_vis_dataset(dataset_name, T=None, seed=0):
         dataset = ChunkedBaseDataset(data_path, T=T, seed=seed)
     elif "wmaze" in dataset_name:
         dataset = ChunkedBaseDataset(data_path, T=T, seed=seed)
+    elif "plaicraft" in dataset_name:
+        dataset = ChunkedPlaicraftDataset(data_path, window_length=T,
+                                          player_names_train=["Alex"],
+                                          player_names_test=["Kyrie"])
     else:
         raise Exception("no dataset", dataset_name)
     dataset.set_test()
@@ -150,10 +203,10 @@ class ContinuousBaseDataset(Dataset):
     self.chunk_size denotes the number of frames present in each npy file.
     T denotes the number of frames that the dataset should return to the model per item.
     """
-    def __init__(self, path, T=1, seed=0, restart_index=None):
+    def __init__(self, dataset_path, T=1, seed=0, restart_index=None):
         super().__init__()
         self.T = T
-        self.path = Path(path)
+        self.path = Path(dataset_path)
         self.is_test = False
         self.restart_index = int(restart_index) if restart_index is not None else None
 
@@ -183,7 +236,9 @@ class ContinuousBaseDataset(Dataset):
             print(f"Failed on loading {paths}")
             raise e
         video = self.get_video_subsequence(video, idx)
-        return self.postprocess_video(video), {}
+        frames = self.postprocess_video(video)
+        absolute_index_map = th.arange(idx, idx+self.T)
+        return frames, absolute_index_map
 
     def getitem_paths(self, idx):
         chunk_idxs = [idx // self.chunk_size]
@@ -233,6 +288,10 @@ class ContinuousBaseDataset(Dataset):
             path = Path(*path.parts[len(data_root.parts):]) # drops the data_root part from the path, to get the relative path to the source file.
         return json.load(open(path))
 
+    def set_train(self):
+        self.is_test = False
+        print('setting train mode')
+
     def set_test(self):
         self.is_test = True
         print('setting test mode')
@@ -254,19 +313,22 @@ class ChunkedBaseDataset(ContinuousBaseDataset):
     self.chunk_size denotes the number of frames present in each npy file.
     T denotes the number of frames that the dataset should return to the model per item.
     """
-    def __init__(self, *args, **kwargs):
+    def __init__(self, frame_range: Tuple[int, int], *args, **kwargs):
         super().__init__(*args, **kwargs)
+        self.frame_range = frame_range
+        if self.frame_range[1] is None:
+            self.frame_range = (self.frame_range[0], self.T_total)
 
     def __len__(self):
-        return self.T_total // self.T
+        return (self.frame_range[1]-self.frame_range[0])  // self.T
 
     def getitem_paths(self, idx):
-        chunk_idxs = [(idx * self.T) // self.chunk_size]
+        chunk_idxs = [(self.frame_range[0] + idx * self.T) // self.chunk_size]
         return [(self.test_path if self.is_test else self.train_path) / f"{cidx}.npy" for cidx in chunk_idxs]
 
     def get_video_subsequence(self, video, idx):
         # Take a subsequence of the video.
-        start_i = (idx * self.T) % self.chunk_size
+        start_i = (self.frame_range[0] + idx * self.T) % self.chunk_size
         video = video[start_i:start_i+self.T]
         assert len(video) == self.T
         return video
@@ -281,23 +343,28 @@ class SpacedBaseDataset(ContinuousBaseDataset):
     self.chunk_size denotes the number of frames present in each npy file.
     T denotes the number of frames that the dataset should return to the model per item.
     """
-    def __init__(self, n_data: int, *args, **kwargs):
+    def __init__(self, n_data: int, frame_range: Tuple[int, int], *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.n_data = n_data
-        self.spacing = self.T_total // self.n_data
+        self.frame_range = frame_range
+        if self.frame_range[1] is None:
+            self.frame_range = (self.frame_range[0], self.T_total)
+
+        self.spacing = (self.frame_range[1]-self.frame_range[0]) // self.n_data
         assert self.spacing % self.T == 0
+        assert 0<=self.frame_range[0] and self.frame_range[0]+self.T<self.frame_range[1] and self.frame_range[1]<=self.n_data
         assert self.restart_index is None
 
     def __len__(self):
         return self.n_data
 
     def getitem_paths(self, idx):
-        chunk_idxs = [(idx * self.spacing) // self.chunk_size]
+        chunk_idxs = [(self.frame_range[0] + idx * self.spacing) // self.chunk_size]
         return [(self.test_path if self.is_test else self.train_path) / f"{cidx}.npy" for cidx in chunk_idxs]
 
     def get_video_subsequence(self, video, idx):
         # Take a subsequence of the video.
-        start_i = (idx * self.spacing) % self.chunk_size
+        start_i = (self.frame_range[0] + idx * self.spacing) % self.chunk_size
         video = video[start_i:start_i+self.T]
         assert len(video) == self.T
         return video

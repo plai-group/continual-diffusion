@@ -25,7 +25,7 @@ from improved_diffusion.script_util import (
 )
 from improved_diffusion.test_util import get_model_results_path, get_eval_run_identifier, Protect
 from improved_diffusion.sampling_schemes import sampling_schemes
-from improved_diffusion.video_datasets import get_test_dataset, get_vis_dataset
+from improved_diffusion.video_datasets import get_eval_dataset, eval_dataset_configs
 
 
 @th.no_grad()
@@ -62,7 +62,6 @@ def sample_video(args, model, diffusion, batch, just_get_indices=False):
         # Prepare network's input
         frame_indices = th.cat([th.tensor(obs_frame_indices), th.tensor(latent_frame_indices)], dim=1).long()
         x0 = th.stack([samples[i, fi] for i, fi in enumerate(frame_indices)], dim=0).clone()
-        x0 = diffusion.encode(x0)
         obs_mask = th.cat([th.ones_like(th.tensor(obs_frame_indices)),
                               th.zeros_like(th.tensor(latent_frame_indices))], dim=1).view(B, -1, 1, 1, 1).float()
         latent_mask = 1 - obs_mask
@@ -103,22 +102,24 @@ def sample_video(args, model, diffusion, batch, just_get_indices=False):
                                   latent_mask=latent_mask),
                 latent_mask=latent_mask,
                 return_attn_weights=False,
+                decode_chunk_size=args.decode_chunk_size,
                 **sampler_kwargs,
             )
 
             if isinstance(local_samples, tuple):
                 # Edge case: Encoded sample
                 visualized_local_samples = local_samples[1]
-                local_samples = local_samples[0]
+                local_samples = local_samples[0].to(x0.dtype)
             else:
                 # No encoded samples
-                visualized_local_samples = local_samples
+                visualized_local_samples = local_samples.to(x0.dtype)
 
             if visualized_samples is None:
                 if local_samples.shape == visualized_local_samples.shape:
-                    decoded_obs_batch = batch[:, args.n_obs].to(batch.device)
+                    decoded_obs_batch = batch[:, :args.n_obs].to(batch.device)
                 else:
-                    decoded_obs_batch = diffusion.decode(batch[:, :args.n_obs].to(th.float16)).to(batch.device)
+                    decoded_obs_batch = diffusion.decode(batch[:, :args.n_obs].to(th.float16),
+                                                         chunk_size=args.decode_chunk_size).to(batch.device)
                 C_d, H_d, W_d = decoded_obs_batch.shape[2:]
                 visualized_samples = th.zeros(B, T, *decoded_obs_batch.shape[2:]).to(batch.device).to(batch.dtype)
                 visualized_samples[:, :args.n_obs] = decoded_obs_batch
@@ -128,7 +129,7 @@ def sample_video(args, model, diffusion, batch, just_get_indices=False):
         # Fill in the generated frames
         for i, li in enumerate(latent_frame_indices):
             samples[i, li] = local_samples[i, -len(li):].cpu().to(samples.dtype)
-            visualized_samples[i, li] = visualized_local_samples[i, -len(li):].cpu().to(visualized_local_samples.dtype)
+            visualized_samples[i, li] = visualized_local_samples[i, -len(li):].cpu().to(visualized_samples.dtype)
         indices_used.append((obs_frame_indices, latent_frame_indices))
     return visualized_samples, indices_used
 
@@ -146,7 +147,7 @@ def main(args, model, diffusion, dataset, samples_prefix):
         batch = th.stack([dataset[i][0] for i in batch_indices])
         samples, _ = sample_video(args, model, diffusion, batch)
         drange = [-1, 1]
-        samples = (samples.numpy() - drange[0]) / (drange[1] - drange[0]) * 255
+        samples = (samples.clamp(*drange).numpy() - drange[0]) / (drange[1] - drange[0]) * 255
         samples = samples.astype(np.uint8)
         for i in range(len(batch_indices)):
             if todo[i]:
@@ -154,105 +155,10 @@ def main(args, model, diffusion, dataset, samples_prefix):
                 print(f"*** Saved {output_filenames[i]} ***")
 
 
-# def visualise(args, model, diffusion, dataset):
-#     """
-#     batch has a shape of BxTxCxHxW where
-#     B: batch size
-#     T: video length
-#     CxWxH: image size
-#     """
-#     is_adaptive = "adaptive" in args.sampling_scheme
-#     bs = args.batch_size if is_adaptive else 1
-#     batch = next(iter(th.utils.data.DataLoader(dataset, batch_size=bs, shuffle=False, drop_last=False)))[0]
-#     _, indices = sample_video(args, model, diffusion, batch, just_get_indices=True)
-
-#     def visualise_obs_lat_sequence(sequence, index):
-#         """ if index is None, expects sequence to be a list of tuples of form (list, list)
-#             if index is given, expects sequence to be a list of tuples of form (list of lists (from which index i is taken), list of lists (from which index i is taken))
-#         """
-#         vis = []
-#         exist_indices = list(range(args.n_obs))
-#         for obs_frame_indices, latent_frame_indices in sequence:
-#             obs_frame_indices, latent_frame_indices = obs_frame_indices[index], latent_frame_indices[index]
-#             exist_indices.extend(latent_frame_indices)
-#             new_layer = th.zeros((args.T, 3)).int()
-#             border_colour = th.tensor([0, 0, 0]).int()
-#             not_sampled_colour = th.tensor([255, 255, 255]).int()
-#             exist_colour = th.tensor([50, 50, 50]).int()
-#             obs_colour = th.tensor([50, 50, 255]).int()
-#             latent_colour = th.tensor([255, 69, 0]).int()
-#             new_layer = th.zeros((args.T, 3)).int()
-#             new_layer[:, :] = not_sampled_colour
-#             new_layer[exist_indices, :] = exist_colour
-#             new_layer[obs_frame_indices, :] = obs_colour
-#             new_layer[latent_frame_indices, :] = latent_colour
-#             scale = 4
-#             new_layer = new_layer.repeat_interleave(scale+1, dim=0)
-#             new_layer[::(scale+1)] = border_colour
-#             new_layer = th.cat([new_layer, new_layer[:1]], dim=0)
-#             vis.extend([new_layer.clone() for _ in range(scale+1)])
-#             vis[-1][:] = border_colour
-#         vis = th.stack([vis[-1], *vis])
-#         if not is_adaptive:
-#             assert index == 0
-#         fname = f"vis_{args.sampling_scheme}_sampling-{args.T}-given-{args.n_obs}_{args.max_latent_frames}-{args.max_frames}-chunks"
-#         if args.optimality is not None:
-#             fname += f"_optimal-{args.optimality}"
-#         if is_adaptive:
-#             fname += f"_index-{index}"
-#         else:
-#             assert index == 0
-#         fname += '.png'
-#         dir = Path("visualisations")
-#         dir.mkdir(parents=True, exist_ok=True)
-#         Image.fromarray(vis.numpy().astype(np.uint8)).save(dir / fname)
-#         print(f"Saved to {str(dir / fname)}")
-
-#     for i in range(len(batch)):
-#         visualise_obs_lat_sequence(indices, i)
-
-
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument("checkpoint_path", type=str)
-    parser.add_argument("--sampling_scheme", required=True, choices=sampling_schemes.keys())
-    parser.add_argument("--batch_size", type=int, default=8)
-    parser.add_argument("--eval_dir", type=str, default=None)
-    parser.add_argument("--n_obs", type=int, default=36, help="Number of observed frames at the beginning of the video. The rest are sampled.")
-    parser.add_argument("--T", type=int, default=None, help="Length of the videos. If not specified, it will be inferred from the dataset.")
-    parser.add_argument("--max_frames", type=int, default=None,
-                        help="Denoted K in the paper. Maximum number of (observed or latent) frames input to the model at once. Defaults to what the model was trained with.")
-    parser.add_argument("--max_latent_frames", type=int, default=None, help="Number of frames to sample in each stage. Defaults to max_frames/2.")
-    parser.add_argument("--start_index", type=int, default=0)
-    parser.add_argument("--stop_index", type=int, default=None)
-    parser.add_argument("--sampler", type=str, default="heun-80-inf-0-1-1000-0.002-7-50")
-    parser.add_argument("--use_ddim", type=str2bool, default=False)
-    parser.add_argument("--eval_on_train", type=str2bool, default=False)
-    parser.add_argument("--timestep_respacing", type=str, default="")
-    parser.add_argument("--clip_denoised", type=str2bool, default=True)
-    parser.add_argument("--sample_idx", type=int, default=0, help="Sampled images will have this specific index. Used for sampling multiple videos with the same observations.")
-    parser.add_argument("--optimality", type=str, default=None,
-                        choices=["linspace-t", "random-t", "linspace-t-force-nearby", "random-t-force-nearby"],
-                        help="Type of optimised sampling scheme to use for choosing observed frames. By default uses non-optimized sampling scheme. The optimal indices should be computed before use via video_optimal_schedule.py.")
-    parser.add_argument("--device", default="cuda" if th.cuda.is_available() else "cpu")
-    parser.add_argument("--visualize_mode", type=str2bool, default=False, help="Used to produce videos of specific video subsequences.")
-    args = parser.parse_args()
-
-    # HACK: Do this for now
-    # if not args.visualize_mode:
-    #     assert args.start_index == 0, "Start index must be 0 due to the test set potentially being evenly spaced out from the entire test video."
-
-    # Prepare which indices to sample (for unconditional generation index does nothing except change file name)
-    if args.stop_index is None:
-        # assume we're in a slurm batch job, set start and stop_index accordingly
-        if "SLURM_ARRAY_TASK_ID" in os.environ:
-            task_id = int(os.environ["SLURM_ARRAY_TASK_ID"])
-        else:
-            print("Warning: assuming we're not in a slurm batch job, only sampling first batch.")
-            task_id = 0
-        args.start_index = task_id * args.batch_size
-        args.stop_index = (task_id + 1) * args.batch_size
+def main_outer(args):
     args.indices = list(range(args.start_index, args.stop_index))
+    if args.num_sampled_videos is None:
+        args.num_sampled_videos = len(args.indices)
     print(f"Sampling for indices {args.start_index} to {args.stop_index}.")
 
     # Load the checkpoint (state dictionary and config)
@@ -261,6 +167,7 @@ if __name__ == "__main__":
     model_args = data["config"]
     model_args.update({"use_ddim": args.sampler == "ddim",
                        "timestep_respacing": args.timestep_respacing})
+    model_args["diffusion_space_kwargs"]["enable_decoding"] = True
     model_args = argparse.Namespace(**model_args)
     model, diffusion = create_model_and_diffusion(
         **args_to_dict(model_args, model_and_diffusion_defaults().keys())
@@ -273,21 +180,22 @@ if __name__ == "__main__":
         args.max_frames = model_args.max_frames
     if args.max_latent_frames is None:
         args.max_latent_frames = args.max_frames // 2 
+    if model_args.diffusion_space == "latent":
+        args.clip_denoised = False
 
     # Prepare samples directory
     args.eval_dir = get_model_results_path(args) / get_eval_run_identifier(args)
-    samples_prefix = "samples_train" if args.eval_on_train else "samples"
+    samples_prefix = "samples"
 
     # Load the dataset (to get observations from)
-    if args.visualize_mode:
-        dataset = get_vis_dataset(dataset_name=model_args.dataset, T=args.T)
-        samples_prefix += "_vis"
-    else:
-        dataset = get_test_dataset(dataset_name=model_args.dataset, T=args.T, n_data=len(args.indices))
-
-    if args.eval_on_train:
-        dataset.is_test = False
-
+    eval_dataset_args = dict(dataset_name=model_args.dataset, T=args.T, train=args.eval_on_train,
+                             eval_dataset_config=args.eval_dataset_config)
+    # if args.eval_dataset_config == eval_dataset_configs["default"]:
+    if args.eval_dataset_config != eval_dataset_configs["continuous"]:
+        spacing_kwargs = dict(n_data=args.num_sampled_videos,
+                              frame_range=(args.lower_frame_range, args.upper_frame_range))
+        eval_dataset_args["spacing_kwargs"] = spacing_kwargs
+    dataset = get_eval_dataset(**eval_dataset_args)
 
     (args.eval_dir / samples_prefix).mkdir(parents=True, exist_ok=True)
     print(f"Saving samples to {args.eval_dir / samples_prefix}")
@@ -302,3 +210,42 @@ if __name__ == "__main__":
         print(f"Saved model config at {json_path}")
 
     main(args, model, diffusion, dataset, samples_prefix)
+
+
+def create_sampling_parser():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("checkpoint_path", type=str)
+    parser.add_argument("--start_index", type=int, default=0)
+    parser.add_argument("--stop_index", type=int, required=True)
+    parser.add_argument("--num_sampled_videos", type=int, default=None,
+                        help="Total number of samples (default: args.stop_index-args.start_index)")
+    parser.add_argument("--sampling_scheme", required=True, choices=sampling_schemes.keys())
+    parser.add_argument("--batch_size", type=int, default=8)
+    parser.add_argument("--eval_dir", type=str, default=None)
+    parser.add_argument("--n_obs", type=int, default=36, help="Number of observed frames at the beginning of the video. The rest are sampled.")
+    parser.add_argument("--T", type=int, default=None, help="Length of the videos. If not specified, it will be inferred from the dataset.")
+    parser.add_argument("--max_frames", type=int, default=None,
+                        help="Denoted K in the paper. Maximum number of (observed or latent) frames input to the model at once. Defaults to what the model was trained with.")
+    parser.add_argument("--max_latent_frames", type=int, default=None, help="Number of frames to sample in each stage. Defaults to max_frames/2.")
+    parser.add_argument("--sampler", type=str, default="heun-80-inf-0-1-1000-0.002-7-50")
+    parser.add_argument("--use_ddim", type=str2bool, default=False)
+    parser.add_argument("--eval_on_train", type=str2bool, default=False)
+    parser.add_argument("--timestep_respacing", type=str, default="")
+    parser.add_argument("--clip_denoised", type=str2bool, default=True, help="If true, diffusion model generates data between [-1,1].")
+    parser.add_argument("--sample_idx", type=int, default=0, help="Sampled images will have this specific index. Used for sampling multiple videos with the same observations.")
+    parser.add_argument("--optimality", type=str, default=None,
+                        choices=["linspace-t", "random-t", "linspace-t-force-nearby", "random-t-force-nearby"],
+                        help="Type of optimised sampling scheme to use for choosing observed frames. By default uses non-optimized sampling scheme. The optimal indices should be computed before use via video_optimal_schedule.py.")
+    parser.add_argument("--device", default="cuda" if th.cuda.is_available() else "cpu")
+
+    parser.add_argument("--eval_dataset_config", type=str, default=eval_dataset_configs["default"], choices=list(eval_dataset_configs.keys()))
+    parser.add_argument("--lower_frame_range", type=int, default=0, help="Lower bound of frame index used for SpacedDatasets.")
+    parser.add_argument("--upper_frame_range", type=int, default=None, help="Upper bound of frame index used for SpacedDatasets.")
+    parser.add_argument("--decode_chunk_size", type=int, default=10)
+    return parser
+
+
+if __name__ == "__main__":
+    parser = create_sampling_parser()
+    args = parser.parse_args()
+    main_outer(args)

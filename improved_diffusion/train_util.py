@@ -330,7 +330,7 @@ class TrainLoop:
                 # print(f"rank: {dist.get_rank()}, indices: {absolute_index_map[:,0].tolist()}, device: {dist_util.dev()}")
             except RuntimeError as e:
                 print(e)
-                self.step += 1
+                # self.step += 1
                 break
 
             for _ in range(self.steps_per_experience):
@@ -348,11 +348,7 @@ class TrainLoop:
                     self.log_samples()
                     last_sample_time = time()
                 self.step += 1
-
-        # Save the last checkpoint if it wasn't already saved.
         self.save()
-        # if (self.step - 1) % self.save_interval != 0:
-        #     self.save()
 
     def run_step(self, batch1, batch2, absolute_index_map=None):
         t0 = time()

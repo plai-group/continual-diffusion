@@ -25,7 +25,7 @@ from improved_diffusion.script_util import (
 )
 from improved_diffusion.test_util import get_model_results_path, get_eval_run_identifier, Protect
 from improved_diffusion.sampling_schemes import sampling_schemes
-from improved_diffusion.video_datasets import get_test_dataset, get_vis_dataset
+from improved_diffusion.video_datasets import get_eval_dataset, eval_dataset_configs
 
 
 @th.no_grad()
@@ -102,6 +102,7 @@ def sample_video(args, model, diffusion, batch, just_get_indices=False):
                                   latent_mask=latent_mask),
                 latent_mask=latent_mask,
                 return_attn_weights=False,
+                decode_chunk_size=args.decode_chunk_size,
                 **sampler_kwargs,
             )
 
@@ -117,7 +118,8 @@ def sample_video(args, model, diffusion, batch, just_get_indices=False):
                 if local_samples.shape == visualized_local_samples.shape:
                     decoded_obs_batch = batch[:, :args.n_obs].to(batch.device)
                 else:
-                    decoded_obs_batch = diffusion.decode(batch[:, :args.n_obs].to(th.float16), chunk_size=5).to(batch.device)
+                    decoded_obs_batch = diffusion.decode(batch[:, :args.n_obs].to(th.float16),
+                                                         chunk_size=args.decode_chunk_size).to(batch.device)
                 C_d, H_d, W_d = decoded_obs_batch.shape[2:]
                 visualized_samples = th.zeros(B, T, *decoded_obs_batch.shape[2:]).to(batch.device).to(batch.dtype)
                 visualized_samples[:, :args.n_obs] = decoded_obs_batch
@@ -154,21 +156,9 @@ def main(args, model, diffusion, dataset, samples_prefix):
 
 
 def main_outer(args):
-    # HACK: Do this for now
-    # if not args.visualize_mode:
-    #     assert args.start_index == 0, "Start index must be 0 due to the test set potentially being evenly spaced out from the entire test video."
-
-    # Prepare which indices to sample (for unconditional generation index does nothing except change file name)
-    if args.stop_index is None:
-        # assume we're in a slurm batch job, set start and stop_index accordingly
-        if "SLURM_ARRAY_TASK_ID" in os.environ:
-            task_id = int(os.environ["SLURM_ARRAY_TASK_ID"])
-        else:
-            print("Warning: assuming we're not in a slurm batch job, only sampling first batch.")
-            task_id = 0
-        args.start_index = task_id * args.batch_size
-        args.stop_index = (task_id + 1) * args.batch_size
     args.indices = list(range(args.start_index, args.stop_index))
+    if args.num_sampled_videos is None:
+        args.num_sampled_videos = len(args.indices)
     print(f"Sampling for indices {args.start_index} to {args.stop_index}.")
 
     # Load the checkpoint (state dictionary and config)
@@ -195,18 +185,17 @@ def main_outer(args):
 
     # Prepare samples directory
     args.eval_dir = get_model_results_path(args) / get_eval_run_identifier(args)
-    samples_prefix = "samples_train" if args.eval_on_train else "samples"
+    samples_prefix = "samples"
 
     # Load the dataset (to get observations from)
-    if args.visualize_mode:
-        dataset = get_vis_dataset(dataset_name=model_args.dataset, T=args.T)
-        samples_prefix += "_vis"
-    else:
-        dataset = get_test_dataset(dataset_name=model_args.dataset, T=args.T, n_data=len(args.indices))
-
-    if args.eval_on_train:
-        dataset.set_train()
-
+    eval_dataset_args = dict(dataset_name=model_args.dataset, T=args.T, train=args.eval_on_train,
+                             eval_dataset_config=args.eval_dataset_config)
+    # if args.eval_dataset_config == eval_dataset_configs["default"]:
+    if args.eval_dataset_config != eval_dataset_configs["continuous"]:
+        spacing_kwargs = dict(n_data=args.num_sampled_videos,
+                              frame_range=(args.lower_frame_range, args.upper_frame_range))
+        eval_dataset_args["spacing_kwargs"] = spacing_kwargs
+    dataset = get_eval_dataset(**eval_dataset_args)
 
     (args.eval_dir / samples_prefix).mkdir(parents=True, exist_ok=True)
     print(f"Saving samples to {args.eval_dir / samples_prefix}")
@@ -226,6 +215,10 @@ def main_outer(args):
 def create_sampling_parser():
     parser = argparse.ArgumentParser()
     parser.add_argument("checkpoint_path", type=str)
+    parser.add_argument("--start_index", type=int, default=0)
+    parser.add_argument("--stop_index", type=int, required=True)
+    parser.add_argument("--num_sampled_videos", type=int, default=None,
+                        help="Total number of samples (default: args.stop_index-args.start_index)")
     parser.add_argument("--sampling_scheme", required=True, choices=sampling_schemes.keys())
     parser.add_argument("--batch_size", type=int, default=8)
     parser.add_argument("--eval_dir", type=str, default=None)
@@ -234,8 +227,6 @@ def create_sampling_parser():
     parser.add_argument("--max_frames", type=int, default=None,
                         help="Denoted K in the paper. Maximum number of (observed or latent) frames input to the model at once. Defaults to what the model was trained with.")
     parser.add_argument("--max_latent_frames", type=int, default=None, help="Number of frames to sample in each stage. Defaults to max_frames/2.")
-    parser.add_argument("--start_index", type=int, default=0)
-    parser.add_argument("--stop_index", type=int, default=None)
     parser.add_argument("--sampler", type=str, default="heun-80-inf-0-1-1000-0.002-7-50")
     parser.add_argument("--use_ddim", type=str2bool, default=False)
     parser.add_argument("--eval_on_train", type=str2bool, default=False)
@@ -246,7 +237,11 @@ def create_sampling_parser():
                         choices=["linspace-t", "random-t", "linspace-t-force-nearby", "random-t-force-nearby"],
                         help="Type of optimised sampling scheme to use for choosing observed frames. By default uses non-optimized sampling scheme. The optimal indices should be computed before use via video_optimal_schedule.py.")
     parser.add_argument("--device", default="cuda" if th.cuda.is_available() else "cpu")
-    parser.add_argument("--visualize_mode", type=str2bool, default=False, help="Used to produce videos of specific video subsequences.")
+
+    parser.add_argument("--eval_dataset_config", type=str, default=eval_dataset_configs["default"], choices=list(eval_dataset_configs.keys()))
+    parser.add_argument("--lower_frame_range", type=int, default=0, help="Lower bound of frame index used for SpacedDatasets.")
+    parser.add_argument("--upper_frame_range", type=int, default=None, help="Upper bound of frame index used for SpacedDatasets.")
+    parser.add_argument("--decode_chunk_size", type=int, default=10)
     return parser
 
 

@@ -2,6 +2,7 @@ import sqlite3
 import torch
 from pathlib import Path
 from torch.utils.data import Dataset, DataLoader
+from typing import Tuple
 import math
 import cv2
 import numpy as np
@@ -283,21 +284,33 @@ class ContinuousPlaicraftDataset(Dataset):
 
 
 class ChunkedPlaicraftDataset(ContinuousPlaicraftDataset):
-    def _get_start_frame_index(self, idx):
-        return idx * self.window_length
-
-    def __len__(self):
-        """Return the total number of windows across all sessions."""
-        return self.total_frames // self.window_length
-
-
-class SpacedPlaicraftDataset(ContinuousPlaicraftDataset):
-    def __init__(self, n_data: int, *args, **kwargs):
-        self.n_data = n_data
+    def __init__(self, frame_range: Tuple[int, int], *args, **kwargs):
+        self.original_frame_range = frame_range
         super().__init__(*args, **kwargs)
 
     def _get_start_frame_index(self, idx):
-        return idx * self.spacing
+        return self.frame_range[0] + idx * self.window_length
+
+    def __len__(self):
+        """Return the total number of windows across all sessions."""
+        return (self.frame_range[1]-self.frame_range[0]) // self.window_length
+
+    def _initialize_sessions(self):
+        super()._initialize_sessions()
+        if self.original_frame_range[1] is None:
+            self.frame_range = (self.original_frame_range[0], self.total_frames)
+        else:
+            self.frame_range = self.original_frame_range
+
+
+class SpacedPlaicraftDataset(ContinuousPlaicraftDataset):
+    def __init__(self, n_data: int, frame_range: Tuple[int, int], *args, **kwargs):
+        self.n_data = n_data
+        self.original_frame_range = frame_range
+        super().__init__(*args, **kwargs)
+
+    def _get_start_frame_index(self, idx):
+        return self.frame_range[0] + idx * self.spacing
 
     def __len__(self):
         """Return the total number of windows across all sessions."""
@@ -305,9 +318,16 @@ class SpacedPlaicraftDataset(ContinuousPlaicraftDataset):
 
     def _initialize_sessions(self):
         super()._initialize_sessions()
-        self.spacing = self.total_frames // self.n_data
-        self.spacing = self.spacing - self.spacing % self.window_length
-
+        if self.original_frame_range[1] is None:
+            self.frame_range = (self.original_frame_range[0], self.total_frames)
+        else:
+            self.frame_range = self.original_frame_range
+        self.spacing = (self.frame_range[1]-self.frame_range[0]) // self.n_data
+        assert self.spacing > self.window_length,\
+               f"Spacing to window length ratio is too small: {self.spacing} vs {self.window_length}"
+        self.spacing = self.spacing - self.spacing % self.window_length  # spacing is divisible by window_length
+        print(f"Total Frames: {self.total_frames}, Selected Frames: {self.frame_range[1]}, "+\
+              f"Spacing: {self.spacing}, # Data: {self.n_data}")
 
 
 if __name__ == "__main__":

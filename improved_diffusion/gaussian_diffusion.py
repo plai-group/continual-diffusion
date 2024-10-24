@@ -450,6 +450,7 @@ class GaussianDiffusion:
         latent_mask=None,
         return_attn_weights=False,
         return_decoded=True,
+        decode_chunk_size=10,
     ):
         """
         Generate samples from the model.
@@ -506,7 +507,8 @@ class GaussianDiffusion:
                         attns[tag] = attns[tag] + reshaped/(self.num_timesteps/4)
             final = sample
         # return self.decode(final["sample"]) if return_decoded else final["sample"], attns
-        return ((final["sample"], self.decode(final["sample"], chunk_size=5)) if return_decoded else final["sample"]), None
+        return ((final["sample"], self.decode(final["sample"], chunk_size=decode_chunk_size))
+                if return_decoded else final["sample"]), None
 
     def p_sample_loop_progressive(
         self,
@@ -768,6 +770,7 @@ class GaussianDiffusion:
         sigma_min=0.001,
         rho=7,
         num_steps=50,
+        decode_chunk_size=10,
     ):
         del return_attn_weights, progress, latent_mask
 
@@ -849,7 +852,8 @@ class GaussianDiffusion:
                 x_next = x_hat + (s_next - s_hat) * (0.5 * d_cur + 0.5 * d_prime)
             # print(f"Heun: {(x_next[0,10:].min(), x_next[0,10:].max())}")
 
-        return ((x_next, self.decode(x_next, chunk_size=5)) if return_decoded else x_next), None
+        return ((x_next, self.decode(x_next, chunk_size=decode_chunk_size))
+                if return_decoded else x_next), None
 
 
     def _vb_terms_bpd(

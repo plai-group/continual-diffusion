@@ -48,7 +48,7 @@ class DecodedDataset(th.utils.data.Dataset):
 
     def __getitem__(self, idx):
         path = self.cache_path / f"sample_{idx:04d}.npy"
-        with Protect(path, timeout=1800):
+        with Protect(path, timeout=3600):
             if not path.exists():
                 print(f"Decoding data item {idx}...")
                 encoding, _ = self.encoded_dataset[idx]

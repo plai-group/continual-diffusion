@@ -100,7 +100,7 @@ def load_data(dataset_name, batch_size, T=None, deterministic=False, num_workers
             sampler.load_sampler(path=load_path)
             print(f"starting replay dataloader from data index {sampler.start_index}.")
     else:
-        sampler = DistributedSampler(dataset, shuffle=True, seed=seed)
+        sampler = DistributedSampler(dataset, shuffle=False, seed=seed)
         sampler.set_epoch(epoch)
 
     batch_size = batch_size // dist.get_world_size()

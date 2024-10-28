@@ -90,6 +90,7 @@ def load_data(dataset_name, batch_size, T=None, deterministic=False, num_workers
     if return_dataset:
         return dataset
 
+    epoch = 0
     if deterministic:
         save_path = os.path.join(get_blob_logdir(resume_id), 'replay_state.pt') if dist.get_rank() == 0 else ''
         sampler = DistributedReplaySampler(dataset, batch_size, buffer_size=buffer_size, seed=seed,
@@ -99,16 +100,18 @@ def load_data(dataset_name, batch_size, T=None, deterministic=False, num_workers
             sampler.load_sampler(path=load_path)
             print(f"starting replay dataloader from data index {sampler.start_index}.")
     else:
-        sampler = DistributedSampler(dataset, shuffle=True, seed=seed)
-        sampler.set_epoch(0)
+        sampler = DistributedSampler(dataset, shuffle=False, seed=seed)
+        sampler.set_epoch(epoch)
 
     batch_size = batch_size // dist.get_world_size()
     loader = DataLoader(dataset, batch_size=batch_size, num_workers=num_workers, sampler=sampler)
     while True:
         yield from loader
+        epoch += 1
         if deterministic:
             raise StopIteration()
-
+        else:
+            sampler.set_epoch(epoch)
 
 def get_eval_dataset(dataset_name, T=None, seed=0, train=False, eval_dataset_config=eval_dataset_configs["default"],
                      spacing_kwargs=dict(n_data=None, frame_range=(0, None))):

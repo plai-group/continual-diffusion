@@ -5,7 +5,7 @@
 
 # Installation
 
-Tested with Python 3.10 in a conda environment. We require the Python packages `tensordict mpi4py torch torchvision wandb blobfile tqdm moviepy imageio diffusers opencv-python ffmpeg lpips tensorflow==2.8 tensorflow_hub==0.12.0 diffusers transformers`.
+Tested with Python 3.10 in a conda environment. We require the Python packages `mpi4py torch torchvision wandb blobfile tqdm moviepy imageio diffusers opencv-python ffmpeg lpips tensorflow==2.15 tensorflow_hub==0.15.0 diffusers transformers pandas`.
 This repository itself should also be installed by running
 ```
 pip install -e .

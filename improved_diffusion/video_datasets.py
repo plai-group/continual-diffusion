@@ -75,11 +75,11 @@ def load_data(dataset_name, batch_size, T=None, deterministic=False, num_workers
     if dataset_name.startswith("streaming"):
         deterministic = True
     if "ball_stn" in dataset_name:
-        dataset = ContinuousBaseDataset(data_path, T=T, seed=seed)
+        dataset = ContinuousBaseDataset(data_path, T=T, seed=0)  # There is only one video stream
     elif "ball_nstn" in dataset_name:
-        dataset = ContinuousBaseDataset(data_path, T=T, seed=seed)
+        dataset = ContinuousBaseDataset(data_path, T=T, seed=0)
     elif "wmaze" in dataset_name:
-        dataset = ContinuousBaseDataset(data_path, T=T, seed=seed)
+        dataset = ContinuousBaseDataset(data_path, T=T, seed=0)
     elif "plaicraft" in dataset_name:
         dataset = ContinuousPlaicraftDataset(data_path, window_length=T,
                                              player_names_train=["Alex"],
@@ -100,7 +100,7 @@ def load_data(dataset_name, batch_size, T=None, deterministic=False, num_workers
             sampler.load_sampler(path=load_path)
             print(f"starting replay dataloader from data index {sampler.start_index}.")
     else:
-        sampler = DistributedSampler(dataset, shuffle=False, seed=seed)
+        sampler = DistributedSampler(dataset, shuffle=True, seed=seed)
         sampler.set_epoch(epoch)
 
     batch_size = batch_size // dist.get_world_size()

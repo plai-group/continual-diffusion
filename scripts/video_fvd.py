@@ -187,9 +187,8 @@ if __name__ == "__main__":
     # Load the dataset (to get observations from)
     eval_dataset_args = dict(dataset_name=model_args.dataset, T=T, train=eval_on_train,
                              eval_dataset_config=eval_dataset_config)
-    if eval_dataset_config == eval_dataset_configs["default"]:
-        spacing_kwargs = dict(frame_range=(parsed["lower_frame_range"], parsed["upper_frame_range"]),
-                              n_data=args.num_videos)
+    if eval_dataset_config != eval_dataset_configs["continuous"]:
+        spacing_kwargs = dict(frame_range=(parsed["lower_frame_range"], parsed["upper_frame_range"]), n_data=args.num_videos)
         eval_dataset_args["spacing_kwargs"] = spacing_kwargs
     test_dataset_full = get_eval_dataset(**eval_dataset_args)
     sample_dataset = SampleDataset(samples_path=(Path(args.eval_dir) / "samples"), sample_idx=args.sample_idx, length=args.num_videos)

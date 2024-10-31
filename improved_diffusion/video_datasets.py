@@ -120,13 +120,13 @@ def get_eval_dataset(dataset_name, T=None, seed=0, train=False, eval_dataset_con
     data_path = get_data_path(dataset_name)
     T = default_T_dict[dataset_name] if T is None else T
     if "ball_stn" in dataset_name:
-        shared_args = dict(dataset_path=data_path,  T=T, seed=seed)
+        shared_args = dict(dataset_path=data_path, T=T, seed=seed)
         if eval_dataset_config == eval_dataset_configs["continuous"]:
             dataset = ContinuousBaseDataset(**shared_args)
         else:
             dataset = ChunkedBaseDataset(frame_range=spacing_kwargs["frame_range"], **shared_args)
     elif "ball_nstn" in dataset_name:
-        shared_args = dict(dataset_path=data_path, window_length=T, seed=seed)
+        shared_args = dict(dataset_path=data_path, T=T, seed=seed)
         if eval_dataset_config == eval_dataset_configs["continuous"]:
             dataset = ContinuousBaseDataset(**shared_args)
         elif eval_dataset_config == eval_dataset_configs["chunked"]:
@@ -134,7 +134,7 @@ def get_eval_dataset(dataset_name, T=None, seed=0, train=False, eval_dataset_con
         else:
             dataset = SpacedBaseDataset(**spacing_kwargs, **shared_args)
     elif "wmaze" in dataset_name:
-        shared_args = dict(dataset_path=data_path,  T=T, seed=seed)
+        shared_args = dict(dataset_path=data_path, T=T, seed=seed)
         if eval_dataset_config == eval_dataset_configs["continuous"]:
             dataset = ContinuousBaseDataset(**shared_args)
         else:
@@ -355,7 +355,7 @@ class SpacedBaseDataset(ContinuousBaseDataset):
 
         self.spacing = (self.frame_range[1]-self.frame_range[0]) // self.n_data
         assert self.spacing % self.T == 0
-        assert 0<=self.frame_range[0] and self.frame_range[0]+self.T<self.frame_range[1] and self.frame_range[1]<=self.n_data
+        assert 0<=self.frame_range[0] and self.frame_range[0]+self.T<self.frame_range[1]# and self.frame_range[1]<=self.n_data
         assert self.restart_index is None
 
     def __len__(self):

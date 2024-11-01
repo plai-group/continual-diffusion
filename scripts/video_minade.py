@@ -1,12 +1,14 @@
 import argparse
 import json
 import numpy as np
+import os
 from pathlib import Path
 import torch
 from typing import List
 
-from improved_diffusion.video_datasets import get_test_dataset, video_data_paths_dict
+from improved_diffusion.video_datasets import get_eval_dataset, eval_dataset_configs
 from improved_diffusion.script_util import str2bool
+from improved_diffusion.test_util import parse_eval_run_identifier, Protect
 from video_fvd import SampleDataset
 
 
@@ -177,7 +179,7 @@ def compute_minADE(test_dataset, sample_datasets, n_obs, T, n_balls):
         test_frames = next(test_loader)[0]
         sample_frames = [next(sample_loader)[0] for sample_loader in sample_loaders]
         exemplar_kernel = kernels.clone()
-        if str(dataset_obj.path) == video_data_paths_dict["ball_nstn"]:
+        if "ball_nstn" in str(dataset_obj.path):
             #  HACK: For adjusting kernel blue channels to account for nonstationarity
             exemplar_kernel[:,-1] += i/dataset_obj.n_data
         ADE, acc, transitions = compute_minADE_exemplar(test_frames, sample_frames, exemplar_kernel, T, n_balls, n_obs)
@@ -198,22 +200,17 @@ def compute_minADE(test_dataset, sample_datasets, n_obs, T, n_balls):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--eval_dir", type=str, required=True)
-    parser.add_argument("--n_obs", type=int, required=True, help="Number of observed frames at the beginning of the video. These are not counted.")
     parser.add_argument("--num_videos", type=int, default=None, help="Number of test video to evaluate on.")
     parser.add_argument("--n_balls", type=int, default=2, help="Number of bouncing balls in a video frame.")
     parser.add_argument("--sample_indices", type=int, nargs='+', default=[0])
-    parser.add_argument("--T", type=int, default=None, help="Length of the videos. If not specified, it will be inferred from the dataset.")
-    parser.add_argument("--eval_on_train", type=str2bool, default=False)
     args = parser.parse_args()
 
-    if args.eval_on_train:
-        save_path = Path(args.eval_dir) / f"minADE-{args.num_videos}-train.txt"
-        save_path_color = Path(args.eval_dir) / f"color-acc-{args.num_videos}-train.txt"
-        save_path_transition = Path(args.eval_dir) / f"trans-kl-{args.num_videos}-train.txt"
-    else:
-        save_path = Path(args.eval_dir) / f"minADE-{args.num_videos}.txt"
-        save_path_color = Path(args.eval_dir) / f"color-acc-{args.num_videos}.txt"
-        save_path_transition = Path(args.eval_dir) / f"trans-kl-{args.num_videos}.txt"
+    parsed = parse_eval_run_identifier(os.path.basename(args.eval_dir))
+    T, obs_length, eval_on_train, eval_dataset_config = parsed["T"], parsed["n_obs"], parsed["eval_on_train"], parsed["eval_dataset_config"]
+
+    save_path = Path(args.eval_dir) / f"minADE-{args.num_videos}.txt"
+    save_path_color = Path(args.eval_dir) / f"color-acc-{args.num_videos}.txt"
+    save_path_transition = Path(args.eval_dir) / f"trans-kl-{args.num_videos}.txt"
 
     # if save_path.exists():
     #     content = np.loadtxt(save_path).squeeze()
@@ -226,25 +223,20 @@ if __name__ == "__main__":
     with open(model_args_path, "r") as f:
         model_args = argparse.Namespace(**json.load(f))
 
-    # Set batch size given dataset if not specified
     args.dataset = model_args.dataset
-    if args.T is None:
-        args.T = model_args.T
 
-    samples_prefix = "samples_train" if args.eval_on_train else "samples"        
-
-    # Prepare datasets
-    sample_datasets = [SampleDataset(samples_path=(Path(args.eval_dir) / samples_prefix),
+    # Load the dataset (to get observations from)
+    eval_dataset_args = dict(dataset_name=model_args.dataset, T=T, train=eval_on_train,
+                             eval_dataset_config=eval_dataset_config)
+    if eval_dataset_config != eval_dataset_configs["continuous"]:
+        spacing_kwargs = dict(frame_range=(parsed["lower_frame_range"], parsed["upper_frame_range"]), n_data=args.num_videos)
+        eval_dataset_args["spacing_kwargs"] = spacing_kwargs
+    test_dataset_full = get_eval_dataset(**eval_dataset_args)
+    test_dataset = th.utils.data.Subset(dataset=test_dataset_full, indices=list(range(args.num_videos)))
+    sample_datasets = [SampleDataset(samples_path=(Path(args.eval_dir) / "samples"),
                                      sample_idx=i, length=args.num_videos) for i in args.sample_indices]
-    test_dataset_full = get_test_dataset(dataset_name=args.dataset, T=args.T, n_data=args.num_videos)
-    if args.eval_on_train:
-        test_dataset_full.set_train()
-    test_dataset = torch.utils.data.Subset(
-        dataset=test_dataset_full,
-        indices=list(range(args.num_videos)),
-    )
 
-    minADE, max_color_acc, transition_kl = compute_minADE(test_dataset, sample_datasets, n_obs=args.n_obs, T=args.T, n_balls=args.n_balls)
+    minADE, max_color_acc, transition_kl = compute_minADE(test_dataset, sample_datasets, n_obs=obs_length, T=T, n_balls=args.n_balls)
     np.savetxt(save_path, np.array([minADE]))
     np.savetxt(save_path_color, np.array([max_color_acc]))
     np.savetxt(save_path_transition, np.array([transition_kl]))

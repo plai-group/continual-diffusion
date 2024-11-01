@@ -107,11 +107,10 @@ def main(args):
     nicknames = args.nicknames if args.nicknames else [f"config_{i}" for i in range(len(args.wandb_ids))]
 
     result = {'nickname': [], 'wandb': []}
-
+    id_results = []
     for id, nickname in zip(args.wandb_ids, nicknames):
+        id_result = dict(nickname=nickname, wandb=id)
         input_dir = os.path.join("results", id, args.eval_dir_suffix)
-        result['nickname'].append(nickname)
-        result['wandb'].append(id)
 
         metric_paths = []
         for dirpath, _, filenames in os.walk(input_dir):
@@ -129,16 +128,17 @@ def main(args):
             try:
                 print(f"Reading {path} ({nickname})")
                 with open(path, 'r') as f:
-                    content = f.read()
+                    id_result[metric] = float(f.read())
             except FileNotFoundError:
                 print(f"WARNING - File for {nickname} not found: {path}")
-                result[metric].append(float('nan'))
-                continue
-            if metric in result:
-                result[metric].append(float(content))
-            else:
-                result[metric] = [float(content)]
+                id_result[metric] = float('nan')
+        id_results.append(id_result)
 
+    columns = list(dict.fromkeys([key for id_result in id_results for key in id_result.keys()]))
+    result = {column: [] for column in columns}
+    for id_result in id_results:
+        for column in columns:
+            result[column].append(id_result.get(column, float('nan')))
 
     print(result)
     df = pd.DataFrame(result)

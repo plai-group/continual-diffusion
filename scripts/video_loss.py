@@ -78,10 +78,10 @@ def compute_loss(batch, args, model, diffusion, schedule_sampler, trials=10):
 @th.no_grad()
 def main(args):
     loss_save_path = Path(args.eval_dir) / f"loss-{args.trials}.txt"
-    if loss_save_path.exists():
-        loss = np.loadtxt(loss_save_path).squeeze()
-        print(f"Losses are already computed: {loss}")
-        exit()
+    # if loss_save_path.exists():
+    #     loss = np.loadtxt(loss_save_path).squeeze()
+    #     print(f"Losses are already computed: {loss}")
+    #     exit()
     loss_save_path.parent.mkdir(parents=True, exist_ok=True)
     args.indices = list(range(args.start_index, args.stop_index))
     if args.num_sampled_videos is None:

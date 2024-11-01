@@ -120,6 +120,7 @@ def main(args):
                               frame_range=(args.lower_frame_range, args.upper_frame_range))
         eval_dataset_args["spacing_kwargs"] = spacing_kwargs
     dataset = get_eval_dataset(**eval_dataset_args)
+    dataset = th.utils.data.Subset(dataset=dataset, indices=args.indices)
     dataloader = th.utils.data.DataLoader(dataset, batch_size=args.batch_size, shuffle=False, drop_last=False)
     avg_loss = []
     for batch, _ in tqdm(dataloader):

@@ -232,7 +232,7 @@ if __name__ == "__main__":
         spacing_kwargs = dict(frame_range=(parsed["lower_frame_range"], parsed["upper_frame_range"]), n_data=args.num_videos)
         eval_dataset_args["spacing_kwargs"] = spacing_kwargs
     test_dataset_full = get_eval_dataset(**eval_dataset_args)
-    test_dataset = th.utils.data.Subset(dataset=test_dataset_full, indices=list(range(args.num_videos)))
+    test_dataset = torch.utils.data.Subset(dataset=test_dataset_full, indices=list(range(args.num_videos)))
     sample_datasets = [SampleDataset(samples_path=(Path(args.eval_dir) / "samples"),
                                      sample_idx=i, length=args.num_videos) for i in args.sample_indices]
 

@@ -6,7 +6,7 @@ from pathlib import Path
 import torch
 from typing import List
 
-from improved_diffusion.video_datasets import get_eval_dataset, eval_dataset_configs
+from improved_diffusion.video_datasets import get_eval_dataset, eval_dataset_configs, SpacedBaseDataset, ChunkedBaseDataset
 from improved_diffusion.script_util import str2bool
 from improved_diffusion.test_util import parse_eval_run_identifier, Protect
 from video_fvd import SampleDataset
@@ -181,7 +181,13 @@ def compute_minADE(test_dataset, sample_datasets, n_obs, T, n_balls):
         exemplar_kernel = kernels.clone()
         if "ball_nstn" in str(dataset_obj.path):
             #  HACK: For adjusting kernel blue channels to account for nonstationarity
-            exemplar_kernel[:,-1] += i/dataset_obj.n_data
+            if isinstance(dataset_obj, SpacedBaseDataset):
+                # exemplar_kernel[:,-1] += i/dataset_obj.n_data
+                exemplar_kernel[:,-1] += (dataset_obj.frame_range[0]+i*dataset_obj.spacing)/dataset_obj.T_total
+            elif isinstance(dataset_obj, ChunkedBaseDataset):
+                exemplar_kernel[:,-1] += (dataset_obj.frame_range[0]+i*dataset_obj.T)/dataset_obj.T_total
+            else:
+                raise Exception(f"Unsupported dataset object: {dataset_obj}")
         ADE, acc, transitions = compute_minADE_exemplar(test_frames, sample_frames, exemplar_kernel, T, n_balls, n_obs)
         all_ADEs.append(ADE)
         all_accs.append(acc)

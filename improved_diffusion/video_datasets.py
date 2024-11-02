@@ -355,7 +355,7 @@ class SpacedBaseDataset(ContinuousBaseDataset):
 
         self.spacing = (self.frame_range[1]-self.frame_range[0]) // self.n_data
         assert self.spacing % self.T == 0
-        assert 0<=self.frame_range[0] and self.frame_range[0]+self.T<self.frame_range[1]# and self.frame_range[1]<=self.n_data
+        assert 0<=self.frame_range[0] and self.frame_range[0]+self.T<self.frame_range[1]
         assert self.restart_index is None
 
     def __len__(self):

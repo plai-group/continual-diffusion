@@ -49,7 +49,7 @@ if __name__ == "__main__":
         # Load the dataset (to get observations from)
         eval_dataset_args = dict(dataset_name=model_args.dataset, T=T,
                                  train=eval_on_train, eval_dataset_config=eval_dataset_config)
-        if eval_dataset_config == eval_dataset_configs["default"]:
+        if eval_dataset_config != eval_dataset_configs["continuous"]:
             spacing_kwargs = dict(n_data=args.num_sampled_videos,
                                   frame_range=(parsed["lower_frame_range"], parsed["upper_frame_range"]))
             eval_dataset_args["spacing_kwargs"] = spacing_kwargs

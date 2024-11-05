@@ -1,9 +1,12 @@
 import argparse
+from collections import OrderedDict
 import os
 import pandas as pd
+import re
 import shutil
 import imageio
 import numpy as np
+import warnings
 from PIL import Image, ImageDraw
 
 from improved_diffusion.script_util import str2bool
@@ -101,6 +104,48 @@ def add_text_to_image(image, text, font_size=20, position=(10, 10), font_path=No
     return image
 
 
+def aggregate_summary(df, aggregate_prefixes):
+    # NOTE: Multi seed training run nicknames should end with "-sX" where X is an integer
+    nicknames = df['nickname']
+    alg_names = OrderedDict()
+    if re.search(r"-s\d+$", nicknames[0]):
+        for nickname in nicknames:
+            alg_name = '-'.join(nickname.split('-')[:-1])
+            alg_names[alg_name] = alg_names.get(alg_name, []) + [nickname]
+    else:
+        for nickname in nicknames:
+            alg_names[nickname] = [nickname]
+
+    result = dict(nickname=alg_names)
+    for alg_name, alg_run_names in alg_names.items():
+        filtered = df[df['nickname'].isin(alg_run_names)]
+        for prefix in aggregate_prefixes:
+            column_names = [col for col in filtered.columns if col.startswith(prefix)]
+            data = filtered[column_names].values.flatten()
+            k_mean, k_stderr = prefix, prefix+"-err"
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", category=RuntimeWarning)
+                result[k_mean] = result.get(k_mean,[]) + [np.mean(data)]
+                result[k_stderr] = result.get(k_stderr,[]) + [np.std(data, ddof=1)/np.sqrt(len(data))]
+        remaining_column_names = []
+        for col in df.columns:
+            include = col not in ['nickname', 'wandb']
+            for prefix in aggregate_prefixes:
+                if col.startswith(prefix): include = False
+            if include:
+                remaining_column_names.append(col)
+
+        for col in remaining_column_names:
+            data = filtered[col].values.flatten()
+            c_mean, c_stderr = col, col+"_err"
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", category=RuntimeWarning)
+                result[c_mean] = result.get(c_mean,[]) + [np.mean(data)]
+                result[c_stderr] = result.get(c_stderr,[]) + [np.std(data, ddof=1)/np.sqrt(len(data))]
+    result['nickname'] = list(result['nickname'].keys())
+    return pd.DataFrame(result)
+
+
 def main(args):
     output_dir = os.path.join("summarized", args.output_dir)
     os.makedirs(output_dir, exist_ok=True)
@@ -145,6 +190,11 @@ def main(args):
     out_path = os.path.join(output_dir, "summary.csv")
     df.to_csv(out_path, index=False)
     print(f"saved results to {out_path}.")
+
+    df_aggregated = aggregate_summary(df, args.metric_prefixes)
+    out_agg_path = os.path.join(output_dir, "final.csv")
+    print(df_aggregated)
+    df_aggregated.to_csv(out_agg_path, index=False)
 
     if args.video_name:
         os.makedirs(f"{output_dir}/gifs", exist_ok=True)

@@ -189,12 +189,9 @@ def main_outer(args):
 
     # Load the dataset (to get observations from)
     eval_dataset_args = dict(dataset_name=model_args.dataset, T=args.T, train=args.eval_on_train,
-                             eval_dataset_config=args.eval_dataset_config)
-    # if args.eval_dataset_config == eval_dataset_configs["default"]:
-    if args.eval_dataset_config != eval_dataset_configs["continuous"]:
-        spacing_kwargs = dict(n_data=args.num_sampled_videos,
-                              frame_range=(args.lower_frame_range, args.upper_frame_range))
-        eval_dataset_args["spacing_kwargs"] = spacing_kwargs
+                             eval_dataset_config=args.eval_dataset_config,
+                             spacing_kwargs=dict(n_data=args.num_sampled_videos),
+                             frame_range=(args.lower_frame_range, args.upper_frame_range))
     dataset = get_eval_dataset(**eval_dataset_args)
 
     (args.eval_dir / samples_prefix).mkdir(parents=True, exist_ok=True)

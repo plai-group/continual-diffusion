@@ -1,34 +1,47 @@
 import argparse
+from collections import OrderedDict
 import os
 import pandas as pd
+import re
 import shutil
+import imageio
+import numpy as np
+import warnings
+from PIL import Image, ImageDraw
+
+from improved_diffusion.script_util import str2bool
 
 
 """
-Example Run Command: python scripts/collect_results.py
-                     --wandb_ids dhwmkuiq 1fyc5svh 9ewarb2a 79vf3yni piexv54k
-                     --nicknames auto joint flex50 flex50attentive flex20
-                     --txt_path=ema_0.9999_500000/hierarchy-3_10_5_50_10/fvd-500-0-train.txt
-                     --output_dir ball_train_hierarchy
-                     --video_path=ema_0.9999_500000/hierarchy-3_10_5_50_10/videos_train/0.mp4
+This script collects metrics and optionally videos of multiple runs trained on the same datastream.
 
-python scripts/collect_results.py --wandb_ids dhwmkuiq 1fyc5svh 9ewarb2a 79vf3yni piexv54k --nicknames auto joint flex50 flex50attentive flex20 --txt_paths ema_0.9999_500000/hierarchy-3_10_5_50_10/fvd-500-0-train.txt --output_dir ball_train_hierarchy --video_path=ema_0.9999_500000/hierarchy-3_10_5_50_10/videos_train/0.mp4
+Assumes samples are in results/<WANDB_ID>/<EVAL_DIR_SUFFIX>/samples folder.
+Output is written to summarized/<OUTPUT_DIR>.
+
+Example Command
+
+python scripts/collect_results.py \
+--wandb_ids dhwmkuiq 1fyc5svh 9ewarb2a 79vf3yni piexv54k \
+--nicknames auto joint flex50 flex50attentive flex20 \
+--eval_dir_suffix=ema_0.9999_500000/hierarchy-3_10_5_50_10 \
+--metric_prefixes fvd-500 \
+--output_dir=ball \
+--video_name=4_1.gif
 """
 
 
 def parse_args():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--nicknames', type=str, nargs='+', default=None)
     parser.add_argument('--wandb_ids', type=str, nargs='+', required=True)
-    parser.add_argument('--txt_paths', type=str, nargs='+', required=True)
+    parser.add_argument('--nicknames', type=str, nargs='+', default=None)
+    parser.add_argument('--eval_dir_suffix', type=str, required=True,
+                        help="Path to the results directory of an evaluation, excluding 'results/<WANDB ID>'.")
+    parser.add_argument('--metric_prefixes', type=str, nargs='+', required=True,
+                        help="Multiple prefixes that various metric files may start with.")
     parser.add_argument('--output_dir', type=str, default='ball')
-    parser.add_argument('--video_path', type=str, default=None)
+    parser.add_argument('--video_name', type=str, default=None,
+                        help="Optional video filename to be collected.")
     return parser.parse_args()
-
-
-import imageio
-import numpy as np
-from PIL import Image, ImageDraw
 
 
 def stack_gifs_with_labels(input_paths, nicknames, output_path):
@@ -54,14 +67,6 @@ def stack_gifs_with_labels(input_paths, nicknames, output_path):
         gif_reader = imageio.get_reader(path)
         current_frame_height = current_height+frame_height
         for frame_idx, frame in enumerate(gif_reader):
-            # Resize frame to fit the output canvas
-            # resized_frame = frame if frame.shape[:2] == (frame_height, frame_width) else \
-            #                 imageio.core.util.img_as_ubyte(imageio.core.util.resize(frame, (frame_height, total_width)))
-            # # Add the nickname as text
-            # resized_frame = add_text_to_image(Image.fromarray(resized_frame), nickname,
-            #                                   position=(frame_width+5, current_height+5))
-            # resized_frame = np.array(resized_frame)
-            # Stack the frame onto the output canvas
             stacked_frames[frame_idx, current_height:current_frame_height, :frame_width, :] = frame
             text_frame = stacked_frames[frame_idx, current_height:current_frame_height, frame_width:, :]
             text_frame = add_text_to_image(Image.fromarray(text_frame), nickname, position=(5, 5))
@@ -99,46 +104,106 @@ def add_text_to_image(image, text, font_size=20, position=(10, 10), font_path=No
     return image
 
 
+def aggregate_summary(df, aggregate_prefixes):
+    # NOTE: Multi seed training run nicknames should end with "-sX" where X is an integer
+    nicknames = df['nickname']
+    alg_names = OrderedDict()
+    if re.search(r"-s\d+$", nicknames[0]):
+        for nickname in nicknames:
+            alg_name = '-'.join(nickname.split('-')[:-1])
+            alg_names[alg_name] = alg_names.get(alg_name, []) + [nickname]
+    else:
+        for nickname in nicknames:
+            alg_names[nickname] = [nickname]
+
+    result = dict(nickname=alg_names)
+    for alg_name, alg_run_names in alg_names.items():
+        filtered = df[df['nickname'].isin(alg_run_names)]
+        for prefix in aggregate_prefixes:
+            column_names = [col for col in filtered.columns if col.startswith(prefix)]
+            data = filtered[column_names].values.flatten()
+            k_mean, k_stderr = prefix, prefix+"-err"
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", category=RuntimeWarning)
+                result[k_mean] = result.get(k_mean,[]) + [np.mean(data)]
+                result[k_stderr] = result.get(k_stderr,[]) + [np.std(data, ddof=1)/np.sqrt(len(data))]
+        remaining_column_names = []
+        for col in df.columns:
+            include = col not in ['nickname', 'wandb']
+            for prefix in aggregate_prefixes:
+                if col.startswith(prefix): include = False
+            if include:
+                remaining_column_names.append(col)
+
+        for col in remaining_column_names:
+            data = filtered[col].values.flatten()
+            c_mean, c_stderr = col, col+"_err"
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", category=RuntimeWarning)
+                result[c_mean] = result.get(c_mean,[]) + [np.mean(data)]
+                result[c_stderr] = result.get(c_stderr,[]) + [np.std(data, ddof=1)/np.sqrt(len(data))]
+    result['nickname'] = list(result['nickname'].keys())
+    return pd.DataFrame(result)
+
+
 def main(args):
-    output_dir = f"summarized/{args.output_dir}"
+    output_dir = os.path.join("summarized", args.output_dir)
     os.makedirs(output_dir, exist_ok=True)
     nicknames = args.nicknames if args.nicknames else [f"config_{i}" for i in range(len(args.wandb_ids))]
 
     result = {'nickname': [], 'wandb': []}
-    for txt_path in args.txt_paths:
-        metric = txt_path.split('/')[-1].split('.')[0]
-        result[metric] = []
+    id_results = []
+    for id, nickname in zip(args.wandb_ids, nicknames):
+        id_result = dict(nickname=nickname, wandb=id)
+        input_dir = os.path.join("results", id, args.eval_dir_suffix)
 
-    for nickname, id in zip(nicknames, args.wandb_ids):
-        result['nickname'].append(nickname)
-        result['wandb'].append(id)
+        metric_paths = []
+        for dirpath, _, filenames in os.walk(input_dir):
+            for filename in filenames:
+                rel_path = os.path.join(dirpath, filename)
+                if not os.path.isfile(rel_path):
+                    continue
+                for metric_prefix in args.metric_prefixes:
+                    if filename.startswith(metric_prefix):
+                        metric_paths.append(rel_path)
+                        break
 
-        for txt_path in args.txt_paths:
-            metric = txt_path.split('/')[-1].split('.')[0]
-            path = f"results/{id}/{txt_path}"
+        for path in metric_paths:
+            metric = os.path.basename(path).split('.')[0]
             try:
                 print(f"Reading {path} ({nickname})")
                 with open(path, 'r') as f:
-                    content = f.read()
+                    id_result[metric] = float(f.read())
             except FileNotFoundError:
                 print(f"WARNING - File for {nickname} not found: {path}")
-                result[metric].append(float('nan'))
-                continue
-            result[metric].append(float(content))
+                id_result[metric] = float('nan')
+        id_results.append(id_result)
 
+    columns = list(dict.fromkeys([key for id_result in id_results for key in id_result.keys()]))
+    result = {column: [] for column in columns}
+    for id_result in id_results:
+        for column in columns:
+            result[column].append(id_result.get(column, float('nan')))
+
+    print(result)
     df = pd.DataFrame(result)
-    out_path = f"{output_dir}/summary.csv"
+    out_path = os.path.join(output_dir, "summary.csv")
     df.to_csv(out_path, index=False)
     print(f"saved results to {out_path}.")
 
-    if args.video_path is not None:
+    df_aggregated = aggregate_summary(df, args.metric_prefixes)
+    out_agg_path = os.path.join(output_dir, "final.csv")
+    print(df_aggregated)
+    df_aggregated.to_csv(out_agg_path, index=False)
+
+    if args.video_name:
         os.makedirs(f"{output_dir}/gifs", exist_ok=True)
-        gif_paths = []
-        gif_nicknames = []
+        gif_paths, gif_nicknames = [], []
         for nickname, id in zip(nicknames, args.wandb_ids):
             try:
-                video_path = f"results/{id}/{args.video_path}"
-                video_out_path = f"{output_dir}/gifs/{nickname}.{args.video_path.split('.')[-1]}"
+                video_path = os.path.join("results", id, args.eval_dir_suffix, "videos", args.video_name)
+                extension = args.video_name.split('.')[-1]
+                video_out_path = os.path.join(output_dir, "gifs", f"{nickname}.{extension}")
                 shutil.copy(video_path, video_out_path)
             except Exception as e:
                 print(f"WARNING - Video copy failed for {nickname} with error: {e}")

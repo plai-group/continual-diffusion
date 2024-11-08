@@ -22,7 +22,7 @@ class ContinuousPlaicraftDataset(Dataset):
     LATENTS_PER_BATCH = 100  # Each .pt file stores 100 latents (10 seconds of data at 10 fps)
     USE_FP16 = True
 
-    def __init__(self, dataset_path, player_names_train, player_names_test, window_length=100, output_fps=10):
+    def __init__(self, dataset_path, player_names_train, player_names_test, window_length=100, output_fps=10, frame_range=(0, None)):
         """
         Initialize the dataset with parameters.
         :param dataset_path: Path to the dataset folder.
@@ -38,6 +38,7 @@ class ContinuousPlaicraftDataset(Dataset):
         self.output_fps = output_fps
         self.sessions = None  # Will be initialized in __getitem__
         self.is_test = False
+        self.original_frame_range = frame_range
 
         # Validate parameters
         self._validate_parameters()
@@ -113,6 +114,10 @@ class ContinuousPlaicraftDataset(Dataset):
                 total_frames = session_end_frame
         self.total_frames = total_frames
 
+        self.frame_range = self.original_frame_range
+        if self.original_frame_range[1] is None:
+            self.frame_range = (self.original_frame_range[0], self.total_frames)
+
     def _dequantize_from_int8(self, quantized_tensor, min_val, scale):
         """
         Dequantize latents from int8 to float32, broadcasting min_val and scale correctly.
@@ -129,7 +134,7 @@ class ContinuousPlaicraftDataset(Dataset):
 
     def __len__(self):
         """Return the total number of windows across all sessions."""
-        return self.total_frames - self.window_length + 1
+        return (self.frame_range[1]-self.frame_range[0]) - (self.window_length - 1)
 
     def __getitem__(self, idx):
         """
@@ -203,7 +208,7 @@ class ContinuousPlaicraftDataset(Dataset):
         return frames, absolute_index_map
 
     def _get_start_frame_index(self, idx):
-        return idx
+        return self.frame_range[0] + idx
 
     def _load_video_encodings(self, session_info, start_frame, num_frames):
         """
@@ -284,8 +289,7 @@ class ContinuousPlaicraftDataset(Dataset):
 
 
 class ChunkedPlaicraftDataset(ContinuousPlaicraftDataset):
-    def __init__(self, frame_range: Tuple[int, int], *args, **kwargs):
-        self.original_frame_range = frame_range
+    def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
 
     def _get_start_frame_index(self, idx):
@@ -295,18 +299,10 @@ class ChunkedPlaicraftDataset(ContinuousPlaicraftDataset):
         """Return the total number of windows across all sessions."""
         return (self.frame_range[1]-self.frame_range[0]) // self.window_length
 
-    def _initialize_sessions(self):
-        super()._initialize_sessions()
-        if self.original_frame_range[1] is None:
-            self.frame_range = (self.original_frame_range[0], self.total_frames)
-        else:
-            self.frame_range = self.original_frame_range
-
 
 class SpacedPlaicraftDataset(ContinuousPlaicraftDataset):
-    def __init__(self, n_data: int, frame_range: Tuple[int, int], *args, **kwargs):
+    def __init__(self, n_data: int, *args, **kwargs):
         self.n_data = n_data
-        self.original_frame_range = frame_range
         super().__init__(*args, **kwargs)
 
     def _get_start_frame_index(self, idx):
@@ -318,15 +314,11 @@ class SpacedPlaicraftDataset(ContinuousPlaicraftDataset):
 
     def _initialize_sessions(self):
         super()._initialize_sessions()
-        if self.original_frame_range[1] is None:
-            self.frame_range = (self.original_frame_range[0], self.total_frames)
-        else:
-            self.frame_range = self.original_frame_range
         self.spacing = (self.frame_range[1]-self.frame_range[0]) // self.n_data
         assert self.spacing > self.window_length,\
                f"Spacing to window length ratio is too small: {self.spacing} vs {self.window_length}"
         self.spacing = self.spacing - self.spacing % self.window_length  # spacing is divisible by window_length
-        print(f"Total Frames: {self.total_frames}, Selected Frames: {self.frame_range[1]}, "+\
+        print(f"Total Frames: {self.total_frames}, Selected Frames: {self.frame_range[1]-self.frame_range[0]}, "+\
               f"Spacing: {self.spacing}, # Data: {self.n_data}")
 
 

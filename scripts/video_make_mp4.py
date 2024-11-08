@@ -47,12 +47,9 @@ if __name__ == "__main__":
             model_args = argparse.Namespace(**json.load(f))
 
         # Load the dataset (to get observations from)
-        eval_dataset_args = dict(dataset_name=model_args.dataset, T=T,
-                                 train=eval_on_train, eval_dataset_config=eval_dataset_config)
-        if eval_dataset_config != eval_dataset_configs["continuous"]:
-            spacing_kwargs = dict(n_data=args.num_sampled_videos,
-                                  frame_range=(parsed["lower_frame_range"], parsed["upper_frame_range"]))
-            eval_dataset_args["spacing_kwargs"] = spacing_kwargs
+        eval_dataset_args = dict(dataset_name=model_args.dataset, T=T, spacing_kwargs=dict(n_data=args.num_sampled_videos),
+                                 train=eval_on_train, eval_dataset_config=eval_dataset_config,
+                                 frame_range=(parsed["lower_frame_range"], parsed["upper_frame_range"]))
         dataset = get_eval_dataset(**eval_dataset_args)
 
     out_dir = (Path(args.out_dir) if args.out_dir is not None else Path(args.eval_dir)) / videos_prefix

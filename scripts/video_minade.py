@@ -233,10 +233,8 @@ if __name__ == "__main__":
 
     # Load the dataset (to get observations from)
     eval_dataset_args = dict(dataset_name=model_args.dataset, T=T, train=eval_on_train,
-                             eval_dataset_config=eval_dataset_config)
-    if eval_dataset_config != eval_dataset_configs["continuous"]:
-        spacing_kwargs = dict(frame_range=(parsed["lower_frame_range"], parsed["upper_frame_range"]), n_data=args.num_videos)
-        eval_dataset_args["spacing_kwargs"] = spacing_kwargs
+                             eval_dataset_config=eval_dataset_config, spacing_kwargs=dict(n_data=args.num_videos),
+                             frame_range=(parsed["lower_frame_range"], parsed["upper_frame_range"]))
     test_dataset_full = get_eval_dataset(**eval_dataset_args)
     test_dataset = torch.utils.data.Subset(dataset=test_dataset_full, indices=list(range(args.num_videos)))
     sample_datasets = [SampleDataset(samples_path=(Path(args.eval_dir) / "samples"),

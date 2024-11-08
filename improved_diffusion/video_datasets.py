@@ -114,23 +114,23 @@ def load_data(dataset_name, batch_size, T=None, deterministic=False, num_workers
             sampler.set_epoch(epoch)
 
 def get_eval_dataset(dataset_name, T=None, seed=0, train=False, eval_dataset_config=eval_dataset_configs["default"],
-                     spacing_kwargs=dict(n_data=None, frame_range=(0, None))):
+                     frame_range=(0, None), spacing_kwargs=dict(n_data=None)):
     """
     """
     data_path = get_data_path(dataset_name)
     T = default_T_dict[dataset_name] if T is None else T
     if "ball_stn" in dataset_name:
-        shared_args = dict(dataset_path=data_path, T=T, seed=seed)
+        shared_args = dict(dataset_path=data_path, T=T, seed=seed, frame_range=frame_range)
         if eval_dataset_config == eval_dataset_configs["continuous"]:
             dataset = ContinuousBaseDataset(**shared_args)
         else:
-            dataset = ChunkedBaseDataset(frame_range=spacing_kwargs["frame_range"], **shared_args)
+            dataset = ChunkedBaseDataset(**shared_args)
     elif "ball_nstn" in dataset_name:
         shared_args = dict(dataset_path=data_path, T=T, seed=seed)
         if eval_dataset_config == eval_dataset_configs["continuous"]:
             dataset = ContinuousBaseDataset(**shared_args)
         elif eval_dataset_config == eval_dataset_configs["chunked"]:
-            dataset = ChunkedBaseDataset(frame_range=spacing_kwargs["frame_range"], **shared_args)
+            dataset = ChunkedBaseDataset(**shared_args)
         else:
             dataset = SpacedBaseDataset(**spacing_kwargs, **shared_args)
     elif "wmaze" in dataset_name:
@@ -138,14 +138,17 @@ def get_eval_dataset(dataset_name, T=None, seed=0, train=False, eval_dataset_con
         if eval_dataset_config == eval_dataset_configs["continuous"]:
             dataset = ContinuousBaseDataset(**shared_args)
         else:
-            dataset = ChunkedBaseDataset(frame_range=spacing_kwargs["frame_range"], **shared_args)
+            if train:  # NOTE: Account for the fact that train stream has a mild distribution shift
+                dataset = SpacedBaseDataset(**spacing_kwargs, **shared_args)
+            else:
+                dataset = ChunkedBaseDataset(**shared_args)
     elif "plaicraft" in dataset_name:
         shared_args = dict(dataset_path=data_path, window_length=T,
                            player_names_train=["Alex"], player_names_test=["Kyrie"])
         if eval_dataset_config == eval_dataset_configs["continuous"]:
             dataset = ContinuousPlaicraftDataset(**shared_args)
         elif eval_dataset_config == eval_dataset_configs["chunked"]:
-            dataset = ChunkedPlaicraftDataset(frame_range=spacing_kwargs["frame_range"], **shared_args)
+            dataset = ChunkedPlaicraftDataset(**shared_args)
         else:
             dataset = SpacedPlaicraftDataset(**spacing_kwargs, **shared_args)
     else:
@@ -206,12 +209,11 @@ class ContinuousBaseDataset(Dataset):
     self.chunk_size denotes the number of frames present in each npy file.
     T denotes the number of frames that the dataset should return to the model per item.
     """
-    def __init__(self, dataset_path, T=1, seed=0, restart_index=None):
+    def __init__(self, dataset_path, T=1, seed=0, frame_range=(0, None)):
         super().__init__()
         self.T = T
         self.path = Path(dataset_path)
         self.is_test = False
-        self.restart_index = int(restart_index) if restart_index is not None else None
 
         config = self.get_config(self.path / 'config.json')
         self.T_total = config['T_total']
@@ -219,18 +221,18 @@ class ContinuousBaseDataset(Dataset):
         assert self.T_total % self.T == 0
         assert self.T_total % self.chunk_size == 0
         assert self.chunk_size % self.T == 0
-        assert self.restart_index is None or (self.restart_index > 0 and self.restart_index % self.T == 0)
+
+        self.frame_range = frame_range
+        if self.frame_range[1] is None:
+            self.frame_range = (self.frame_range[0], self.T_total)
 
         self.train_path = self.path / 'train' / str(seed)
         self.test_path = self.path / 'test' / str(seed)
 
     def __len__(self):
-        return self.T_total - self.T + 1
+        return (self.frame_range[1]-self.frame_range[0]) - (self.T - 1)
 
     def __getitem__(self, idx):
-        if self.restart_index is not None:
-            idx = idx % self.restart_index
-
         paths = self.getitem_paths(idx)
         self.cache_files(paths)
         try:
@@ -244,9 +246,10 @@ class ContinuousBaseDataset(Dataset):
         return frames, absolute_index_map
 
     def getitem_paths(self, idx):
-        chunk_idxs = [idx // self.chunk_size]
-        if (idx % self.chunk_size) + self.T > self.chunk_size:
-            chunk_idxs.append((idx // self.chunk_size) + 1)
+        adjusted_idx = self.frame_range[0] + idx
+        chunk_idxs = [adjusted_idx // self.chunk_size]
+        if (adjusted_idx % self.chunk_size) + self.T > self.chunk_size:
+            chunk_idxs.append(adjusted_idx + 1)
         return [(self.test_path if self.is_test else self.train_path) / f"{cidx}.npy" for cidx in chunk_idxs]
 
     def loaditem(self, paths):
@@ -301,7 +304,8 @@ class ContinuousBaseDataset(Dataset):
 
     def get_video_subsequence(self, video, idx):
         # Take a subsequence of the video.
-        start_i = idx % self.chunk_size
+        adjusted_idx = self.frame_range[0] + idx
+        start_i = adjusted_idx % self.chunk_size
         video = video[start_i:start_i+self.T]
         assert len(video) == self.T
         return video
@@ -316,14 +320,11 @@ class ChunkedBaseDataset(ContinuousBaseDataset):
     self.chunk_size denotes the number of frames present in each npy file.
     T denotes the number of frames that the dataset should return to the model per item.
     """
-    def __init__(self, frame_range: Tuple[int, int], *args, **kwargs):
+    def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self.frame_range = frame_range
-        if self.frame_range[1] is None:
-            self.frame_range = (self.frame_range[0], self.T_total)
 
     def __len__(self):
-        return (self.frame_range[1]-self.frame_range[0])  // self.T
+        return (self.frame_range[1]-self.frame_range[0]) // self.T
 
     def getitem_paths(self, idx):
         chunk_idxs = [(self.frame_range[0] + idx * self.T) // self.chunk_size]
@@ -346,17 +347,13 @@ class SpacedBaseDataset(ContinuousBaseDataset):
     self.chunk_size denotes the number of frames present in each npy file.
     T denotes the number of frames that the dataset should return to the model per item.
     """
-    def __init__(self, n_data: int, frame_range: Tuple[int, int], *args, **kwargs):
+    def __init__(self, n_data: int, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.n_data = n_data
-        self.frame_range = frame_range
-        if self.frame_range[1] is None:
-            self.frame_range = (self.frame_range[0], self.T_total)
 
         self.spacing = (self.frame_range[1]-self.frame_range[0]) // self.n_data
         assert self.spacing % self.T == 0
         assert 0<=self.frame_range[0] and self.frame_range[0]+self.T<self.frame_range[1]
-        assert self.restart_index is None
 
     def __len__(self):
         return self.n_data

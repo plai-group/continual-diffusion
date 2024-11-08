@@ -78,10 +78,10 @@ def compute_loss(batch, args, model, diffusion, schedule_sampler, trials=10):
 @th.no_grad()
 def main(args):
     loss_save_path = Path(args.eval_dir) / f"loss-{args.trials}.txt"
-    if loss_save_path.exists():
-        loss = np.loadtxt(loss_save_path).squeeze()
-        print(f"Losses are already computed: {loss}")
-        exit()
+    # if loss_save_path.exists():
+    #     loss = np.loadtxt(loss_save_path).squeeze()
+    #     print(f"Losses are already computed: {loss}")
+    #     exit()
     loss_save_path.parent.mkdir(parents=True, exist_ok=True)
     args.indices = list(range(args.start_index, args.stop_index))
     if args.num_sampled_videos is None:
@@ -108,18 +108,13 @@ def main(args):
         args.max_frames = model_args.max_frames
     if args.max_latent_frames is None:
         args.max_latent_frames = args.max_frames // 2
-    if model_args.diffusion_space == "latent":
-        args.clip_denoised = False
 
     # Load the dataset (to get observations from)
     eval_dataset_args = dict(dataset_name=model_args.dataset, T=args.T, train=args.eval_on_train,
-                             eval_dataset_config=args.eval_dataset_config)
-    # if args.eval_dataset_config == eval_dataset_configs["default"]:
-    if args.eval_dataset_config != eval_dataset_configs["continuous"]:
-        spacing_kwargs = dict(n_data=args.num_sampled_videos,
-                              frame_range=(args.lower_frame_range, args.upper_frame_range))
-        eval_dataset_args["spacing_kwargs"] = spacing_kwargs
+                             eval_dataset_config=args.eval_dataset_config, spacing_kwargs=dict(n_data=args.num_sampled_videos),
+                             frame_range=(args.lower_frame_range, args.upper_frame_range))
     dataset = get_eval_dataset(**eval_dataset_args)
+    dataset = th.utils.data.Subset(dataset=dataset, indices=args.indices)
     dataloader = th.utils.data.DataLoader(dataset, batch_size=args.batch_size, shuffle=False, drop_last=False)
     avg_loss = []
     for batch, _ in tqdm(dataloader):
@@ -152,14 +147,9 @@ def create_sampling_parser():
                         help="Denoted K in the paper. Maximum number of (observed or latent) frames input to the model at once. Defaults to what the model was trained with.")
     parser.add_argument("--max_latent_frames", type=int, default=None, help="Number of frames to sample in each stage. Defaults to max_frames/2.")
     parser.add_argument("--sampler", type=str, default="heun-80-inf-0-1-1000-0.002-7-50")
-    parser.add_argument("--use_ddim", type=str2bool, default=False)
     parser.add_argument("--eval_on_train", type=str2bool, default=False)
     parser.add_argument("--timestep_respacing", type=str, default="")
-    parser.add_argument("--clip_denoised", type=str2bool, default=True, help="If true, diffusion model generates data between [-1,1].")
-    parser.add_argument("--sample_idx", type=int, default=0, help="Sampled images will have this specific index. Used for sampling multiple videos with the same observations.")
-    parser.add_argument("--optimality", type=str, default=None,
-                        choices=["linspace-t", "random-t", "linspace-t-force-nearby", "random-t-force-nearby"],
-                        help="Type of optimised sampling scheme to use for choosing observed frames. By default uses non-optimized sampling scheme. The optimal indices should be computed before use via video_optimal_schedule.py.")
+    # parser.add_argument("--seed", type=int, default=0, help="seed")
     parser.add_argument("--device", default="cuda" if th.cuda.is_available() else "cpu")
 
     parser.add_argument("--eval_dataset_config", type=str, default=eval_dataset_configs["default"], choices=list(eval_dataset_configs.keys()))

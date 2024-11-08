@@ -12,6 +12,7 @@ results
 .vscode
 .tfhub_cache
 output.mp4
+plots
 summarized
 tmp
 

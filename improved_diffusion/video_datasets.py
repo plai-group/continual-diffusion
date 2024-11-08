@@ -126,7 +126,7 @@ def get_eval_dataset(dataset_name, T=None, seed=0, train=False, eval_dataset_con
         else:
             dataset = ChunkedBaseDataset(**shared_args)
     elif "ball_nstn" in dataset_name:
-        shared_args = dict(dataset_path=data_path, T=T, seed=seed)
+        shared_args = dict(dataset_path=data_path, T=T, seed=seed, frame_range=frame_range)
         if eval_dataset_config == eval_dataset_configs["continuous"]:
             dataset = ContinuousBaseDataset(**shared_args)
         elif eval_dataset_config == eval_dataset_configs["chunked"]:
@@ -134,7 +134,7 @@ def get_eval_dataset(dataset_name, T=None, seed=0, train=False, eval_dataset_con
         else:
             dataset = SpacedBaseDataset(**spacing_kwargs, **shared_args)
     elif "wmaze" in dataset_name:
-        shared_args = dict(dataset_path=data_path, T=T, seed=seed)
+        shared_args = dict(dataset_path=data_path, T=T, seed=seed, frame_range=frame_range)
         if eval_dataset_config == eval_dataset_configs["continuous"]:
             dataset = ContinuousBaseDataset(**shared_args)
         else:
@@ -143,7 +143,7 @@ def get_eval_dataset(dataset_name, T=None, seed=0, train=False, eval_dataset_con
             else:
                 dataset = ChunkedBaseDataset(**shared_args)
     elif "plaicraft" in dataset_name:
-        shared_args = dict(dataset_path=data_path, window_length=T,
+        shared_args = dict(dataset_path=data_path, window_length=T, frame_range=frame_range,
                            player_names_train=["Alex"], player_names_test=["Kyrie"])
         if eval_dataset_config == eval_dataset_configs["continuous"]:
             dataset = ContinuousPlaicraftDataset(**shared_args)

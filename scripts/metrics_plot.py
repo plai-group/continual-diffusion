@@ -3,6 +3,7 @@ import glob
 import os
 import pandas as pd
 import matplotlib.pyplot as plt
+from improved_diffusion.script_util import str2bool
 
 
 def setup_matplotlib():
@@ -26,6 +27,7 @@ def parse_args():
     parser.add_argument('--csv_path_prefix', type=str, required=True,
                         help='Path prefix to the CSV files.',)
     parser.add_argument('--output_path', type=str, help='Directory to save the PNG file.', default="plots/default/plot.png")
+    parser.add_argument("--latex_fonts", type=str2bool, default=False)
     return parser.parse_args()
 
 def plot_metrics(csv_dirs, out_path):
@@ -61,7 +63,8 @@ def plot_metrics(csv_dirs, out_path):
 def main():
     args = parse_args()
     os.makedirs(os.path.dirname(args.output_path), exist_ok=True)
-    setup_matplotlib()
+    if args.latex_fonts:
+        setup_matplotlib()
     csv_dirs = glob.glob(args.csv_path_prefix + "*")
     plot_metrics(csv_dirs, args.output_path)
 

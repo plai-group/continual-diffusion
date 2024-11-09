@@ -138,7 +138,7 @@ def get_eval_dataset(dataset_name, T=None, seed=0, train=False, eval_dataset_con
         if eval_dataset_config == eval_dataset_configs["continuous"]:
             dataset = ContinuousBaseDataset(**shared_args)
         else:
-            if train:  # NOTE: Account for the fact that train stream has a mild distribution shift
+            if train and eval_dataset_config == eval_dataset_configs["default"]:  # NOTE: Account for the fact that train stream has a mild distribution shift
                 dataset = SpacedBaseDataset(**spacing_kwargs, **shared_args)
             else:
                 dataset = ChunkedBaseDataset(**shared_args)

@@ -249,7 +249,7 @@ class ContinuousBaseDataset(Dataset):
         adjusted_idx = self.frame_range[0] + idx
         chunk_idxs = [adjusted_idx // self.chunk_size]
         if (adjusted_idx % self.chunk_size) + self.T > self.chunk_size:
-            chunk_idxs.append(adjusted_idx + 1)
+            chunk_idxs.append(adjusted_idx // self.chunk_size + 1)
         return [(self.test_path if self.is_test else self.train_path) / f"{cidx}.npy" for cidx in chunk_idxs]
 
     def loaditem(self, paths):

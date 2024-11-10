@@ -15,6 +15,7 @@ from improved_diffusion.replay_sampler import DistributedReplaySampler
 from .train_util import get_blob_logdir
 from .test_util import Protect
 from .plaicraft_dataset import ContinuousPlaicraftDataset, SpacedPlaicraftDataset, ChunkedPlaicraftDataset
+from .plaicraft_custom_dataset import PlaicraftCustomDataset
 
 
 
@@ -114,7 +115,7 @@ def load_data(dataset_name, batch_size, T=None, deterministic=False, num_workers
             sampler.set_epoch(epoch)
 
 def get_eval_dataset(dataset_name, T=None, seed=0, train=False, eval_dataset_config=eval_dataset_configs["default"],
-                     frame_range=(0, None), spacing_kwargs=dict(n_data=None)):
+                     frame_range=(0, None), spacing_kwargs=dict(n_data=None), custom_clip_path=None):
     """
     """
     data_path = get_data_path(dataset_name)
@@ -145,7 +146,12 @@ def get_eval_dataset(dataset_name, T=None, seed=0, train=False, eval_dataset_con
     elif "plaicraft" in dataset_name:
         shared_args = dict(dataset_path=data_path, window_length=T, frame_range=frame_range,
                            player_names_train=["Alex"], player_names_test=["Kyrie"])
-        if eval_dataset_config == eval_dataset_configs["continuous"]:
+        if custom_clip_path is not None:
+            shared_args["dataset_path"] = custom_clip_path
+            del shared_args["player_names_train"]
+            del shared_args["player_names_test"]
+            dataset = PlaicraftCustomDataset(**shared_args)
+        elif eval_dataset_config == eval_dataset_configs["continuous"]:
             dataset = ContinuousPlaicraftDataset(**shared_args)
         elif eval_dataset_config == eval_dataset_configs["chunked"]:
             dataset = ChunkedPlaicraftDataset(**shared_args)

@@ -191,7 +191,8 @@ def main_outer(args):
     eval_dataset_args = dict(dataset_name=model_args.dataset, T=args.T, train=args.eval_on_train,
                              eval_dataset_config=args.eval_dataset_config,
                              spacing_kwargs=dict(n_data=args.num_sampled_videos),
-                             frame_range=(args.lower_frame_range, args.upper_frame_range))
+                             frame_range=(args.lower_frame_range, args.upper_frame_range),
+                             custom_clip_path=args.custom_clip_path)
     dataset = get_eval_dataset(**eval_dataset_args)
 
     (args.eval_dir / samples_prefix).mkdir(parents=True, exist_ok=True)
@@ -238,7 +239,8 @@ def create_sampling_parser():
     parser.add_argument("--eval_dataset_config", type=str, default=eval_dataset_configs["default"], choices=list(eval_dataset_configs.keys()))
     parser.add_argument("--lower_frame_range", type=int, default=0, help="Lower bound of frame index used for SpacedDatasets.")
     parser.add_argument("--upper_frame_range", type=int, default=None, help="Upper bound of frame index used for SpacedDatasets.")
-    parser.add_argument("--decode_chunk_size", type=int, default=10)
+    parser.add_argument("--decode_chunk_size", type=int, default=10, help="How many frames to pass to VAE decoder (PLAICraft only).")
+    parser.add_argument("--custom_clip_path", type=str, default=None, help="Used to create samples from custom PLAICraft video clips.")
     return parser
 
 

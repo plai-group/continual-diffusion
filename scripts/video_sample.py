@@ -184,7 +184,10 @@ def main_outer(args):
         args.clip_denoised = False
 
     # Prepare samples directory
-    args.eval_dir = get_model_results_path(args) / get_eval_run_identifier(args)
+    if args.custom_clip_path is not None:  # For custom visualizations, make unique folders
+        args.eval_dir = get_model_results_path(args) / args.custom_clip_path.split('/')[-2] / get_eval_run_identifier(args)
+    else:
+        args.eval_dir = get_model_results_path(args) / get_eval_run_identifier(args)
     samples_prefix = "samples"
 
     # Load the dataset (to get observations from)

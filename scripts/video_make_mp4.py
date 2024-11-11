@@ -26,8 +26,10 @@ if __name__ == "__main__":
     parser.add_argument("--do_n", type=int, default=1)
     parser.add_argument("--start_idx", type=int, default=0)
     parser.add_argument("--n_seeds", type=int, default=1)
-    parser.add_argument("--decode_chunk_size", type=int, default=10)
     parser.add_argument("--format", type=str, default="gif", choices=["gif", "mp4", "avi"])
+
+    parser.add_argument("--decode_chunk_size", type=int, default=10, help="How many frames to pass to VAE decoder (PLAICraft only).")
+    parser.add_argument("--custom_clip_path", type=str, default=None, help="Used to create samples from custom PLAICraft video clips.")
     args = parser.parse_args()
 
     parsed = parse_eval_run_identifier(os.path.basename(args.eval_dir))
@@ -49,7 +51,8 @@ if __name__ == "__main__":
         # Load the dataset (to get observations from)
         eval_dataset_args = dict(dataset_name=model_args.dataset, T=T, spacing_kwargs=dict(n_data=args.num_sampled_videos),
                                  train=eval_on_train, eval_dataset_config=eval_dataset_config,
-                                 frame_range=(parsed["lower_frame_range"], parsed["upper_frame_range"]))
+                                 frame_range=(parsed["lower_frame_range"], parsed["upper_frame_range"]),
+                                 custom_clip_path=args.custom_clip_path)
         dataset = get_eval_dataset(**eval_dataset_args)
 
     out_dir = (Path(args.out_dir) if args.out_dir is not None else Path(args.eval_dir)) / videos_prefix

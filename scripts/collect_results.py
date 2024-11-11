@@ -9,7 +9,7 @@ import numpy as np
 import warnings
 from PIL import Image, ImageDraw
 
-from improved_diffusion.script_util import str2bool
+from improved_diffusion.test_util import Protect
 
 
 """
@@ -188,12 +188,14 @@ def main(args):
     print(result)
     df = pd.DataFrame(result)
     out_path = os.path.join(output_dir, "summary.csv")
-    df.to_csv(out_path, index=False)
+    with Protect(out_path, timeout=60):
+        df.to_csv(out_path, index=False)
     print(f"saved results to {out_path}.")
 
     df_aggregated = aggregate_summary(df, args.metric_prefixes)
     out_agg_path = os.path.join(output_dir, "final.csv")
-    print(df_aggregated)
+    with Protect(out_agg_path, timeout=60):
+        print(df_aggregated)
     df_aggregated.to_csv(out_agg_path, index=False)
 
     if args.video_name:

@@ -26,7 +26,7 @@ if __name__ == "__main__":
     parser.add_argument("--do_n", type=int, default=1)
     parser.add_argument("--start_idx", type=int, default=0)
     parser.add_argument("--n_seeds", type=int, default=1)
-    parser.add_argument("--format", type=str, default="gif", choices=["gif", "mp4", "avi"])
+    parser.add_argument("--format", type=str, default="mp4", choices=["gif", "mp4", "avi"])
 
     parser.add_argument("--decode_chunk_size", type=int, default=10, help="How many frames to pass to VAE decoder (PLAICraft only).")
     parser.add_argument("--custom_clip_path", type=str, default=None, help="Used to create samples from custom PLAICraft video clips.")

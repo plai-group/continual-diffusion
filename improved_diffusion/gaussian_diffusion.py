@@ -848,9 +848,9 @@ class GaussianDiffusion:
 
             # Apply 2nd order correction.
             if t_next > 0:
-                d_prime = (x_next - denoised) / s_next
+                denoised_next, _ = get_denoised_estimate(x_next, t_next, s_next)
+                d_prime = (x_next - denoised_next) / s_next
                 x_next = x_hat + (s_next - s_hat) * (0.5 * d_cur + 0.5 * d_prime)
-            # print(f"Heun: {(x_next[0,10:].min(), x_next[0,10:].max())}")
 
         return ((x_next, self.decode(x_next, chunk_size=decode_chunk_size))
                 if return_decoded else x_next), None

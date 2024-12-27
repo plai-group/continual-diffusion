@@ -26,8 +26,8 @@ video_data_paths_dict = {
     "streaming_ball_nstn": "datasets/ball_nstn",
     "wmaze":               "datasets/windows_maze",
     "streaming_wmaze":     "datasets/windows_maze",
-    "plaicraft":           "datasets/plaicraft",
-    "streaming_plaicraft": "datasets/plaicraft",
+    "plaicraft":           "/ubc/cs/research/ubc_ml/plaicraft/data/processed", # "datasets/plaicraft",
+    "streaming_plaicraft": "/ubc/cs/research/ubc_ml/plaicraft/data/processed", # "datasets/plaicraft",
 }
 
 default_T_dict = {
@@ -83,8 +83,10 @@ def load_data(dataset_name, batch_size, T=None, deterministic=False, num_workers
         dataset = ContinuousBaseDataset(data_path, T=T, seed=0)
     elif "plaicraft" in dataset_name:
         dataset = ContinuousPlaicraftDataset(data_path, window_length=T,
-                                             player_names_train=["Alex"],
+                                             #  player_names_train=["Alex"],
+                                             player_names_train=["Morgan"],
                                              player_names_test=["Kyrie"])
+        print(len(dataset))
     else:
         raise Exception("no dataset", dataset_name)
 

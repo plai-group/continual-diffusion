@@ -90,6 +90,7 @@ def main(args):
     # Run bash command that zips all .db files and encoded_video subdirectories.
     dataset = args.dataset
     dataset_path = Path(os.path.join('datasets', dataset))
+    dataset_path = Path("/ubc/cs/research/ubc_ml/plaicraft/data/processed")
     save_path = Path(args.save_path)
     if not os.path.exists(os.path.dirname(save_path)):
         os.makedirs(os.path.dirname(save_path), exist_ok=True)

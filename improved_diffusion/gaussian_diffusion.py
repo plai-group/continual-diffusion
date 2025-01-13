@@ -126,6 +126,7 @@ class GaussianDiffusion:
         rescale_timesteps=False,
         diffusion_space_kwargs=dict(),
     ):
+        self.sigma_data = 1.
         self.model_mean_type = model_mean_type
         self.model_var_type = model_var_type
         self.loss_type = loss_type
@@ -342,10 +343,9 @@ class GaussianDiffusion:
         """
         x0_mult = _extract_into_tensor(self.sqrt_alphas_cumprod, t, xt.shape)
         noise_mult = _extract_into_tensor(self.sqrt_one_minus_alphas_cumprod, t, xt.shape)
-        sigma_data = 1/2
         sigma = noise_mult / x0_mult
-        c_skip = sigma_data**2 / (sigma_data**2 + sigma**2)**0.5
-        c_out = sigma_data * sigma / (sigma_data**2 + sigma**2)**0.5
+        c_skip = self.sigma_data**2 / (self.sigma_data**2 + sigma**2)
+        c_out = self.sigma_data * sigma / (self.sigma_data**2 + sigma**2)**0.5
         x0_pred = c_skip * xt + c_out * output
         return x0_pred
     
@@ -726,11 +726,10 @@ class GaussianDiffusion:
                 yield out
                 img = out["sample"]
 
-    def get_ve_sigmas(self):
-        if not hasattr(self, "ve_sigmas"):
-            self.ve_sigmas = (1-self.alphas_cumprod)**0.5 / self.sqrt_alphas_cumprod
-            self.ve_sigmas = np.append(0, self.ve_sigmas)
-        return self.ve_sigmas
+    def get_edm_sigmas(self):
+        if not hasattr(self, "edm_sigmas"):
+            self.edm_sigmas = (1-self.alphas_cumprod)**0.5 / self.sqrt_alphas_cumprod
+        return self.edm_sigmas
 
     def sigma2timestep(self, sigma):
         """
@@ -738,15 +737,13 @@ class GaussianDiffusion:
         """
         if th.is_tensor(sigma):
             sigma = sigma.numpy().astype(np.float32)
-        nearest_timestep = np.argmin(np.abs((self.get_ve_sigmas() - sigma)))
+        nearest_timestep = np.argmin(np.abs((self.get_edm_sigmas() - sigma)))
         return nearest_timestep
 
     def timestep2sigma(self, timestep):  # error? timestep one should not have sigma 0
         if th.is_tensor(timestep):
             timestep = timestep.numpy().astype(np.float32)
-        if timestep == 0:
-            return 0
-        return self.get_ve_sigmas()[int(timestep)]
+        return self.get_edm_sigmas()[int(timestep)]
 
     @th.no_grad()
     def heun_sample(
@@ -779,26 +776,23 @@ class GaussianDiffusion:
         assert isinstance(shape, (tuple, list))
 
         # select timesteps - for EDM sampler we do this here instead of respacing
-        sigmas = (1-self.alphas_cumprod**2)**0.5 / self.alphas_cumprod
-        step_indices = np.arange(num_steps+1)  # one step will usually be rounded to zero
+        step_indices = np.arange(num_steps)
         sigmas_to_step_at = (
             sigma_max ** (1 / rho) 
-            + step_indices / (num_steps - 1)
+            + step_indices / (num_steps-1)
             * (sigma_min ** (1 / rho) - sigma_max ** (1 / rho))
         ) ** rho
         timesteps = []
-        for sigma in np.append(sigmas_to_step_at, 0):
-            nearest_timestep = np.argmin(np.abs((sigmas - sigma)))
+        for sigma in sigmas_to_step_at:
+            nearest_timestep = self.sigma2timestep(sigma)
             if nearest_timestep not in timesteps:
                 timesteps.append(nearest_timestep)
+        sigmas_snapped = [self.timestep2sigma(t) for t in timesteps] + [0]  # Add zero because we need a value for final s_next
 
-        def get_latent_std(x, latent_indicator):
-            sqr = (x - x.mean())**2
-            avg_lat_sqr = sqr * latent_indicator / latent_indicator.mean()
-            return avg_lat_sqr.mean()**0.5
-
-        def get_denoised_estimate(xt, t, s):
-            scaled_x = xt / (1 + s**2)**0.5
+        def get_denoised_estimate(xt, t):
+            # NOTE: Accounting for DDPM trained model's VP forward pass by dividing by s(t) (refer to the EDM paper)
+            scaled_x = xt * self.sqrt_alphas_cumprod[t]
+            # print(f"Standard Deviation (before/after): {xt.std():.4f}/{scaled_x.std():.4f}")
             t = th.tensor([t] * shape[0], device=device)
             out = self.p_mean_variance(
                 model, scaled_x.to(th.float32), th.tensor(t).to(th.int32).view(-1).to(device),
@@ -815,26 +809,21 @@ class GaussianDiffusion:
             x_next = noise.to(th.float64)
         else:
             x_next = th.randn(*shape, device=device, dtype=th.float64)
-        _, latent_indicator = get_denoised_estimate(x_next, timesteps[0], self.timestep2sigma(timesteps[0]))
         # scale noise to match last step of VE process
-        x_next = x_next * self.timestep2sigma(timesteps[0])
+        x_next = x_next * sigmas_snapped[0]
 
         to_float64 = lambda x: th.tensor(x, dtype=th.float64)
-        timesteps = timesteps
         x_next = to_float64(x_next)
 
-        for i, (t_cur, t_next) in enumerate(zip(timesteps[:-1], timesteps[1:])):
+        for i, (s_cur, s_next) in enumerate(zip(sigmas_snapped[:-1], sigmas_snapped[1:])):
             x_cur = x_next
-
-            # get sigmas corresponding to these timesteps
-            s_cur = to_float64(self.timestep2sigma(t_cur))
-            s_next = to_float64(self.timestep2sigma(t_next))
-
-            # x_hat = x_cur; t_hat = t_cur; s_hat = s_cur
+            t_cur = self.sigma2timestep(s_cur)
+            assert s_cur == self.timestep2sigma(t_cur)
 
             # Increase noise temporarily.
             gamma = min(S_churn / num_steps, np.sqrt(2) - 1) if S_min <= s_cur <= S_max else 0
-            t_hat = to_float64(self.sigma2timestep(s_cur + gamma * s_cur))
+            s_hat_continuous = s_cur + gamma * s_cur
+            t_hat = self.sigma2timestep(s_hat_continuous)
             s_hat = to_float64(self.timestep2sigma(t_hat))
             if t_hat == t_cur:
                 x_hat = x_cur
@@ -842,13 +831,15 @@ class GaussianDiffusion:
                 x_hat = x_cur + (s_hat ** 2 - s_cur ** 2).sqrt() * S_noise * th.randn_like(x_cur)
 
             # Euler step.
-            denoised, latent_indicator = get_denoised_estimate(x_hat, t_hat, s_hat)
+            denoised, _ = get_denoised_estimate(x_hat, t_hat)
             d_cur = (x_hat - denoised) / s_hat
             x_next = x_hat + (s_next - s_hat) * d_cur
 
             # Apply 2nd order correction.
-            if t_next > 0:
-                denoised_next, _ = get_denoised_estimate(x_next, t_next, s_next)
+            if s_next > 0:
+                t_next = self.sigma2timestep(s_next)
+                assert s_next == self.timestep2sigma(t_next)
+                denoised_next, _ = get_denoised_estimate(x_next, t_next)
                 d_prime = (x_next - denoised_next) / s_next
                 x_next = x_hat + (s_next - s_hat) * (0.5 * d_cur + 0.5 * d_prime)
 

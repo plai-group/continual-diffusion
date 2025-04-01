@@ -77,11 +77,11 @@ def compute_loss(batch, args, model, diffusion, schedule_sampler, trials=10):
 
 @th.no_grad()
 def main(args):
-    loss_save_path = Path(args.eval_dir) / f"loss-{args.trials}.txt"
-    # if loss_save_path.exists():
-    #     loss = np.loadtxt(loss_save_path).squeeze()
-    #     print(f"Losses are already computed: {loss}")
-    #     exit()
+    loss_save_path = Path(args.eval_dir) / f"loss-{args.trials}-{args.seed}.txt"
+    if loss_save_path.exists():
+        loss = np.loadtxt(loss_save_path).squeeze()
+        print(f"Losses are already computed: {loss}")
+        exit()
     loss_save_path.parent.mkdir(parents=True, exist_ok=True)
     args.indices = list(range(args.start_index, args.stop_index))
     if args.num_sampled_videos is None:
@@ -149,7 +149,7 @@ def create_sampling_parser():
     parser.add_argument("--sampler", type=str, default="heun-80-inf-0-1-1000-0.002-7-50")
     parser.add_argument("--eval_on_train", type=str2bool, default=False)
     parser.add_argument("--timestep_respacing", type=str, default="")
-    # parser.add_argument("--seed", type=int, default=0, help="seed")
+    parser.add_argument("--seed", type=int, default=0, help="seed")
     parser.add_argument("--device", default="cuda" if th.cuda.is_available() else "cpu")
 
     parser.add_argument("--eval_dataset_config", type=str, default=eval_dataset_configs["default"], choices=list(eval_dataset_configs.keys()))

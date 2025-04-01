@@ -16,6 +16,7 @@ from .train_util import get_blob_logdir
 from .test_util import Protect
 from .plaicraft_dataset import ContinuousPlaicraftDataset, SpacedPlaicraftDataset, ChunkedPlaicraftDataset
 from .plaicraft_custom_dataset import PlaicraftCustomDataset
+from .car_dataset import ContinuousCarDataset, ChunkedCarDataset, SpacedCarDataset
 
 
 
@@ -28,6 +29,8 @@ video_data_paths_dict = {
     "streaming_wmaze":     "datasets/windows_maze",
     "plaicraft":           "datasets/plaicraft",
     "streaming_plaicraft": "datasets/plaicraft",
+    "car":                 "datasets/car",
+    "streaming_car":       "datasets/car",
 }
 
 default_T_dict = {
@@ -39,6 +42,8 @@ default_T_dict = {
     "streaming_wmaze":     20,
     "plaicraft":           20,
     "streaming_plaicraft": 20,
+    "car":                 20,
+    "streaming_car":       20,
 }
 
 default_image_size_dict = {
@@ -50,6 +55,8 @@ default_image_size_dict = {
     "streaming_wmaze":     64,
     "plaicraft":           160,
     "streaming_plaicraft": 160,
+    "car":                 64,
+    "streaming_car":       64,
 }
 
 eval_dataset_configs = {"default": "default", "continuous": "continuous", "chunked": "chunked"}
@@ -85,6 +92,8 @@ def load_data(dataset_name, batch_size, T=None, deterministic=False, num_workers
         dataset = ContinuousPlaicraftDataset(data_path, window_length=T,
                                              player_names_train=["Alex"],
                                              player_names_test=["Kyrie"])
+    elif "car" in dataset_name:
+        dataset = ContinuousCarDataset(data_path, window_length=T)
     else:
         raise Exception("no dataset", dataset_name)
 
@@ -157,6 +166,12 @@ def get_eval_dataset(dataset_name, T=None, seed=0, train=False, eval_dataset_con
             dataset = ChunkedPlaicraftDataset(**shared_args)
         else:
             dataset = SpacedPlaicraftDataset(**spacing_kwargs, **shared_args)
+    elif "car" in dataset_name:
+        shared_args = dict(dataset_path=data_path, window_length=T, frame_range=frame_range)
+        if eval_dataset_config == eval_dataset_configs["continuous"]:
+            dataset = ContinuousCarDataset(**shared_args)
+        else:
+            dataset = SpacedCarDataset(**spacing_kwargs, **shared_args)
     else:
         raise Exception("no dataset", dataset_name)
     if not train:
@@ -224,9 +239,9 @@ class ContinuousBaseDataset(Dataset):
         config = self.get_config(self.path / 'config.json')
         self.T_total = config['T_total']
         self.chunk_size = config['chunk_size']
-        assert self.T_total % self.T == 0
+        # assert self.T_total % self.T == 0
         assert self.T_total % self.chunk_size == 0
-        assert self.chunk_size % self.T == 0
+        # assert self.chunk_size % self.T == 0
 
         self.frame_range = frame_range
         if self.frame_range[1] is None:
@@ -328,6 +343,8 @@ class ChunkedBaseDataset(ContinuousBaseDataset):
     """
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
+        assert self.T_total % self.T == 0
+        assert self.chunk_size % self.T == 0
 
     def __len__(self):
         return (self.frame_range[1]-self.frame_range[0]) // self.T
@@ -358,6 +375,8 @@ class SpacedBaseDataset(ContinuousBaseDataset):
         self.n_data = n_data
 
         self.spacing = (self.frame_range[1]-self.frame_range[0]) // self.n_data
+        assert self.T_total % self.T == 0
+        assert self.chunk_size % self.T == 0
         assert self.spacing % self.T == 0
         assert 0<=self.frame_range[0] and self.frame_range[0]+self.T<self.frame_range[1]
 

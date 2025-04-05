@@ -3,7 +3,7 @@ import argparse
 from . import gaussian_diffusion as gd
 from .respace import SpacedDiffusion, space_timesteps
 from .unet import UNetVideoModel
-
+from .vdt import VDT_S_2, VDT_L_2
 
 
 def model_and_diffusion_defaults():
@@ -145,6 +145,76 @@ def create_model(
         use_edm_scaling=use_edm_scaling,
         diffusion=diffusion,
     )
+
+
+
+def vdt_model_and_diffusion_defaults():
+    """
+    Defaults for image training.
+    """
+    return dict(
+        learn_sigma=False,
+        sigma_small=False,
+        diffusion_steps=1000,
+        diffusion_space_kwargs=dict(diffusion_space=None, pre_encoded=False, enable_decoding=False),
+        noise_schedule="linear",
+        timestep_respacing="",
+        use_kl=False,
+        predict_xstart=False,
+        rescale_timesteps=True,
+        rescale_learned_sigmas=True,
+        use_checkpoint=False,
+        use_edm_scaling=False,
+    )
+
+
+def create_vdt_model_and_diffusion(
+    model_name,  # 'VDT-S' or 'VDT-L'
+    image_size,
+    learn_sigma,
+    sigma_small,
+    in_channels,
+    num_heads,
+    diffusion_steps,
+    diffusion_space_kwargs,
+    noise_schedule,
+    timestep_respacing,
+    use_kl,
+    predict_xstart,
+    rescale_timesteps,
+    rescale_learned_sigmas,
+    use_checkpoint,
+    use_edm_scaling,
+):
+    diffusion = create_gaussian_diffusion(
+        steps=diffusion_steps,
+        learn_sigma=learn_sigma,
+        sigma_small=sigma_small,
+        noise_schedule=noise_schedule,
+        use_kl=use_kl,
+        predict_xstart=predict_xstart,
+        rescale_timesteps=rescale_timesteps,
+        rescale_learned_sigmas=rescale_learned_sigmas,
+        timestep_respacing=timestep_respacing,
+        diffusion_space_kwargs=diffusion_space_kwargs,
+    )
+    model = create_vdt_model(
+        model_name=model_name,
+        in_channels=in_channels,
+    )
+    return model, diffusion
+
+
+def create_vdt_model(
+    model_name,
+    **kwargs
+):    
+    if model_name == 'VDT-S':
+        return VDT_S_2(**kwargs)
+    elif model_name == 'VDT-L':
+        return VDT_L_2(**kwargs)
+    else:
+        raise ValueError(f"unsupported model name: {model_name}")
 
 
 def create_gaussian_diffusion(

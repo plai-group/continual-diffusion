@@ -316,15 +316,17 @@ class VDT(nn.Module):
         imgs = x.reshape(shape=(x.shape[0], c, h * p, h * p))
         return imgs
 
-    def forward(self, x, t):
+    def forward(self, x, *, x0, timesteps, frame_indices=None,
+                obs_mask=None, latent_mask=None, return_attn_weights=False):
         """
         Forward pass of VDT.
         x: (N, C, H, W) tensor of spatial inputs (images or latent representations of images)
         t: (N,) tensor of diffusion timesteps
         y: (N,) tensor of class labels
         """
-        
         B, T, C, W, H = x.shape # 32 16 4 8 8 
+        x = x*(1-obs_mask) + x0*obs_mask
+
         x = x.contiguous().view(-1, C, W, H)
         y = torch.zeros(B).long().to(x.device)
         x = self.x_embedder(x) + self.pos_embed  # (N, T, D), where T = H * W / patch_size ** 2
@@ -336,7 +338,7 @@ class VDT(nn.Module):
             x = self.time_drop(x)
             x = rearrange(x, '(b n) t m -> (b t) n m',b=B,t=T)
         
-        t = self.t_embedder(t)                   # (N, D)
+        t = self.t_embedder(timesteps)           # (N, D)
         y = self.y_embedder(y, self.training)    # (N, D)
   
         c = t + y                             # (N, D)
@@ -347,7 +349,7 @@ class VDT(nn.Module):
 
         x = self.unpatchify(x)                   # (N, out_channels, H, W)
         x = x.view(B, T, x.shape[-3], x.shape[-2], x.shape[-1])
-        return x
+        return x, None
 
     def forward_with_cfg(self, x, t, y, cfg_scale):
         """
@@ -430,11 +432,15 @@ def get_1d_sincos_pos_embed_from_grid(embed_dim, pos):
 def VDT_L_2(**kwargs):
     return VDT(depth=28, hidden_size=1152, patch_size=2, num_heads=16, **kwargs)
 
+def VDT_M_2(**kwargs):
+    return VDT(depth=12, hidden_size=1024, patch_size=2, num_heads=16, **kwargs)
+
 def VDT_S_2(**kwargs):
     return VDT(depth=12, hidden_size=384, patch_size=2, num_heads=6, **kwargs)
 
 
 VDT_models = {
     'VDT-L/2':  VDT_L_2,
+    'VDT-M/2':  VDT_M_2,
     'VDT-S/2':  VDT_S_2,   
 }

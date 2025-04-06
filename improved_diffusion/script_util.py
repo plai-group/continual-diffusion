@@ -3,7 +3,7 @@ import argparse
 from . import gaussian_diffusion as gd
 from .respace import SpacedDiffusion, space_timesteps
 from .unet import UNetVideoModel
-from .vdt import VDT_S_2, VDT_L_2
+from .vdt import VDT_S_2, VDT_M_2, VDT_L_2
 
 
 def model_and_diffusion_defaults():
@@ -153,6 +153,9 @@ def vdt_model_and_diffusion_defaults():
     Defaults for image training.
     """
     return dict(
+        model_name="VDT-S",
+        in_channels=4,
+        num_frames=None,
         learn_sigma=False,
         sigma_small=False,
         diffusion_steps=1000,
@@ -170,11 +173,10 @@ def vdt_model_and_diffusion_defaults():
 
 def create_vdt_model_and_diffusion(
     model_name,  # 'VDT-S' or 'VDT-L'
-    image_size,
+    in_channels,
+    num_frames,
     learn_sigma,
     sigma_small,
-    in_channels,
-    num_heads,
     diffusion_steps,
     diffusion_space_kwargs,
     noise_schedule,
@@ -201,6 +203,8 @@ def create_vdt_model_and_diffusion(
     model = create_vdt_model(
         model_name=model_name,
         in_channels=in_channels,
+        num_frames=num_frames,
+        learn_sigma=learn_sigma,
     )
     return model, diffusion
 
@@ -211,6 +215,8 @@ def create_vdt_model(
 ):    
     if model_name == 'VDT-S':
         return VDT_S_2(**kwargs)
+    elif model_name == 'VDT-M':
+        return VDT_M_2(**kwargs)
     elif model_name == 'VDT-L':
         return VDT_L_2(**kwargs)
     else:

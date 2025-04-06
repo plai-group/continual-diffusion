@@ -13,8 +13,8 @@ from improved_diffusion import dist_util
 from improved_diffusion.video_datasets import load_data, default_T_dict, default_image_size_dict
 from improved_diffusion.resample import create_named_schedule_sampler
 from improved_diffusion.script_util import (
-    model_and_diffusion_defaults,
-    create_model_and_diffusion,
+    vdt_model_and_diffusion_defaults,
+    create_vdt_model_and_diffusion,
     args_to_dict,
     add_dict_to_argparser,
 )
@@ -73,6 +73,8 @@ def main():
     # Set T and image size
     default_image_size = default_image_size_dict[args.dataset]
     args.T = default_T_dict[args.dataset] if args.T == -1 else args.T
+    assert args.T == args.max_frames, "T and max_frames must be equal"
+    args.num_frames = args.T
     args.image_size = {
         "pixel": default_image_size,
         "latent": default_image_size,
@@ -92,8 +94,8 @@ def main():
     init_wandb(config=args, id=args.resume_id if resume else None)
 
     print("creating model and diffusion...")
-    model, diffusion = create_model_and_diffusion(
-        **args_to_dict(args, model_and_diffusion_defaults().keys())
+    model, diffusion = create_vdt_model_and_diffusion(
+        **args_to_dict(args, vdt_model_and_diffusion_defaults().keys())
     )
     model.to(dist_util.dev())
     schedule_sampler = create_named_schedule_sampler(args.schedule_sampler, diffusion)
@@ -172,7 +174,7 @@ def create_argparser():
         attentive_er=False,  # If true, the model attends to replay frames
         data_seed=0,
     )
-    defaults.update(model_and_diffusion_defaults())
+    defaults.update(vdt_model_and_diffusion_defaults())
     parser = argparse.ArgumentParser()
     add_dict_to_argparser(parser, defaults)
     return parser

@@ -74,7 +74,7 @@ def get_data_path(dataset_name):
 
 
 def load_data(dataset_name, batch_size, T=None, deterministic=False, num_workers=1, return_dataset=False,
-              resume_id='', seed=0, buffer_size=None, n_sequential=1, save_every=None):
+              resume_id='', seed=0, buffer_size=None, n_sequential=1, save_every=None, frame_range=(0, None)):
     data_path = get_data_path(dataset_name)
     T = default_T_dict[dataset_name] if T is None else T
     shard = MPI.COMM_WORLD.Get_rank()
@@ -83,17 +83,17 @@ def load_data(dataset_name, batch_size, T=None, deterministic=False, num_workers
     if dataset_name.startswith("streaming"):
         deterministic = True
     if "ball_stn" in dataset_name:
-        dataset = ContinuousBaseDataset(data_path, T=T, seed=0)  # There is only one video stream
+        dataset = ContinuousBaseDataset(data_path, T=T, seed=0, frame_range=frame_range)  # There is only one video stream
     elif "ball_nstn" in dataset_name:
-        dataset = ContinuousBaseDataset(data_path, T=T, seed=0)
+        dataset = ContinuousBaseDataset(data_path, T=T, seed=0, frame_range=frame_range)
     elif "wmaze" in dataset_name:
-        dataset = ContinuousBaseDataset(data_path, T=T, seed=0)
+        dataset = ContinuousBaseDataset(data_path, T=T, seed=0, frame_range=frame_range)
     elif "plaicraft" in dataset_name:
         dataset = ContinuousPlaicraftDataset(data_path, window_length=T,
                                              player_names_train=["Alex"],
-                                             player_names_test=["Kyrie"])
+                                             player_names_test=["Kyrie"], frame_range=frame_range)
     elif "car" in dataset_name:
-        dataset = ContinuousCarDataset(data_path, window_length=T)
+        dataset = ContinuousCarDataset(data_path, window_length=T, frame_range=frame_range)
     else:
         raise Exception("no dataset", dataset_name)
 

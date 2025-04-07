@@ -81,7 +81,7 @@ def main():
         "pixel": 3,
         "latent": 4,
     }[args.diffusion_space]
-
+    args.upper_frame_range = int(args.upper_frame_range) if args.upper_frame_range is not None else None
     args.diffusion_space_kwargs = {
         "diffusion_space": args.diffusion_space,
         "pre_encoded": args.diffusion_space == "latent",
@@ -109,6 +109,7 @@ def main():
         buffer_size=args.ltm_size,
         n_sequential=args.n_sample_stm,
         save_every=args.save_interval,
+        frame_range=(0, args.upper_frame_range),
     )
 
     print("training...")
@@ -171,6 +172,7 @@ def create_argparser():
         save_replay_mem=False,
         attentive_er=False,  # If true, the model attends to replay frames
         data_seed=0,
+        upper_frame_range=None,
     )
     defaults.update(model_and_diffusion_defaults())
     parser = argparse.ArgumentParser()

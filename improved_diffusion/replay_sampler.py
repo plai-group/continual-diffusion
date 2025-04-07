@@ -92,7 +92,6 @@ class DistributedReplaySampler(Sampler[T_co]):
 
             # Depending on batch size, return
             for b in range(self.local_batch_size):
-                # if (b == 0 and self.rank == 0) or i == 0:
                 if i == 0 or self.rank * self.local_batch_size + b < self.n_sequential:
                     yield i  # main datastream
                 else:

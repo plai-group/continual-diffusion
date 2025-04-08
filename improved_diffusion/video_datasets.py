@@ -3,14 +3,14 @@ import json
 import os
 import numpy as np
 import torch as th
-from torch.utils.data import DataLoader, Dataset, DistributedSampler
+from torch.utils.data import DataLoader, Dataset
 from torchvision.transforms import ToTensor
 import torch.distributed as dist
 from pathlib import Path
 import shutil
 from typing import Tuple
 from mpi4py import MPI
-from improved_diffusion.replay_sampler import DistributedReplaySampler
+from improved_diffusion.replay_sampler import DistributedReplaySampler, DistributedOfflineSampler
 
 from .train_util import get_blob_logdir
 from .test_util import Protect
@@ -100,28 +100,24 @@ def load_data(dataset_name, batch_size, T=None, deterministic=False, num_workers
     if return_dataset:
         return dataset
 
-    epoch = 0
+    save_path = os.path.join(get_blob_logdir(resume_id), 'replay_state.pt') if dist.get_rank() == 0 else ''
     if deterministic:
-        save_path = os.path.join(get_blob_logdir(resume_id), 'replay_state.pt') if dist.get_rank() == 0 else ''
         sampler = DistributedReplaySampler(dataset, batch_size, buffer_size=buffer_size, seed=seed,
                                            n_sequential=n_sequential, save_args=dict(path=save_path, every=save_every))
-        if resume_id:
-            load_path = os.path.join(get_blob_logdir(resume_id), 'replay_state.pt')
-            sampler.load_sampler(path=load_path)
-            print(f"starting replay dataloader from data index {sampler.start_index}.")
     else:
-        sampler = DistributedSampler(dataset, shuffle=True, seed=seed)
-        sampler.set_epoch(epoch)
+        sampler = DistributedOfflineSampler(dataset, batch_size, seed=seed, save_args=dict(path=save_path, every=save_every))
+
+    if resume_id:
+        load_path = os.path.join(get_blob_logdir(resume_id), 'replay_state.pt')
+        sampler.load_sampler(path=load_path)
+        print(f"starting sampler from data index {sampler.start_index}.")
 
     batch_size = batch_size // dist.get_world_size()
     loader = DataLoader(dataset, batch_size=batch_size, num_workers=num_workers, sampler=sampler)
     while True:
         yield from loader
-        epoch += 1
-        if deterministic:
-            raise StopIteration()
-        else:
-            sampler.set_epoch(epoch)
+        raise StopIteration()
+
 
 def get_eval_dataset(dataset_name, T=None, seed=0, train=False, eval_dataset_config=eval_dataset_configs["default"],
                      frame_range=(0, None), spacing_kwargs=dict(n_data=None), custom_clip_path=None):

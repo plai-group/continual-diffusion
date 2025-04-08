@@ -3,7 +3,7 @@ from typing import TypeVar, Optional, Iterator, Dict, Any
 import blobfile as bf
 
 import torch
-from torch.utils.data import Sampler, Dataset
+from torch.utils.data import Sampler, Dataset, DistributedSampler
 import torch.distributed as dist
 
 
@@ -37,17 +37,6 @@ class DistributedReplaySampler(Sampler[T_co]):
         seed (int, optional): random seed used to shuffle the sampler if
             :attr:`shuffle=True`. This number should be identical across all
             processes in the distributed group. Default: ``0``.
-
-    Example::
-
-        >>> # xdoctest: +SKIP
-        >>> sampler = DistributedReplaySampler(dataset, 4) if is_distributed else None
-        >>> loader = DataLoader(dataset, shuffle=(sampler is None),
-        ...                     sampler=sampler)
-        >>> for epoch in range(start_epoch, n_epochs):
-        ...     if is_distributed:
-        ...         sampler.set_epoch(epoch)
-        ...     train(loader)
     """
 
     def __init__(self, dataset: Dataset, batch_size: int, buffer_size: Optional[int] = None,
@@ -74,7 +63,7 @@ class DistributedReplaySampler(Sampler[T_co]):
 
         self.n_sequential = n_sequential
         self.start_index = 0
-        self.next_index = self.start_index+1
+        self.next_index = self.start_index
         self.end_index = len(dataset)
         self.buffer_indices = []
         self.sample_generator = torch.Generator()
@@ -90,11 +79,12 @@ class DistributedReplaySampler(Sampler[T_co]):
         """
         for i in range(self.start_index, self.end_index):
 
-            # Depending on batch size, return
+            # Each device samples self.local_batch_size times per timestep
             for b in range(self.local_batch_size):
                 if i == 0 or self.rank * self.local_batch_size + b < self.n_sequential:
-                    yield i  # main datastream
+                    yield i  # Main datastream
                 else:
+                    # Each device samples from the buffer differently by using sample generator initialized with different seeds
                     idx = torch.randint(len(self.buffer_indices), (1,), generator=self.sample_generator).item()
                     yield self.buffer_indices[idx]
 
@@ -102,6 +92,7 @@ class DistributedReplaySampler(Sampler[T_co]):
             if len(self.buffer_indices) < self.buffer_size:
                 self.buffer_indices.append(i)
             elif self.buffer_size > 0:
+                # All devices maintain consistent replay buffer by using update generator initialized with the same seed
                 idx = torch.randint(i, (1,), generator=self.update_generator).item()
                 if idx < len(self.buffer_indices):
                     self.buffer_indices[idx] = i
@@ -119,13 +110,77 @@ class DistributedReplaySampler(Sampler[T_co]):
         """
         loaded = torch.load(path)
         self.start_index = loaded["next_index"]
-        self.next_index = self.start_index + 1
+        self.next_index = self.start_index
         self.buffer_indices = loaded["buffer_indices"]
+        print(f"Loaded sampler from {path} and set first index to {self.start_index}")
 
     def save_sampler(self, path: str) -> None:
         """
         Given a save checkpoint, save fields
         """
+        print(f"Saving sampler with next index set to {self.next_index}")
         to_save = dict(next_index=self.next_index, buffer_indices=self.buffer_indices)
+        with bf.BlobFile(path, "wb") as f:
+            torch.save(to_save, f)
+
+
+class DistributedOfflineSampler(DistributedSampler):
+    def __init__(
+        self,
+        dataset: Dataset,
+        batch_size: int,
+        num_replicas: Optional[int] = None,
+        rank: Optional[int] = None,
+        seed: int = 0,
+        save_args: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        super().__init__(dataset, num_replicas, rank, shuffle=True, seed=seed, drop_last=False)
+        self.batch_size = batch_size
+        self.local_batch_size = self.batch_size // self.num_replicas
+        self.save_args = save_args
+        self.start_index = 0
+        self.next_index = self.start_index
+
+    def __iter__(self) -> Iterator[T_co]:
+        indices = []
+        for b_index in range(self.batch_size):
+            g = torch.Generator()
+            g.manual_seed(self.seed + b_index)
+            b_indices = torch.randperm(len(self.dataset), generator=g).tolist()  # type: ignore[arg-type]
+            indices += b_indices
+        
+        # add extra samples to make it evenly divisible among replicas
+        padding_size = len(indices) % self.num_replicas
+        if padding_size > 0:
+            indices += indices[:padding_size]
+        assert len(self.dataset) * self.batch_size <= len(indices) and len(indices) % self.num_replicas == 0
+
+        local_indices = indices[self.start_index+self.rank : len(indices) : self.num_replicas]
+
+        for i, idx in enumerate(local_indices):
+            # Each device samples self.local_batch_size times per timestep
+            is_last_local_batch_item = (i+1) % self.local_batch_size == 0
+            yield idx
+
+            self.next_index += self.num_replicas
+            if self.save_args is not None and self.rank == 0 and (self.next_index//self.batch_size-1) % self.save_args["every"] == 0 and is_last_local_batch_item:
+                assert self.next_index % self.batch_size == 0
+                self.save_sampler(self.save_args["path"])
+
+    def load_sampler(self, path: str) -> None:
+        """
+        Given a save checkpoint, populate fields
+        """
+        loaded = torch.load(path)
+        self.start_index = loaded["next_index"]
+        self.next_index = self.start_index
+        print(f"Loaded sampler from {path} and set first index to {self.start_index}")
+
+    def save_sampler(self, path: str) -> None:
+        """
+        Given a save checkpoint, save fields
+        """
+        print(f"Saving sampler with next index set to {self.next_index}")
+        to_save = dict(next_index=self.next_index)
         with bf.BlobFile(path, "wb") as f:
             torch.save(to_save, f)

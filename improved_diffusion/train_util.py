@@ -147,7 +147,7 @@ class TrainLoop:
         resume_checkpoint = find_resume_checkpoint(self.args) or self.resume_checkpoint
 
         if resume_checkpoint:
-            self.step = parse_resume_step_from_filename(resume_checkpoint)
+            self.step = parse_resume_step_from_filename(resume_checkpoint) + 1
             print(f"loading model from checkpoint: {resume_checkpoint}...")
             self.model.load_state_dict(
                 dist_util.load_state_dict(

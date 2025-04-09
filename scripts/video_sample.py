@@ -169,8 +169,8 @@ def main_outer(args):
                        "timestep_respacing": args.timestep_respacing})
     model_args["diffusion_space_kwargs"]["enable_decoding"] = True
     model_args = argparse.Namespace(**model_args)
-    model, diffusion = create_model_and_diffusion(
-        **args_to_dict(model_args, model_and_diffusion_defaults().keys())
+    model, diffusion = create_model_and_diffusion(model_type=args.model_type,
+        **args_to_dict(model_args, model_and_diffusion_defaults(model_type=args.model_type).keys())
     )
     model.load_state_dict(state_dict)
     model = model.to(args.device)
@@ -216,6 +216,7 @@ def main_outer(args):
 def create_sampling_parser():
     parser = argparse.ArgumentParser()
     parser.add_argument("checkpoint_path", type=str)
+    parser.add_argument("--model_type", type=str, default='unet', choices=['unet', 'vdt'])
     parser.add_argument("--start_index", type=int, default=0)
     parser.add_argument("--stop_index", type=int, required=True)
     parser.add_argument("--num_sampled_videos", type=int, default=None,

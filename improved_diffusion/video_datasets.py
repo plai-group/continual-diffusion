@@ -59,6 +59,19 @@ default_image_size_dict = {
     "streaming_car":       64,
 }
 
+default_full_image_size_dict = {
+    "ball_stn":            (32, 32),
+    "ball_nstn":           (32, 32),
+    "streaming_ball_stn":  (32, 32),
+    "streaming_ball_nstn": (32, 32),
+    "wmaze":               (64, 64),
+    "streaming_wmaze":     (64, 64),
+    "plaicraft":           (96, 160),
+    "streaming_plaicraft": (96, 160),
+    "car":                 (64, 64),
+    "streaming_car":       (64, 64),
+}
+
 eval_dataset_configs = {"default": "default", "continuous": "continuous", "chunked": "chunked"}
 
 

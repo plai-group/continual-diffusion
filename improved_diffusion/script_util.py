@@ -6,7 +6,28 @@ from .unet import UNetVideoModel
 from .vdt import VDT_S_2, VDT_M_2, VDT_L_2
 
 
-def model_and_diffusion_defaults():
+def model_and_diffusion_defaults(model_type='unet'):
+    """
+    Defaults for image training.
+    """
+    if model_type == 'unet':
+        return unet_model_and_diffusion_defaults()
+    elif model_type == 'vdt':
+        return vdt_model_and_diffusion_defaults()
+    else:
+        raise ValueError(f"unsupported model type: {model_type}")
+
+
+def create_model_and_diffusion(model_type='unet', **kwargs):
+    if model_type == 'unet':
+        return create_unet_model_and_diffusion(**kwargs)
+    elif model_type == 'vdt':
+        return create_vdt_model_and_diffusion(**kwargs)
+    else:
+        raise ValueError(f"unsupported model type: {model_type}")
+
+
+def unet_model_and_diffusion_defaults():
     """
     Defaults for image training.
     """
@@ -37,7 +58,7 @@ def model_and_diffusion_defaults():
     )
 
 
-def create_model_and_diffusion(
+def create_unet_model_and_diffusion(
     image_size,
     class_cond,
     learn_sigma,
@@ -74,7 +95,7 @@ def create_model_and_diffusion(
         timestep_respacing=timestep_respacing,
         diffusion_space_kwargs=diffusion_space_kwargs,
     )
-    model = create_model(
+    model = create_unet_model(
         image_size,
         in_channels,
         num_channels,
@@ -94,7 +115,7 @@ def create_model_and_diffusion(
     return model, diffusion
 
 
-def create_model(
+def create_unet_model(
     image_size,
     in_channels,
     num_channels,
@@ -154,6 +175,8 @@ def vdt_model_and_diffusion_defaults():
     """
     return dict(
         model_name="VDT-S",
+        input_size=(None, None),
+        patch_size=2,
         in_channels=4,
         num_frames=None,
         learn_sigma=False,
@@ -173,6 +196,8 @@ def vdt_model_and_diffusion_defaults():
 
 def create_vdt_model_and_diffusion(
     model_name,  # 'VDT-S' or 'VDT-L'
+    patch_size,
+    input_size,
     in_channels,
     num_frames,
     learn_sigma,
@@ -202,6 +227,8 @@ def create_vdt_model_and_diffusion(
     )
     model = create_vdt_model(
         model_name=model_name,
+        input_size=input_size,
+        patch_size=patch_size,
         in_channels=in_channels,
         num_frames=num_frames,
         learn_sigma=learn_sigma,

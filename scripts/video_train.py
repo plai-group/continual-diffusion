@@ -73,6 +73,7 @@ def main():
     # Set T and image size
     default_image_size = default_image_size_dict[args.dataset]
     args.T = default_T_dict[args.dataset] if args.T == -1 else args.T
+    assert args.T == args.max_frames, "T and max_frames must be equal"
     args.image_size = {
         "pixel": default_image_size,
         "latent": default_image_size,
@@ -86,14 +87,15 @@ def main():
         "diffusion_space": args.diffusion_space,
         "pre_encoded": args.diffusion_space == "latent",
     }
+    args.model_type = 'unet'
 
     dist_util.setup_dist()
     resume = bool(args.resume_id)
     init_wandb(config=args, id=args.resume_id if resume else None)
 
     print("creating model and diffusion...")
-    model, diffusion = create_model_and_diffusion(
-        **args_to_dict(args, model_and_diffusion_defaults().keys())
+    model, diffusion = create_model_and_diffusion(model_type=args.model_type,
+        **args_to_dict(args, model_and_diffusion_defaults(model_type=args.model_type).keys())
     )
     model.to(dist_util.dev())
     schedule_sampler = create_named_schedule_sampler(args.schedule_sampler, diffusion)

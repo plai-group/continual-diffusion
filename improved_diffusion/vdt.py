@@ -270,7 +270,7 @@ class VDT(nn.Module):
         self.apply(_basic_init)
 
         # Initialize (and freeze) pos_embed by sin-cos embedding:
-        pos_embed = get_2d_sincos_pos_embed(self.pos_embed.shape[-1], int(self.x_embedder.num_patches ** 0.5))
+        pos_embed = get_2d_sincos_pos_embed(self.pos_embed.shape[-1], self.x_embedder.grid_size)
         self.pos_embed.data.copy_(torch.from_numpy(pos_embed).float().unsqueeze(0))
 
         if self.mode == 'video':
@@ -307,13 +307,14 @@ class VDT(nn.Module):
         imgs: (N, H, W, C)
         """
         c = self.out_channels
-        p = self.x_embedder.patch_size[0]
-        h = w = int(x.shape[1] ** 0.5)
-        assert h * w == x.shape[1]
+        h = self.x_embedder.grid_size[0]
+        w = self.x_embedder.grid_size[1]
+        p_h = self.x_embedder.patch_size[0]
+        p_w = self.x_embedder.patch_size[1]
 
-        x = x.reshape(shape=(x.shape[0], h, w, p, p, c))
+        x = x.reshape(shape=(x.shape[0], h, w, p_h, p_w, c))
         x = torch.einsum('nhwpqc->nchpwq', x)
-        imgs = x.reshape(shape=(x.shape[0], c, h * p, h * p))
+        imgs = x.reshape(shape=(x.shape[0], c, h * p_h, w * p_w))
         return imgs
 
     def forward(self, x, *, x0, timesteps, frame_indices=None,
@@ -377,16 +378,21 @@ class VDT(nn.Module):
 
 def get_2d_sincos_pos_embed(embed_dim, grid_size, cls_token=False, extra_tokens=0):
     """
-    grid_size: int of the grid height and width
+    grid_size: grid_size tuple (height, width)
     return:
     pos_embed: [grid_size*grid_size, embed_dim] or [1+grid_size*grid_size, embed_dim] (w/ or w/o cls_token)
     """
-    grid_h = np.arange(grid_size, dtype=np.float32)
-    grid_w = np.arange(grid_size, dtype=np.float32)
+    if isinstance(grid_size, int):
+        grid_size = (grid_size, grid_size)
+
+    h, w = grid_size
+
+    grid_h = np.arange(h, dtype=np.float32)
+    grid_w = np.arange(w, dtype=np.float32)
     grid = np.meshgrid(grid_w, grid_h)  # here w goes first
     grid = np.stack(grid, axis=0)
 
-    grid = grid.reshape([2, 1, grid_size, grid_size])
+    grid = grid.reshape([2, 1, h, w])
     pos_embed = get_2d_sincos_pos_embed_from_grid(embed_dim, grid)
     if cls_token and extra_tokens > 0:
         pos_embed = np.concatenate([np.zeros([extra_tokens, embed_dim]), pos_embed], axis=0)
@@ -430,13 +436,13 @@ def get_1d_sincos_pos_embed_from_grid(embed_dim, pos):
 #################################################################################
 
 def VDT_L_2(**kwargs):
-    return VDT(depth=28, hidden_size=1152, patch_size=2, num_heads=16, **kwargs)
+    return VDT(depth=28, hidden_size=1152, num_heads=16, **kwargs)
 
 def VDT_M_2(**kwargs):
-    return VDT(depth=12, hidden_size=1024, patch_size=2, num_heads=16, **kwargs)
+    return VDT(depth=12, hidden_size=1024, num_heads=16, **kwargs)
 
 def VDT_S_2(**kwargs):
-    return VDT(depth=12, hidden_size=384, patch_size=2, num_heads=6, **kwargs)
+    return VDT(depth=12, hidden_size=384, num_heads=6, **kwargs)
 
 
 VDT_models = {

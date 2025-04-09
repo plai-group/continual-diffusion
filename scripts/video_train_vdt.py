@@ -10,11 +10,11 @@ import torch
 import torch.distributed as dist
 
 from improved_diffusion import dist_util
-from improved_diffusion.video_datasets import load_data, default_T_dict, default_image_size_dict
+from improved_diffusion.video_datasets import load_data, default_T_dict, default_full_image_size_dict
 from improved_diffusion.resample import create_named_schedule_sampler
 from improved_diffusion.script_util import (
-    vdt_model_and_diffusion_defaults,
-    create_vdt_model_and_diffusion,
+    model_and_diffusion_defaults,
+    create_model_and_diffusion,
     args_to_dict,
     add_dict_to_argparser,
 )
@@ -71,11 +71,11 @@ def main():
         print(f"num_workers is not specified. It is automatically set to \"number of cores - 1\" = {args.num_workers}")
 
     # Set T and image size
-    default_image_size = default_image_size_dict[args.dataset]
+    default_image_size = default_full_image_size_dict[args.dataset]
     args.T = default_T_dict[args.dataset] if args.T == -1 else args.T
     assert args.T == args.max_frames, "T and max_frames must be equal"
     args.num_frames = args.T
-    args.image_size = {
+    args.input_size = {
         "pixel": default_image_size,
         "latent": default_image_size,
     }[args.diffusion_space]
@@ -88,14 +88,15 @@ def main():
         "diffusion_space": args.diffusion_space,
         "pre_encoded": args.diffusion_space == "latent",
     }
+    args.model_type = 'vdt'
 
     dist_util.setup_dist()
     resume = bool(args.resume_id)
     init_wandb(config=args, id=args.resume_id if resume else None)
 
     print("creating model and diffusion...")
-    model, diffusion = create_vdt_model_and_diffusion(
-        **args_to_dict(args, vdt_model_and_diffusion_defaults().keys())
+    model, diffusion = create_model_and_diffusion(model_type=args.model_type,
+        **args_to_dict(args, model_and_diffusion_defaults(model_type=args.model_type).keys())
     )
     model.to(dist_util.dev())
     schedule_sampler = create_named_schedule_sampler(args.schedule_sampler, diffusion)
@@ -176,7 +177,7 @@ def create_argparser():
         data_seed=0,
         upper_frame_range=None,
     )
-    defaults.update(vdt_model_and_diffusion_defaults())
+    defaults.update(model_and_diffusion_defaults(model_type='vdt'))
     parser = argparse.ArgumentParser()
     add_dict_to_argparser(parser, defaults)
     return parser

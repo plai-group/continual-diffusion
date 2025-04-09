@@ -239,7 +239,7 @@ def create_vdt_model_and_diffusion(
 def create_vdt_model(
     model_name,
     **kwargs
-):    
+):
     if model_name == 'VDT-S':
         return VDT_S_2(**kwargs)
     elif model_name == 'VDT-M':

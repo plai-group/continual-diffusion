@@ -10,7 +10,7 @@ Modified by Haoyu Lu, for video diffusion transformer
 # GLIDE: https://github.com/openai/glide-text2im
 # MAE: https://github.com/facebookresearch/mae/blob/main/models_mae.py
 # DiT: https://github.com/facebookresearch/DiT/blob/main/models.py
-# 
+#
 # --------------------------------------------------------
 
 import torch
@@ -144,9 +144,9 @@ class VDTBlock(nn.Module):
             nn.Linear(hidden_size, 6 * hidden_size, bias=True)
         )
         self.num_frames = num_frames
-        
+
         self.mode = mode
-        
+
         ## Temporal Attention Parameters
         if self.mode == 'video':
             
@@ -245,7 +245,7 @@ class VDT(nn.Module):
         num_patches = self.x_embedder.num_patches
         # Will use fixed sin-cos embedding:
         self.pos_embed = nn.Parameter(torch.zeros(1, num_patches, hidden_size), requires_grad=False)
-        
+
         self.mode = mode
         if self.mode == 'video':
             self.num_frames = num_frames
@@ -338,10 +338,10 @@ class VDT(nn.Module):
             x = x + self.time_embed
             x = self.time_drop(x)
             x = rearrange(x, '(b n) t m -> (b t) n m',b=B,t=T)
-        
+
         t = self.t_embedder(timesteps)           # (N, D)
         y = self.y_embedder(y, self.training)    # (N, D)
-  
+
         c = t + y                             # (N, D)
 
         for block in self.blocks:
@@ -436,17 +436,17 @@ def get_1d_sincos_pos_embed_from_grid(embed_dim, pos):
 #################################################################################
 
 def VDT_L_2(**kwargs):
-    return VDT(depth=28, hidden_size=1152, num_heads=16, **kwargs)
+    return VDT(depth=28, hidden_size=1152, num_heads=16, num_classes=0, **kwargs)
 
 def VDT_M_2(**kwargs):
-    return VDT(depth=12, hidden_size=1024, num_heads=16, **kwargs)
+    return VDT(depth=12, hidden_size=1024, num_heads=16, num_classes=0, **kwargs)
 
 def VDT_S_2(**kwargs):
-    return VDT(depth=12, hidden_size=384, num_heads=6, **kwargs)
+    return VDT(depth=12, hidden_size=384, num_heads=6, num_classes=0, **kwargs)
 
 
 VDT_models = {
     'VDT-L/2':  VDT_L_2,
     'VDT-M/2':  VDT_M_2,
-    'VDT-S/2':  VDT_S_2,   
+    'VDT-S/2':  VDT_S_2,
 }

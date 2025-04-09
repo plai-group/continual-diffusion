@@ -45,7 +45,7 @@ def init_wandb(config, id):
         num_nodes = int(os.environ['SLURM_JOB_NUM_NODES'])
         print(f"Node list: {os.environ['SLURM_JOB_NODELIST']}")
     logger.logkv("num_nodes", num_nodes)
-    print(f"Number of nodes: {num_nodes}") 
+    print(f"Number of nodes: {num_nodes}")
 
 
 def num_available_cores():

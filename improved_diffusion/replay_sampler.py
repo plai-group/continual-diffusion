@@ -148,7 +148,7 @@ class DistributedOfflineSampler(DistributedSampler):
             g.manual_seed(self.seed + b_index)
             b_indices = torch.randperm(len(self.dataset), generator=g).tolist()  # type: ignore[arg-type]
             indices += b_indices
-        
+
         # add extra samples to make it evenly divisible among replicas
         padding_size = len(indices) % self.num_replicas
         if padding_size > 0:

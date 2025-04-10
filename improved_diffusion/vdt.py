@@ -442,7 +442,7 @@ def VDT_M_2(**kwargs):
     return VDT(depth=12, hidden_size=1024, num_heads=16, num_classes=0, **kwargs)
 
 def VDT_S_2(**kwargs):
-    return VDT(depth=12, hidden_size=384, num_heads=6, num_classes=0, **kwargs)
+    return VDT(depth=12, hidden_size=384, num_heads=6, num_classes=1000, **kwargs)
 
 
 VDT_models = {

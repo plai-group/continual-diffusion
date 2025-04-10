@@ -96,8 +96,12 @@ def main(args):
                        "timestep_respacing": args.timestep_respacing})
     model_args["diffusion_space_kwargs"]["enable_decoding"] = True
     model_args = argparse.Namespace(**model_args)
-    model, diffusion = create_model_and_diffusion(
-        **args_to_dict(model_args, model_and_diffusion_defaults().keys())
+    if not hasattr(model_args, "model_type"):  # HACK: To get it to work with models trained before this was introduced
+        model_args.model_type = "vdt"
+        model_args.input_size = model_args.image_size
+        model_args.patch_size = 2
+    model, diffusion = create_model_and_diffusion(model_type=model_args.model_type,
+        **args_to_dict(model_args, model_and_diffusion_defaults(model_type=model_args.model_type).keys())
     )
     model.load_state_dict(state_dict)
     model = model.to(args.device)

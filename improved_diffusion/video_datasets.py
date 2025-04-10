@@ -10,7 +10,7 @@ from pathlib import Path
 import shutil
 from typing import Tuple
 from mpi4py import MPI
-from improved_diffusion.replay_sampler import DistributedReplaySampler, DistributedOfflineSampler
+from improved_diffusion.data_sampler import DistributedReplaySampler, DistributedOfflineSampler
 
 from .train_util import get_blob_logdir
 from .test_util import Protect

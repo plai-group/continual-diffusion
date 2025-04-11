@@ -97,9 +97,12 @@ def main(args):
     model_args["diffusion_space_kwargs"]["enable_decoding"] = True
     model_args = argparse.Namespace(**model_args)
     if not hasattr(model_args, "model_type"):  # HACK: To get it to work with models trained before this was introduced
-        model_args.model_type = "vdt"
-        model_args.input_size = model_args.image_size
-        model_args.patch_size = 2
+        is_vdt = "model_name" in model_args
+        model_args.model_type = "vdt" if is_vdt else "unet"
+        if is_vdt and not hasattr(model_args, "input_size"):
+            model_args.input_size = model_args.image_size
+        if is_vdt and not hasattr(model_args, "patch_size"):
+            model_args.patch_size = 2
     model, diffusion = create_model_and_diffusion(model_type=model_args.model_type,
         **args_to_dict(model_args, model_and_diffusion_defaults(model_type=model_args.model_type).keys())
     )
@@ -107,7 +110,8 @@ def main(args):
     model = model.to(args.device)
     model.eval()
     schedule_sampler = create_named_schedule_sampler(model_args.schedule_sampler, diffusion)
-    args.image_size = model_args.image_size
+    if hasattr(model_args, "image_size"):
+        args.image_size = model_args.image_size
     if args.max_frames is None:
         args.max_frames = model_args.max_frames
     if args.max_latent_frames is None:

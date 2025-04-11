@@ -49,9 +49,12 @@ if __name__ == "__main__":
             model_args = argparse.Namespace(**json.load(f))
 
         if not hasattr(model_args, "model_type"):  # HACK: To get it to work with models trained before this was introduced
-            model_args.model_type = "vdt"
-            model_args.input_size = model_args.image_size
-            model_args.patch_size = 2
+            is_vdt = "model_name" in model_args
+            model_args.model_type = "vdt" if is_vdt else "unet"
+            if is_vdt and not hasattr(model_args, "input_size"):
+                model_args.input_size = model_args.image_size
+            if is_vdt and not hasattr(model_args, "patch_size"):
+                model_args.patch_size = 2
         # Load the dataset (to get observations from)
         eval_dataset_args = dict(dataset_name=model_args.dataset, T=T, spacing_kwargs=dict(n_data=args.num_sampled_videos),
                                  train=eval_on_train, eval_dataset_config=eval_dataset_config,

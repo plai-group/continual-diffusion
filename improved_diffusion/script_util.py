@@ -3,7 +3,7 @@ import argparse
 from . import gaussian_diffusion as gd
 from .respace import SpacedDiffusion, space_timesteps
 from .unet import UNetVideoModel
-from .vdt import VDT_S_2, VDT_M_2, VDT_L_2
+from .vdt import VDT_S_2, VDT_SM_2, VDT_M_2, VDT_L_2
 
 
 def model_and_diffusion_defaults(model_type='unet'):
@@ -242,6 +242,8 @@ def create_vdt_model(
 ):
     if model_name == 'VDT-S':
         return VDT_S_2(**kwargs)
+    elif model_name == 'VDT-SM':
+        return VDT_SM_2(**kwargs)
     elif model_name == 'VDT-M':
         return VDT_M_2(**kwargs)
     elif model_name == 'VDT-L':

@@ -139,6 +139,7 @@ def main():
         enc_dec_chunk_size=args.enc_dec_chunk_size,
         steps_per_experience=args.steps_per_experience,
         masking_mode=args.masking_mode,
+        clip_grad=args.clip_grad,
         args=args,
     ).run_loop()
 
@@ -174,6 +175,7 @@ def create_argparser():
         masking_mode="autoregressive",
         save_replay_mem=False,
         attentive_er=False,  # If true, the model attends to replay frames
+        clip_grad=None,
         data_seed=0,
         upper_frame_range=None,
     )

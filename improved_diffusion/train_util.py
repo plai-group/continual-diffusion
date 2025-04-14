@@ -60,6 +60,7 @@ class TrainLoop:
         steps_per_experience,
         masking_mode,
         args,
+        clip_grad=None,
     ):
         self.args = args
         self.model = model
@@ -87,6 +88,7 @@ class TrainLoop:
         self.enc_dec_chunk_size = enc_dec_chunk_size
         self.vis_batch = None
         self.max_frames = max_frames
+        self.gradient_clip_norm = float(clip_grad) if clip_grad is not None else None
 
         self.step = 0
         self.global_batch = self.batch_size * dist.get_world_size()
@@ -361,7 +363,7 @@ class TrainLoop:
         logger.logkv("timing/step_time", time() - t0)
     
     def forward_backward(self, batch1, batch2, absolute_index_map=None):
-        zero_grad(self.model_params)
+        zero_grad(self.master_params)
 
         batch_size = batch1.shape[0]
         self.microbatch = batch_size  # HACK: Disable microbatches
@@ -444,6 +446,8 @@ class TrainLoop:
     def optimize_normal(self):
         self._log_grad_norm()
         self._anneal_lr()
+        if self.gradient_clip_norm is not None:
+            th.nn.utils.clip_grad_norm_(self.master_params, self.gradient_clip_norm)
         self.opt.step()
         for rate, params in zip(self.ema_rate, self.ema_params):
             update_ema(params, self.master_params, rate=rate)

@@ -26,6 +26,7 @@ from .fp16_util import (
 from .nn import update_ema
 from .resample import LossAwareSampler, UniformSampler
 from .rng_util import rng_decorator, RNG
+from .orthogonal_optimizers import OrthogonalAdam
 
 # For ImageNet experiments, this was a good default value.
 # We found that the lg_loss_scale quickly climbed to
@@ -61,6 +62,7 @@ class TrainLoop:
         masking_mode,
         args,
         clip_grad=None,
+        optimizer='adam',
     ):
         self.args = args
         self.model = model
@@ -103,7 +105,12 @@ class TrainLoop:
         if self.use_fp16:
             self._setup_fp16()
 
-        self.opt = AdamW(self.master_params, lr=self.lr, weight_decay=self.weight_decay)
+        if optimizer == "adam":
+            self.opt = AdamW(self.master_params, lr=self.lr, weight_decay=self.weight_decay)
+        elif optimizer == "orthogonal_adam":
+            self.opt = OrthogonalAdam(self.master_params, lr=self.lr, weight_decay=self.weight_decay)
+        else:
+            raise ValueError(f"Unknown optimizer: {optimizer}")
 
         if dist.get_rank() == 0:
             Path(get_blob_logdir(self.args.resume_id)).mkdir(parents=True, exist_ok=True)

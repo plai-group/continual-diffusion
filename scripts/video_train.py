@@ -139,6 +139,7 @@ def main():
         steps_per_experience=args.steps_per_experience,
         masking_mode=args.masking_mode,
         clip_grad=args.clip_grad,
+        optimizer=args.optimizer,
         args=args,
     ).run_loop()
 
@@ -175,6 +176,7 @@ def create_argparser():
         save_replay_mem=False,
         attentive_er=False,  # If true, the model attends to replay frames
         clip_grad=None,
+        optimizer="adam",
         data_seed=0,
         upper_frame_range=None,
     )

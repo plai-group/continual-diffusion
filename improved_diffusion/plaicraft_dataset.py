@@ -140,6 +140,9 @@ class ContinuousPlaicraftDataset(Dataset):
         """
         Retrieve a data item by index.
         """
+        if idx >= len(self):
+            raise IndexError(f"Index {idx} out of range.")
+
         start_frame = self._get_start_frame_index(idx)
         end_frame = start_frame + self.window_length
 

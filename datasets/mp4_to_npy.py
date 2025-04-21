@@ -25,6 +25,14 @@ ffmpeg -ss 0.02 -to 71970.02 -i windows_maze_20h_r64.mp4 windows_maze_20h_r64_fi
 ffmpeg -i windows_maze_20h_r64_fps30.mp4 -filter:v "fps=20" windows_maze_20h_r64_fps20.mp4
 ffmpeg -ss 00:00:00 -to 18:00:00 -i windows_maze_20h_r64_fps20.mp4 -c copy windows_maze_20h_r64_fps20_train.mp4
 ffmpeg -ss 18:00:00 -to 19:59:30 -i windows_maze_20h_r64_fps20.mp4 -c copy windows_maze_20h_r64_fps20_test.mp4
+
+
+
+Car data preprocessing
+yt-dlp https://www.youtube.com/watch\?v\=-iSewsdMxkg\&ab_channel\=%E4%B8%AD%E5%9B%BD%E8%A1%97%E6%99%AFChinaStreetView -S res:720
+ffmpeg -i "1674.8 kilometers of long-distance travel across half of China - driving from Chongqing to Shanghai [-iSewsdMxkg].webm" -vf "crop=720:720:(iw-720)/2:(ih-720)/2,scale=512:512,fps=20" LifelongDrive.mp4
+ffmpeg -i LifelongDrive.mp4 -vf "fps=20" -frames:v 1000000 -c:v libx264 -c:a aac LifelongDriveTrain.mp4
+ffmpeg -i LifelongDrive.mp4 -vf "select='between(n\,1000000\,1099999)',setpts=N/FRAME_RATE/TB" -frames:v 100000 -c:v libx264 -an LifelongDriveTest.mp4
 """
 
 def video_to_npy(video_path, save_dir, resolution=(64, 64), chunk_size=10000):

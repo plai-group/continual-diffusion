@@ -6,6 +6,7 @@ datasets/continual_minecraft
 datasets/windows_maze*
 datasets/plaicraft*
 datasets/car
+datasets/drive*
 datasets/kcam_selected
 
 sample_slurm_scripts

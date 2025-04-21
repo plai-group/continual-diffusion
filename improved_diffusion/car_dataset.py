@@ -11,7 +11,6 @@ import tqdm
 
 class ContinuousCarDataset(Dataset):
     LATENT_FPS = 20
-    LATENTS_PER_BATCH = 100
     USE_FP16 = True
 
     def __init__(self, dataset_path, window_length=100, output_fps=20, frame_range=(0, None)):
@@ -180,17 +179,66 @@ class SpacedCarDataset(ContinuousCarDataset):
               f"Spacing: {self.spacing}, # Data: {self.n_data}")
 
 
+class ContinuousDriveDataset(ContinuousCarDataset):
+    def _initialize_file_index_mapping(self):
+        pt_files = self.dataset_path.rglob('encoded_video/batch_*.pt')
+        pt_files = sorted(pt_files)
+        if not pt_files:
+            raise ValueError(f"No .pt files found in {self.dataset_path}")
+
+        self.pt_files = pt_files
+        self.total_frames = len(self.pt_files) * 500
+        self.pt_file_boundaries = [(i*500, (i+1)*500) for i in range(len(self.pt_files))]
+        self.frame_range = self.original_frame_range
+        if self.original_frame_range[1] is None or self.original_frame_range[1] > self.total_frames:
+            self.frame_range = (self.original_frame_range[0], self.total_frames)
+        print(f"Original Frame Range ({self.original_frame_range}) => Updated Frame Range ({self.frame_range})")
+
+
+class ChunkedDriveDataset(ContinuousDriveDataset):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+
+    def _get_start_frame_index(self, idx):
+        return self.frame_range[0] + idx * self.window_length
+
+    def __len__(self):
+        """Return the total number of windows across all sessions."""
+        return (self.frame_range[1]-self.frame_range[0]) // self.window_length
+
+
+class SpacedDriveDataset(ContinuousDriveDataset):
+    def __init__(self, n_data: int, *args, **kwargs):
+        self.n_data = n_data
+        super().__init__(*args, **kwargs)
+
+    def _get_start_frame_index(self, idx):
+        return self.frame_range[0] + idx * self.spacing
+
+    def __len__(self):
+        """Return the total number of windows across all sessions."""
+        return self.n_data
+
+    def _initialize_file_index_mapping(self):
+        super()._initialize_file_index_mapping()
+        self.spacing = (self.frame_range[1]-self.frame_range[0]) // self.n_data
+        assert self.spacing >= self.window_length,\
+               f"Spacing to window length ratio is too small: {self.spacing} vs {self.window_length}"
+        self.spacing = self.spacing - self.spacing % self.window_length  # spacing is divisible by window_length
+        print(f"Total Frames: {self.total_frames}, Selected Frames: {self.frame_range[1]-self.frame_range[0]}, "+\
+              f"Spacing: {self.spacing}, # Data: {self.n_data}")
+
+
 if __name__ == "__main__":
-    # dataset_path = "/ubc/cs/research/plai-scratch/jason/continual-diffusion/datasets/kcam_selected/train/20140912_115117_694_cropped/encoded_video"
-    # output_video_folder = "/ubc/cs/research/plai-scratch/jason/continual-diffusion/datasets/kcam_selected/train/20140912_115117_694_cropped/decoded_video"
-    dataset_path = "/ubc/cs/research/plai-scratch/jason/continual-diffusion/datasets/car"
-    output_video_folder = "/ubc/cs/research/plai-scratch/jason/continual-diffusion/datasets/car"
+    dataset_path = "/ubc/cs/research/plai-scratch/jason/continual-diffusion/datasets/drive"
+    output_video_folder = "/ubc/cs/research/plai-scratch/jason/continual-diffusion/datasets/drive"
     use_fp16 = True
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     FINAL_FRAME_SIZE = (512, 512)
 
     # dataset = ChunkedCarDataset(dataset_path, window_length=1250)
-    dataset = SpacedCarDataset(16, dataset_path, window_length=1250)
+    # dataset = SpacedCarDataset(16, dataset_path, window_length=1250)
+    dataset = ChunkedDriveDataset(dataset_path, window_length=100)
     dataset.set_test()
     dataloader = DataLoader(dataset, batch_size=1, num_workers=2) #, collate_fn=ContinuousCarDataset.collate_fn)
 

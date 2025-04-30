@@ -39,13 +39,16 @@ class OrthogonalAdam(Optimizer):
         # Check if this is the first step - if not, increment the current step
         if not self.state["step"]:
             self.state["step"] = 1
+            self.state["raw_first_moment_estimate"] = []
             self.state["first_moment_estimate"] = []
             self.state["second_moment_estimate"] = []
             # Use Adam optimization method - first, define all the required arguments for the parameter if we are on the first step
             for i, param_group in enumerate(self.param_groups):
+                self.state["raw_first_moment_estimate"].append([])
                 self.state["first_moment_estimate"].append([])
                 self.state["second_moment_estimate"].append([])
                 for param in param_group["params"]:
+                    self.state["raw_first_moment_estimate"][i].append(torch.zeros_like(param.data))
                     self.state["first_moment_estimate"][i].append(torch.zeros_like(param.data))
                     self.state["second_moment_estimate"][i].append(torch.zeros_like(param.data))
         else:
@@ -60,10 +63,13 @@ class OrthogonalAdam(Optimizer):
                     continue
                 gradients = param.grad.data
                 # Declare variables from state - inplace methods modify state variable directly
+                raw_first_moment_estimate = self.state["raw_first_moment_estimate"][i][j]
                 first_moment_estimate = self.state["first_moment_estimate"][i][j]
                 second_moment_estimate = self.state["second_moment_estimate"][i][j]
                 # Project out previous timestep gradient direction
-                proj = (gradients*first_moment_estimate).sum()/(first_moment_estimate.pow(2).sum() + param_group["eps"]) * first_moment_estimate
+                proj = (gradients*raw_first_moment_estimate).sum()/(raw_first_moment_estimate.pow(2).sum() + param_group["eps"]) * raw_first_moment_estimate
+                # Update the raw first moment estimate (NOTE: Use the un-projected gradient for this update)
+                raw_first_moment_estimate.mul_(param_group["betas"][0]).add_(gradients * (1.0 - param_group["betas"][0]))
                 gradients.add_(-proj)
                 # Compute the first moment estimate - B_1 * m_t + (1-B_1) * grad (uncentered)
                 first_moment_estimate.mul_(param_group["betas"][0]).add_(gradients * (1.0 - param_group["betas"][0]))

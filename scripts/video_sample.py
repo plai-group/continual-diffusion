@@ -91,10 +91,11 @@ def sample_video(args, model, diffusion, batch, just_get_indices=False):
                     S_churn=float(S_churn), S_max=float(S_max),
                     S_min=float(S_min), S_noise=float(S_noise),
                     sigma_max=float(sigma_max), sigma_min=float(sigma_min),
-                    rho=int(rho), num_steps=int(num_steps)
+                    rho=int(rho), num_steps=int(num_steps),
+                    visualize_reverse_diffusion=args.visualize_reverse_diffusion,
                 )
             print('sample_func', sample_func)
-            local_samples, _ = sample_func(
+            local_samples, history = sample_func(
                 model, x0.shape, clip_denoised=args.clip_denoised,
                 model_kwargs=dict(frame_indices=frame_indices,
                                   x0=x0,
@@ -105,6 +106,14 @@ def sample_video(args, model, diffusion, batch, just_get_indices=False):
                 decode_chunk_size=args.decode_chunk_size,
                 **sampler_kwargs,
             )
+            if args.visualize_reverse_diffusion:
+                os.makedirs(args.eval_dir / "history", exist_ok=True)
+                for i, item in enumerate(history):
+                    timestep, item = item
+                    drange = [-1, 1]
+                    item = (item[0].cpu().clamp(*drange).numpy() - drange[0]) / (drange[1] - drange[0]) * 255
+                    item = item.astype(np.uint8)
+                    th.save(item, args.eval_dir / "history" / f"timestep_{timestep}.pt")
 
             if isinstance(local_samples, tuple):
                 # Edge case: Encoded sample
@@ -141,6 +150,7 @@ def main(args, model, diffusion, dataset, samples_prefix):
         not_done = not_done[args.batch_size:]
         output_filenames = [args.eval_dir / samples_prefix / f"sample_{i:04d}-{args.sample_idx}.npy" for i in batch_indices]
         todo = [not p.exists() for p in output_filenames]
+        # todo = [True for p in output_filenames]
         if not any(todo):
             print(f"Nothing to do for the batches {min(batch_indices)} - {max(batch_indices)}, sample #{args.sample_idx}.")
             continue
@@ -238,6 +248,7 @@ def create_sampling_parser():
     parser.add_argument("--max_latent_frames", type=int, default=None, help="Number of frames to sample in each stage. Defaults to max_frames/2.")
     parser.add_argument("--sampler", type=str, default="heun-80-inf-0-1-1000-0.002-7-50")
     parser.add_argument("--use_ddim", type=str2bool, default=False)
+    parser.add_argument("--visualize_reverse_diffusion", type=str2bool, default=False)
     parser.add_argument("--eval_on_train", type=str2bool, default=False)
     parser.add_argument("--timestep_respacing", type=str, default="")
     parser.add_argument("--clip_denoised", type=str2bool, default=True, help="If true, diffusion model generates data between [-1,1].")

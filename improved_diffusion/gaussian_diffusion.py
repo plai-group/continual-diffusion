@@ -768,6 +768,7 @@ class GaussianDiffusion:
         rho=7,
         num_steps=50,
         decode_chunk_size=10,
+        visualize_reverse_diffusion=False,
     ):
         del return_attn_weights, progress, latent_mask
 
@@ -790,9 +791,8 @@ class GaussianDiffusion:
         sigmas_snapped = [self.timestep2sigma(t) for t in timesteps] + [0]  # Add zero because we need a value for final s_next
 
         def get_denoised_estimate(xt, t):
-            # NOTE: Accounting for DDPM trained model's VP forward pass by dividing by s(t) (refer to the EDM paper)
+            # NOTE: Translate between VE and VP reverse diffusion by scaling the noise level (refer to the EDM paper)
             scaled_x = xt * self.sqrt_alphas_cumprod[t]
-            # print(f"Standard Deviation (before/after): {xt.std():.4f}/{scaled_x.std():.4f}")
             t = th.tensor([t] * shape[0], device=device)
             out = self.p_mean_variance(
                 model, scaled_x.to(th.float32), th.tensor(t).to(th.int32).view(-1).to(device),
@@ -814,7 +814,7 @@ class GaussianDiffusion:
 
         to_float64 = lambda x: th.tensor(x, dtype=th.float64)
         x_next = to_float64(x_next)
-
+        history = []
         for i, (s_cur, s_next) in enumerate(zip(sigmas_snapped[:-1], sigmas_snapped[1:])):
             x_cur = x_next
             t_cur = self.sigma2timestep(s_cur)
@@ -835,6 +835,13 @@ class GaussianDiffusion:
             d_cur = (x_hat - denoised) / s_hat
             x_next = x_hat + (s_next - s_hat) * d_cur
 
+            # x_samp = x_next[:,10:]
+            # print(f"timestep / mean / std / min / max: {s_cur:.4f} / {x_samp.mean():.4f} / {x_samp.std():.4f} / {x_samp.min():.4f} / {x_samp.max():.4f}")
+            if visualize_reverse_diffusion:
+                if i % 10 == 0 or i == len(sigmas_snapped)-2:
+                    decoded = self.decode(denoised, chunk_size=decode_chunk_size) if return_decoded else denoised
+                    history.append((t_hat, decoded))
+
             # Apply 2nd order correction.
             if s_next > 0:
                 t_next = self.sigma2timestep(s_next)
@@ -844,7 +851,7 @@ class GaussianDiffusion:
                 x_next = x_hat + (s_next - s_hat) * (0.5 * d_cur + 0.5 * d_prime)
 
         return ((x_next, self.decode(x_next, chunk_size=decode_chunk_size))
-                if return_decoded else x_next), None
+                if return_decoded else x_next), history
 
 
     def _vb_terms_bpd(

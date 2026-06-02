@@ -7,6 +7,7 @@ datasets/windows_maze*
 datasets/plaicraft*
 datasets/car
 datasets/drive*
+datasets/egolife*
 datasets/kcam_selected
 
 sample_slurm_scripts

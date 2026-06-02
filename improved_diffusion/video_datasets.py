@@ -17,6 +17,7 @@ from .test_util import Protect
 from .plaicraft_dataset import ContinuousPlaicraftDataset, SpacedPlaicraftDataset, ChunkedPlaicraftDataset
 from .plaicraft_custom_dataset import PlaicraftCustomDataset
 from .car_dataset import ContinuousCarDataset, ChunkedCarDataset, SpacedCarDataset, ContinuousDriveDataset, ChunkedDriveDataset, SpacedDriveDataset
+from .egolife_dataset import ContinuousEgoLifeDataset, SpacedEgoLifeDataset, ChunkedEgoLifeDataset
 
 
 
@@ -33,6 +34,8 @@ video_data_paths_dict = {
     "streaming_car":       "datasets/car",
     "drive":               "datasets/drive",
     "streaming_drive":     "datasets/drive",
+    "egolife":             "datasets/egolife",
+    "streaming_egolife":   "datasets/egolife",
 }
 
 default_T_dict = {
@@ -48,6 +51,8 @@ default_T_dict = {
     "streaming_car":       20,
     "drive":               20,
     "streaming_drive":     20,
+    "egolife":             20,
+    "streaming_egolife":   20,
 }
 
 default_image_size_dict = {
@@ -63,6 +68,8 @@ default_image_size_dict = {
     "streaming_car":       64,
     "drive":               64,
     "streaming_drive":     64,
+    "egolife":             64,
+    "streaming_egolife":   64,
 }
 
 default_full_image_size_dict = {
@@ -78,6 +85,8 @@ default_full_image_size_dict = {
     "streaming_car":       (64, 64),
     "drive":               (64, 64),
     "streaming_drive":     (64, 64),
+    "egolife":             (64, 64),
+    "streaming_egolife":   (64, 64),
 }
 
 eval_dataset_configs = {"default": "default", "continuous": "continuous", "chunked": "chunked"}
@@ -117,6 +126,8 @@ def load_data(dataset_name, batch_size, T=None, deterministic=False, num_workers
         dataset = ContinuousCarDataset(data_path, window_length=T, frame_range=frame_range)
     elif "drive" in dataset_name:
         dataset = ContinuousDriveDataset(data_path, window_length=T, frame_range=frame_range)
+    elif "egolife" in dataset_name:
+        dataset = ContinuousEgoLifeDataset(data_path, window_length=T, frame_range=frame_range)
     else:
         raise Exception("no dataset", dataset_name)
 
@@ -197,6 +208,12 @@ def get_eval_dataset(dataset_name, T=None, seed=0, train=False, eval_dataset_con
             dataset = ContinuousDriveDataset(**shared_args)
         else:
             dataset = SpacedDriveDataset(**spacing_kwargs, **shared_args)
+    elif "egolife" in dataset_name:
+        shared_args = dict(dataset_path=data_path, window_length=T, frame_range=frame_range)
+        if eval_dataset_config == eval_dataset_configs["continuous"]:
+            dataset = ContinuousEgoLifeDataset(**shared_args)
+        else:
+            dataset = SpacedEgoLifeDataset(**spacing_kwargs, **shared_args)
     else:
         raise Exception("no dataset", dataset_name)
     if not train:

@@ -9,7 +9,7 @@ datasets/car
 datasets/drive*
 datasets/egolife*
 datasets/kcam_selected
-
+logs*
 sample_slurm_scripts
 wandb
 checkpoints

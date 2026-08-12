@@ -185,9 +185,12 @@ def run_debug_validation(model, diffusion, valset, device, out_dir,
         latent_mask = th.zeros_like(obs_mask)
         latent_mask[:, n_obs:] = 1.0
 
+        # Match the schedule's true max sigma; see the note in train_util.log_samples.
+        sched_sigma_max = float(diffusion.timestep2sigma(diffusion.num_timesteps - 1))
         samples, _ = diffusion.heun_sample(
             model,
             x0.shape,
+            sigma_max=sched_sigma_max,
             clip_denoised=True,
             model_kwargs={
                 "frame_indices": None,

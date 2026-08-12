@@ -185,11 +185,18 @@ def render_overlay(gt_frames, pred_frames, session_db_path, start_frame_idx,
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
-    fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-    w, h = DECODE_FINAL_FRAME_SIZE
-    full_h = 2 * (DECODE_TOP_BAR_HEIGHT + h)
-    writer = cv2.VideoWriter(str(out_path), fourcc, DECODE_VIDEO_FPS, (w, full_h))
+    # Encode H.264 via imageio/ffmpeg, NOT cv2.VideoWriter. cv2's "mp4v" is
+    # MPEG-4 Part 2, which browsers cannot decode in an HTML5 <video> element --
+    # so the file uploads to wandb fine and then will not play. cv2's "avc1" is
+    # not an option: this container's OpenCV has no H.264 encoder built in
+    # ("Could not find encoder for codec_id=27").
+    import imageio
 
+    writer = imageio.get_writer(
+        str(out_path), fps=DECODE_VIDEO_FPS, codec="libx264",
+        macro_block_size=1,  # frame is 1280x1736; don't let ffmpeg resize it
+        ffmpeg_params=["-pix_fmt", "yuv420p"],  # required for browser playback
+    )
     for t in range(T):
         border = t < n_observed
         gt_content = _to_uint8_frame(gt_frames[t])
@@ -197,8 +204,7 @@ def render_overlay(gt_frames, pred_frames, session_db_path, start_frame_idx,
         gt_overlay = _overlay_frame(gt_content, actions[t], border=True)
         pred_overlay = _overlay_frame(pred_content, actions[t], border=border)
         combined = cv2.vconcat([gt_overlay, pred_overlay])
-        # cv2.VideoWriter expects BGR
-        writer.write(cv2.cvtColor(combined, cv2.COLOR_RGB2BGR))
+        writer.append_data(combined)  # imageio expects RGB, which is what we have
 
-    writer.release()
+    writer.close()
     return out_path

@@ -559,9 +559,15 @@ class TrainLoop:
                 self.vis_batch, None, gather=True,
                  set_masks={'obs': obs_mask, 'latent': latent_mask}
             )
+            # Cap sigma_max at what the VP schedule actually reaches. The default
+            # (1000) sits far above it, so those steps all snap to t=999 and get
+            # deduped -- silently spending ~a third of the sampling budget on
+            # noise levels training never saw. See gaussian_diffusion.heun_sample.
+            sched_sigma_max = float(self.diffusion.timestep2sigma(self.diffusion.num_timesteps - 1))
             samples, _ = self.diffusion.heun_sample(
                 self.model,
                 batch.shape,
+                sigma_max=sched_sigma_max,
                 clip_denoised=True,
                 model_kwargs={
                     'frame_indices': frame_indices.to(dist_util.dev()),

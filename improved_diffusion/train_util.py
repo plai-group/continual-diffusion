@@ -63,7 +63,10 @@ class TrainLoop:
         args,
         clip_grad=None,
         optimizer='adam',
+        debug_validation=None,
     ):
+        # (valset, out_dir) for the issue-58 plaicraft-debug validation set, or None.
+        self.debug_validation = debug_validation
         self.args = args
         self.model = model
         self.diffusion = diffusion
@@ -575,6 +578,21 @@ class TrainLoop:
             samples = ((samples + 1) * 127.5).clamp(0, 255).to(th.uint8).cpu().numpy()
             for i, video in enumerate(samples):
                 logger.logkv(f'video-{i}', wandb.Video(video), distributed=False)
+
+            # Issue-58 plaicraft-debug validation: same EMA weights, same eval mode,
+            # same 10/10 split the model was trained on. Never let it kill a run.
+            if self.debug_validation is not None:
+                from .debug_validation import run_debug_validation
+                valset, val_out_dir, per_task = self.debug_validation
+                try:
+                    run_debug_validation(
+                        self.model, self.diffusion, valset, dist_util.dev(),
+                        out_dir=val_out_dir, step=self.step,
+                        per_task_scalars=per_task,
+                    )
+                except Exception as e:
+                    print(f"[debug_validation] skipped at step {self.step}: {e!r}")
+
             logger.logkv("timing/sampling_time", time() - sample_start, distributed=False)
 
             # restore model to original state

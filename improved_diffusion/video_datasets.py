@@ -18,6 +18,7 @@ from .plaicraft_dataset import ContinuousPlaicraftDataset, SpacedPlaicraftDatase
 from .plaicraft_custom_dataset import PlaicraftCustomDataset
 from .car_dataset import ContinuousCarDataset, ChunkedCarDataset, SpacedCarDataset, ContinuousDriveDataset, ChunkedDriveDataset, SpacedDriveDataset
 from .egolife_dataset import ContinuousEgoLifeDataset, SpacedEgoLifeDataset, ChunkedEgoLifeDataset
+from .debug_dataset import ContinuousDebugDataset, ChunkedDebugDataset, SpacedDebugDataset
 
 
 
@@ -36,6 +37,11 @@ video_data_paths_dict = {
     "streaming_drive":     "datasets/drive",
     "egolife":             "datasets/egolife",
     "streaming_egolife":   "datasets/egolife",
+    # Overridable so sbatch can point at the /dev/shm copy of the corpus.
+    "debug_toy":           os.environ.get(
+        "DEBUG_TOY_ROOT",
+        "/ubc/cs/research/plai-scratch/ctardy/projects/plaicraft-data-preprocessing/processed/vdt_corpus/debug_24x40",
+    ),
 }
 
 default_T_dict = {
@@ -53,6 +59,7 @@ default_T_dict = {
     "streaming_drive":     20,
     "egolife":             20,
     "streaming_egolife":   20,
+    "debug_toy":           20,
 }
 
 default_image_size_dict = {
@@ -70,6 +77,7 @@ default_image_size_dict = {
     "streaming_drive":     64,
     "egolife":             64,
     "streaming_egolife":   64,
+    "debug_toy":           40,
 }
 
 default_full_image_size_dict = {
@@ -87,6 +95,7 @@ default_full_image_size_dict = {
     "streaming_drive":     (64, 64),
     "egolife":             (64, 64),
     "streaming_egolife":   (64, 64),
+    "debug_toy":           (24, 40),
 }
 
 eval_dataset_configs = {"default": "default", "continuous": "continuous", "chunked": "chunked"}
@@ -128,6 +137,8 @@ def load_data(dataset_name, batch_size, T=None, deterministic=False, num_workers
         dataset = ContinuousDriveDataset(data_path, window_length=T, frame_range=frame_range)
     elif "egolife" in dataset_name:
         dataset = ContinuousEgoLifeDataset(data_path, window_length=T, frame_range=frame_range)
+    elif "debug_toy" in dataset_name:
+        dataset = ContinuousDebugDataset(data_path, window_length=T, frame_range=frame_range)
     else:
         raise Exception("no dataset", dataset_name)
 
@@ -214,6 +225,14 @@ def get_eval_dataset(dataset_name, T=None, seed=0, train=False, eval_dataset_con
             dataset = ContinuousEgoLifeDataset(**shared_args)
         else:
             dataset = SpacedEgoLifeDataset(**spacing_kwargs, **shared_args)
+    elif "debug_toy" in dataset_name:
+        shared_args = dict(dataset_path=data_path, window_length=T, frame_range=frame_range)
+        if eval_dataset_config == eval_dataset_configs["continuous"]:
+            dataset = ContinuousDebugDataset(**shared_args)
+        elif eval_dataset_config == eval_dataset_configs["chunked"]:
+            dataset = ChunkedDebugDataset(**shared_args)
+        else:
+            dataset = SpacedDebugDataset(**spacing_kwargs, **shared_args)
     else:
         raise Exception("no dataset", dataset_name)
     if not train:

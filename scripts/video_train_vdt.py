@@ -115,6 +115,18 @@ def main():
         frame_range=(0, args.upper_frame_range),
     )
 
+    # Issue-58: fixed prompt set from the plaicraft-debug validation recording.
+    debug_validation = None
+    if args.debug_validation_db:
+        from improved_diffusion.debug_validation import DebugValidationSet
+        valset = DebugValidationSet(
+            args.debug_validation_db, args.debug_validation_root,
+            T=args.T, n_observed=args.T // 2,
+        )
+        out_dir = args.debug_validation_out or os.path.join("results", "debug_validation")
+        print(f"debug validation: {len(valset.rows)} rows -> {out_dir}")
+        debug_validation = (valset, out_dir, args.debug_validation_per_task)
+
     print("training...")
     TrainLoop(
         model=model,
@@ -141,6 +153,7 @@ def main():
         masking_mode=args.masking_mode,
         clip_grad=args.clip_grad,
         optimizer=args.optimizer,
+        debug_validation=debug_validation,
         args=args,
     ).run_loop()
 
@@ -180,6 +193,11 @@ def create_argparser():
         optimizer="adam",
         data_seed=0,
         upper_frame_range=None,
+        # Issue-58 plaicraft-debug validation set (empty db path disables it).
+        debug_validation_db="",
+        debug_validation_root="",
+        debug_validation_out="",
+        debug_validation_per_task=False,
     )
     defaults.update(model_and_diffusion_defaults(model_type='vdt'))
     parser = argparse.ArgumentParser()

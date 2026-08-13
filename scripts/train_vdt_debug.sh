@@ -43,7 +43,16 @@ MPILIB=/ubc/cs/research/plai-scratch/ctardy/envs/mpiroot/lib
 # this file is a real git paper trail. It is still not the authoritative record
 # -- that remains the wandb config logged at run start -- but the two should
 # always agree. Change a run by editing below, never via the sbatch CLI.
-RUN_NAME="58 - vdt_sm_24x40"
+RUN_NAME="58 - vdt_sm_24x40_resume100k"
+
+# Continue the original action-unconditional run's weights in a NEW wandb run,
+# so the corrected validation set is applied without discarding 100k steps.
+# NOT --resume_id: that would resume wandb run o6me38vp itself and write
+# checkpoints back into its directory. --resume_checkpoint takes the weights
+# only; step continues at 100001 and checkpoints go to checkpoints/<new id>/.
+# 100000 is the newest checkpoint that exists (save_interval=20000); the run
+# had reached ~115k, so ~15k steps are not recoverable.
+RESUME_CKPT=$REPO/checkpoints/o6me38vp/model100000.pt
 
 # -- data
 DATASET=debug_toy          # registered in improved_diffusion/video_datasets.py;
@@ -134,6 +143,7 @@ singularity exec --nv \
     --sample_interval "$SAMPLE_INTERVAL" \
     --save_interval "$SAVE_INTERVAL" \
     --num_workers "$NUM_WORKERS" \
+    --resume_checkpoint "$RESUME_CKPT" \
     --debug_validation_db "$VAL_DB" \
     --debug_validation_root "$VAL_ROOT" \
     --debug_validation_out "$VAL_OUT" \

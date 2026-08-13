@@ -118,7 +118,10 @@ class TrainLoop:
         if dist.get_rank() == 0:
             Path(get_blob_logdir(self.args.resume_id)).mkdir(parents=True, exist_ok=True)
 
-        if self.args.resume_id != '':
+        # resume_id resumes the *wandb run* as well as the weights. To carry
+        # weights into a NEW wandb run, pass --resume_checkpoint instead; the
+        # EMA/optimizer restore below must fire for that path too.
+        if self.args.resume_id != '' or self.resume_checkpoint:
             self._load_optimizer_state()
             # Model was resumed, either due to a restart or a checkpoint
             # being specified at the command line.
@@ -171,7 +174,8 @@ class TrainLoop:
         ema_params = copy.deepcopy(self.master_params)
 
         main_checkpoint = find_resume_checkpoint(self.args) or self.resume_checkpoint
-        ema_checkpoint = find_ema_checkpoint(main_checkpoint, self.step, rate)
+        # -1 for the same reason as in _load_optimizer_state.
+        ema_checkpoint = find_ema_checkpoint(main_checkpoint, self.step - 1, rate)
         if ema_checkpoint:
             print(f"loading EMA from checkpoint: {ema_checkpoint}...")
             state_dict = dist_util.load_state_dict(
@@ -184,7 +188,11 @@ class TrainLoop:
     def _load_optimizer_state(self):
         main_checkpoint = find_resume_checkpoint(self.args) or self.resume_checkpoint
         opt_checkpoint = bf.join(
-            bf.dirname(main_checkpoint), f"opt{self.step:06}.pt"
+            # self.step was already advanced to (saved step + 1) in
+            # _load_and_sync_parameters, but the file is named for the saved
+            # step. Without the -1 this silently finds nothing and resumes
+            # with a fresh optimizer.
+            bf.dirname(main_checkpoint), f"opt{self.step - 1:06d}.pt"
         )
         if bf.exists(opt_checkpoint):
             print(f"loading optimizer state from checkpoint: {opt_checkpoint}")

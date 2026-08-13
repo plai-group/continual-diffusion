@@ -146,11 +146,17 @@ class ActionEmbedder(nn.Module):
         elif train and self.dropout_prob > 0:
             drop_ids = torch.rand(B, device=actions.device) < self.dropout_prob
         else:
-            drop_ids = None
+            # All-False rather than None so null_embedding STAYS IN THE GRAPH.
+            # Skipping the torch.where when dropout_prob==0 leaves it unused, and
+            # DDP rejects a parameter that never contributes to the loss
+            # ("Expected to have finished reduction in the prior iteration").
+            # torch.where keeps it connected at zero gradient, so it simply stays
+            # at its init value -- which is what an unused null embedding should
+            # do. Cheaper than find_unused_parameters=True on every step.
+            drop_ids = torch.zeros(B, dtype=torch.bool, device=actions.device)
 
-        if drop_ids is not None:
-            null = self.null_embedding.to(embeddings.dtype).expand_as(embeddings)
-            embeddings = torch.where(drop_ids.view(B, 1, 1), null, embeddings)
+        null = self.null_embedding.to(embeddings.dtype).expand_as(embeddings)
+        embeddings = torch.where(drop_ids.view(B, 1, 1), null, embeddings)
 
         return embeddings
 

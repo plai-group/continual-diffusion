@@ -18,11 +18,21 @@ import os
 import sqlite3
 from pathlib import Path
 
+import cv2
 import numpy as np
 import torch as th
+import torch.nn as nn
 
+from . import debug_actions
 from .logger import logger
-from .decode_debug import render_overlay
+from .rng_util import RNG
+from .decode_debug import (
+    render_overlay,
+    get_frame_actions,
+    _to_uint8_frame,
+    _overlay_frame,
+    DECODE_VIDEO_FPS,
+)
 
 VIDEO_FPS = 10
 MS_PER_FRAME = 1000 // VIDEO_FPS
@@ -103,6 +113,20 @@ class DebugValidationSet:
     def load_all(self):
         return th.stack([self.load_window(r) for r in self.rows])
 
+    def load_action_window(self, row):
+        """(T, 10) float32: same window as load_window, causally-shifted actions."""
+        arr = debug_actions.load_or_build(row["session_dir"])
+        ws, we = row["window_start"], row["window_start"] + self.T
+        if we > arr.shape[0]:
+            raise ValueError(
+                f"row {row['num']}: action array has {arr.shape[0]} frames, "
+                f"need window {ws}..{we}"
+            )
+        return th.from_numpy(np.asarray(arr[ws:we], dtype=np.float32))
+
+    def load_all_actions(self):
+        return th.stack([self.load_action_window(r) for r in self.rows])
+
 
 def _to01(x):
     return ((x + 1.0) / 2.0).clamp(0.0, 1.0)
@@ -158,10 +182,87 @@ def _get_metrics(device):
     return _METRICS
 
 
+class _CFGWrapper(nn.Module):
+    """Wraps an action-conditioned VDT model to sample with classifier-free
+    guidance: runs the model twice (conditional + null-action unconditional
+    via ``force_action_drop``) and extrapolates. NOT vdt.py:forward_with_cfg
+    (dead DiT-era code, incompatible signature) -- guidance is applied here,
+    at the sampling site.
+    """
+
+    def __init__(self, model, w):
+        super().__init__()
+        self.model = model
+        self.w = w
+
+    def forward(self, x, timesteps, **kwargs):
+        kwargs_cond = dict(kwargs)
+        kwargs_cond["force_action_drop"] = False
+        kwargs_uncond = dict(kwargs)
+        kwargs_uncond["force_action_drop"] = True
+        eps_cond, _ = self.model(x, timesteps=timesteps, **kwargs_cond)
+        eps_uncond, _ = self.model(x, timesteps=timesteps, **kwargs_uncond)
+        return eps_uncond + self.w * (eps_cond - eps_uncond), None
+
+
+def _swap_actions(actions, n_obs):
+    """Counterfactual actions on the generated half: negate the mouse dims
+    (8, 9) and swap the a/d strafe keys (dims 1, 3). Observed half untouched."""
+    out = actions.clone()
+    gen = actions[:, n_obs:, :]
+    swapped = gen.clone()
+    swapped[..., 8] = -gen[..., 8]
+    swapped[..., 9] = -gen[..., 9]
+    swapped[..., 1] = gen[..., 3]
+    swapped[..., 3] = gen[..., 1]
+    out[:, n_obs:, :] = swapped
+    return out
+
+
+def _zero_actions(actions, n_obs):
+    """All-zero actions on the generated half. Observed half untouched."""
+    out = actions.clone()
+    out[:, n_obs:, :] = 0.0
+    return out
+
+
+def _render_triple_overlay(frames_true, frames_swap, frames_zero, session_db_path,
+                            start_frame_idx, n_observed, out_path, title=None):
+    """3-row mp4: true / swap / zero continuations, stacked. Same imageio/libx264
+    settings as decode_debug.render_overlay -- cv2's mp4v does not play in wandb.
+    """
+    frames_true = np.asarray(frames_true)
+    frames_swap = np.asarray(frames_swap)
+    frames_zero = np.asarray(frames_zero)
+    T = frames_true.shape[0]
+    actions = get_frame_actions(session_db_path, start_frame_idx, T)
+
+    out_path = Path(out_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+
+    import imageio
+
+    writer = imageio.get_writer(
+        str(out_path), fps=DECODE_VIDEO_FPS, codec="libx264",
+        macro_block_size=1,
+        ffmpeg_params=["-pix_fmt", "yuv420p"],
+    )
+    for t in range(T):
+        border = t < n_observed
+        rows = [
+            _overlay_frame(_to_uint8_frame(frames[t]), actions[t], border=border)
+            for frames in (frames_true, frames_swap, frames_zero)
+        ]
+        writer.append_data(cv2.vconcat(rows))
+    writer.close()
+    return out_path
+
+
 @th.no_grad()
 def run_debug_validation(model, diffusion, valset, device, out_dir,
                          step=0, chunk_size=3, log_videos=True,
-                         per_task_scalars=False):
+                         per_task_scalars=False, actions=True,
+                         swap_test=True, cfg_scale=1.0):
     """Sample every validation row, render overlays, log metrics to wandb.
 
     Returns the aggregate metric dict (also logged via ``logger.logkv``).
@@ -170,34 +271,43 @@ def run_debug_validation(model, diffusion, valset, device, out_dir,
     out_dir.mkdir(parents=True, exist_ok=True)
     metrics = _get_metrics(device)
 
+    action_conditioned = getattr(model, "action_embedder", None) is not None
+    sampling_model = _CFGWrapper(model, cfg_scale) if cfg_scale != 1.0 else model
+
     T, n_obs = valset.T, valset.n_observed
     x0_all = valset.load_all()  # (N, T, 3, H, W)
     n_rows = x0_all.shape[0]
+    actions_all = valset.load_all_actions() if (actions and action_conditioned) else None
 
-    per_row, agg = [], {}
+    per_row, agg, swap_rows = [], {}, []
     for lo in range(0, n_rows, chunk_size):
         hi = min(lo + chunk_size, n_rows)
         x0 = x0_all[lo:hi].to(device)
         b = x0.shape[0]
+        act_chunk = actions_all[lo:hi].to(device) if actions_all is not None else None
 
         obs_mask = th.zeros(b, T, 1, 1, 1, device=device)
         obs_mask[:, :n_obs] = 1.0
         latent_mask = th.zeros_like(obs_mask)
         latent_mask[:, n_obs:] = 1.0
 
+        model_kwargs = {
+            "frame_indices": None,
+            "x0": x0,
+            "obs_mask": obs_mask,
+            "latent_mask": latent_mask,
+        }
+        if act_chunk is not None:
+            model_kwargs["actions"] = act_chunk
+
         # Match the schedule's true max sigma; see the note in train_util.log_samples.
         sched_sigma_max = float(diffusion.timestep2sigma(diffusion.num_timesteps - 1))
         samples, _ = diffusion.heun_sample(
-            model,
+            sampling_model,
             x0.shape,
             sigma_max=sched_sigma_max,
             clip_denoised=True,
-            model_kwargs={
-                "frame_indices": None,
-                "x0": x0,
-                "obs_mask": obs_mask,
-                "latent_mask": latent_mask,
-            },
+            model_kwargs=model_kwargs,
             latent_mask=latent_mask.cpu(),
             return_decoded=False,
         )
@@ -245,6 +355,82 @@ def run_debug_validation(model, diffusion, valset, device, out_dir,
                     # An overlay failure must never take down a training run.
                     print(f"[debug_validation] overlay failed for row {row['num']}: {e!r}")
 
+            # THE SWAP TEST (acceptance criterion): same model, same context,
+            # three action tensors differing only on the generated half. If
+            # conditioning works these L2s are non-zero; if the model ignores
+            # actions they collapse toward 0. Never let a failure here kill a
+            # training run.
+            if swap_test and action_conditioned and act_chunk is not None:
+                try:
+                    act_true_j = act_chunk[j:j + 1]
+                    act_swap_j = _swap_actions(act_true_j, n_obs)
+                    act_zero_j = _zero_actions(act_true_j, n_obs)
+                    x0_j = x0[j:j + 1]
+                    obs_mask_j = obs_mask[j:j + 1]
+                    latent_mask_j = latent_mask[j:j + 1]
+                    # Same starting noise for all three passes -- only the actions
+                    # tensor should differ between them, or the comparison is
+                    # dominated by heun_sample's noise rather than by whether the
+                    # model listens to actions.
+                    shared_noise = th.randn(*x0_j.shape, device=device)
+                    # Pinning `noise=` is NOT sufficient. heun_sample is an EDM
+                    # sampler with stochastic churn: with S_churn=80 over 50 steps
+                    # gamma is min(80/50, sqrt(2)-1) = 0.414, and it draws a fresh
+                    # th.randn_like from the GLOBAL rng at every step
+                    # (gaussian_diffusion.py:829). Without a fixed seed around each
+                    # pass those independent draws swamp the action effect and
+                    # val/swap/* would measure the sampler, not the conditioning --
+                    # it would look non-zero even for a model that ignores actions.
+                    swap_seed = 20250813 + int(row["num"])
+
+                    def _sample_with_actions(act):
+                        with RNG(swap_seed):
+                            s, _ = diffusion.heun_sample(
+                                sampling_model, x0_j.shape, noise=shared_noise,
+                                sigma_max=sched_sigma_max,
+                                clip_denoised=True,
+                                model_kwargs={
+                                    "frame_indices": None, "x0": x0_j,
+                                    "obs_mask": obs_mask_j, "latent_mask": latent_mask_j,
+                                    "actions": act,
+                                },
+                                latent_mask=latent_mask_j.cpu(), return_decoded=False,
+                            )
+                        s = s.to(device)
+                        return (s * latent_mask_j + x0_j * obs_mask_j)[0]
+
+                    true_full = _sample_with_actions(act_true_j)
+                    swap_full = _sample_with_actions(act_swap_j)
+                    zero_full = _sample_with_actions(act_zero_j)
+
+                    true01 = _to01(true_full[n_obs:])
+                    swap01 = _to01(swap_full[n_obs:])
+                    zero01 = _to01(zero_full[n_obs:])
+                    gt01 = _to01(gt[n_obs:])
+
+                    swap_rows.append(dict(
+                        l2_true_swap=float(th.mean((true01 - swap01) ** 2)),
+                        l2_true_zero=float(th.mean((true01 - zero01) ** 2)),
+                        l2_swap_zero=float(th.mean((swap01 - zero01) ** 2)),
+                        psnr_true=float(metrics.psnr(true01, gt01)),
+                    ))
+
+                    if log_videos:
+                        mp4_swap = out_dir / f"step{step}_{slug}_swap.mp4"
+                        _render_triple_overlay(
+                            frames_true=true_full.cpu().numpy(),
+                            frames_swap=swap_full.cpu().numpy(),
+                            frames_zero=zero_full.cpu().numpy(),
+                            session_db_path=str(row["session_db"]),
+                            start_frame_idx=row["window_start"],
+                            n_observed=n_obs, out_path=str(mp4_swap),
+                            title=row["prompt"],
+                        )
+                        import wandb
+                        logger.logkv(f"val/swap_overlay/{slug}", wandb.Video(str(mp4_swap)), distributed=False)
+                except Exception as e:
+                    print(f"[debug_validation] swap test failed for row {row['num']}: {e!r}")
+
     # Key naming mirrors plaicraft-model-pi0's `val/video/*` so the same wandb
     # panels line up against the DiT runs.
     #   val/video/*      -> frame 10 only: next-frame reconstruction (the headline)
@@ -254,6 +440,13 @@ def run_debug_validation(model, diffusion, valset, device, out_dir,
         for k in METRIC_KEYS:
             vals = [r[f"{scope}/{k}"] for r in per_row]
             agg[f"{prefix}/{k}"] = float(np.mean(vals))
+
+    if swap_rows:
+        agg["val/swap/l2_true_vs_swap"] = float(np.mean([r["l2_true_swap"] for r in swap_rows]))
+        agg["val/swap/l2_true_vs_zero"] = float(np.mean([r["l2_true_zero"] for r in swap_rows]))
+        agg["val/swap/l2_swap_vs_zero"] = float(np.mean([r["l2_swap_zero"] for r in swap_rows]))
+        agg["val/swap/psnr_true"] = float(np.mean([r["psnr_true"] for r in swap_rows]))
+
     for k, v in agg.items():
         logger.logkv(k, v, distributed=False)
 

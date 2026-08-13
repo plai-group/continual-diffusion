@@ -191,6 +191,8 @@ def vdt_model_and_diffusion_defaults():
         rescale_learned_sigmas=True,
         use_checkpoint=False,
         use_edm_scaling=False,
+        action_dim=0,
+        action_dropout_prob=0.0,
     )
 
 
@@ -212,6 +214,8 @@ def create_vdt_model_and_diffusion(
     rescale_learned_sigmas,
     use_checkpoint,
     use_edm_scaling,
+    action_dim=0,
+    action_dropout_prob=0.0,
 ):
     diffusion = create_gaussian_diffusion(
         steps=diffusion_steps,
@@ -232,6 +236,8 @@ def create_vdt_model_and_diffusion(
         in_channels=in_channels,
         num_frames=num_frames,
         learn_sigma=learn_sigma,
+        action_dim=action_dim,
+        action_dropout_prob=action_dropout_prob,
     )
     return model, diffusion
 

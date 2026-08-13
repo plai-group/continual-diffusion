@@ -35,6 +35,7 @@ def main():
     p.add_argument("--out", default="results/validation_offline")
     p.add_argument("--device", default="cuda")
     p.add_argument("--chunk_size", type=int, default=3)
+    p.add_argument("--cfg_scale", type=float, default=1.0)
     args = p.parse_args()
 
     data = dist_util.load_state_dict(args.checkpoint, map_location="cpu")
@@ -58,6 +59,7 @@ def main():
     res = run_debug_validation(
         model, diffusion, valset, args.device, out_dir=args.out,
         step=step, chunk_size=args.chunk_size, log_videos=True,
+        cfg_scale=args.cfg_scale,
     )
     print("\nAGGREGATE")
     for k, v in sorted(res["aggregate"].items()):

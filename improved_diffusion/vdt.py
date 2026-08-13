@@ -21,12 +21,25 @@ from timm.models.vision_transformer import PatchEmbed, Attention, Mlp
 from einops import rearrange, reduce, repeat
 
 
+def _expand_cond(v, N):
+    """Broadcast a conditioning tensor to (B, T*N, D). v is (B,D) [one vector per video]
+    or (B,T,D) [one vector per frame]."""
+    if v.ndim == 2:
+        return v.unsqueeze(1)
+    return v.repeat_interleave(N, dim=1)
+
+
 def modulate(x, shift, scale, T):
 
     N, M = x.shape[-2], x.shape[-1]
     B = scale.shape[0]
     x = rearrange(x, '(b t) n m-> b (t n) m',b=B,t=T,n=N,m=M)
-    x = x * (1 + scale.unsqueeze(1)) + shift.unsqueeze(1)
+    if scale.ndim == 3:
+        shift_e = _expand_cond(shift, N)
+        scale_e = _expand_cond(scale, N)
+        x = x * (1 + scale_e) + shift_e
+    else:
+        x = x * (1 + scale.unsqueeze(1)) + shift.unsqueeze(1)
     x = rearrange(x, 'b (t n) m-> (b t) n m',b=B,t=T,n=N,m=M)
     return x
 
@@ -105,6 +118,42 @@ class LabelEmbedder(nn.Module):
         return embeddings
 
 
+class ActionEmbedder(nn.Module):
+    """
+    Embeds per-frame action vectors into per-frame conditioning vectors. Also handles
+    action dropout (per whole sample) for classifier-free guidance.
+    """
+    def __init__(self, action_dim, hidden_size, dropout_prob=0.0):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(action_dim, hidden_size),
+            nn.SiLU(),
+            nn.Linear(hidden_size, hidden_size),
+        )
+        self.null_embedding = nn.Parameter(torch.zeros(hidden_size))
+        self.dropout_prob = dropout_prob
+
+    def forward(self, actions, train, force_drop=None):
+        # actions: (B, T, action_dim) -> (B, T, hidden_size)
+        embeddings = self.net(actions)
+        B = actions.shape[0]
+
+        if force_drop is not None:
+            if isinstance(force_drop, bool):
+                drop_ids = torch.full((B,), force_drop, dtype=torch.bool, device=actions.device)
+            else:
+                drop_ids = force_drop.bool().to(actions.device)
+        elif train and self.dropout_prob > 0:
+            drop_ids = torch.rand(B, device=actions.device) < self.dropout_prob
+        else:
+            drop_ids = None
+
+        if drop_ids is not None:
+            null = self.null_embedding.to(embeddings.dtype).expand_as(embeddings)
+            embeddings = torch.where(drop_ids.view(B, 1, 1), null, embeddings)
+
+        return embeddings
+
 
 def drop_path(x, drop_prob: float = 0., training: bool = False):
     """Drop paths (Stochastic Depth) per sample (when applied in main path of residual blocks).
@@ -156,7 +205,7 @@ class VDTBlock(nn.Module):
             self.temporal_fc = nn.Linear(hidden_size, hidden_size)
 
     def forward(self, x, c):
-        shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = self.adaLN_modulation(c).chunk(6, dim=1)
+        shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = self.adaLN_modulation(c).chunk(6, dim=-1)
         T = self.num_frames
         K, N, M = x.shape
         B = K // T
@@ -170,13 +219,13 @@ class VDTBlock(nn.Module):
 
         attn = self.attn(modulate(self.norm1(x), shift_msa, scale_msa, self.num_frames))
         attn = rearrange(attn, '(b t) n m-> b (t n) m',b=B,t=T,n=N,m=M)
-        attn = gate_msa.unsqueeze(1) * attn
+        attn = _expand_cond(gate_msa, N) * attn
         attn = rearrange(attn, 'b (t n) m-> (b t) n m',b=B,t=T,n=N,m=M)
         x = x + attn
 
         mlp = self.mlp(modulate(self.norm2(x), shift_mlp, scale_mlp, self.num_frames))
         mlp = rearrange(mlp, '(b t) n m-> b (t n) m',b=B,t=T,n=N,m=M)
-        mlp = gate_mlp.unsqueeze(1) * mlp
+        mlp = _expand_cond(gate_mlp, N) * mlp
         mlp = rearrange(mlp, 'b (t n) m-> (b t) n m',b=B,t=T,n=N,m=M)
         x = x + mlp
 
@@ -207,7 +256,7 @@ class FinalLayer(nn.Module):
         self.num_frames = num_frames
 
     def forward(self, x, c):
-        shift, scale = self.adaLN_modulation(c).chunk(2, dim=1)
+        shift, scale = self.adaLN_modulation(c).chunk(2, dim=-1)
         x = modulate(self.norm_final(x), shift, scale, self.num_frames)
         x = self.linear(x)
         return x
@@ -230,7 +279,9 @@ class VDT(nn.Module):
         num_classes=1000,
         learn_sigma=True,
         mode='video',
-        num_frames=16
+        num_frames=16,
+        action_dim=0,
+        action_dropout_prob=0.0,
     ):
         super().__init__()
         self.learn_sigma = learn_sigma
@@ -238,10 +289,12 @@ class VDT(nn.Module):
         self.out_channels = in_channels * 2 if learn_sigma else in_channels
         self.patch_size = patch_size
         self.num_heads = num_heads
+        self.action_dim = action_dim
 
         self.x_embedder = PatchEmbed(input_size, patch_size, in_channels, hidden_size, bias=True)
         self.t_embedder = TimestepEmbedder(hidden_size)
         self.y_embedder = LabelEmbedder(num_classes, hidden_size, class_dropout_prob)
+        self.action_embedder = ActionEmbedder(action_dim, hidden_size, action_dropout_prob) if action_dim > 0 else None
         num_patches = self.x_embedder.num_patches
         # Will use fixed sin-cos embedding:
         self.pos_embed = nn.Parameter(torch.zeros(1, num_patches, hidden_size), requires_grad=False)
@@ -318,7 +371,8 @@ class VDT(nn.Module):
         return imgs
 
     def forward(self, x, *, x0, timesteps, frame_indices=None,
-                obs_mask=None, latent_mask=None, return_attn_weights=False):
+                obs_mask=None, latent_mask=None, return_attn_weights=False,
+                actions=None, force_action_drop=None):
         """
         Forward pass of VDT.
         x: (N, C, H, W) tensor of spatial inputs (images or latent representations of images)
@@ -342,7 +396,10 @@ class VDT(nn.Module):
         t = self.t_embedder(timesteps)           # (N, D)
         y = self.y_embedder(y, self.training)    # (N, D)
 
-        c = t + y                             # (N, D)
+        if actions is not None and self.action_embedder is not None:
+            c = t.unsqueeze(1) + self.action_embedder(actions, self.training, force_action_drop)  # (N, T, D)
+        else:
+            c = t + y                         # (N, D)
 
         for block in self.blocks:
             x = block(x, c)                      # (N, T, D)

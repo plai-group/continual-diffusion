@@ -92,6 +92,7 @@ class TrainLoop:
         self.pad_with_random_frames = pad_with_random_frames
         self.enc_dec_chunk_size = enc_dec_chunk_size
         self.vis_batch = None
+        self.vis_actions = None
         self.max_frames = max_frames
         self.gradient_clip_norm = float(clip_grad) if clip_grad is not None else None
 
@@ -336,17 +337,23 @@ class TrainLoop:
         return new_batch, new_tensors, indices
 
     def get_next_batch(self):
-        frames, absolute_index_map = next(self.data)
+        batch = next(self.data)
+        if len(batch) == 3:
+            frames, absolute_index_map, actions = batch
+        else:
+            frames, absolute_index_map = batch
+            actions = None
         if self.vis_batch is None or self.vis_batch.size(1) < self.max_frames:
             with RNG(0):  # Initialize datapoint to log here in case data is deterministic
                 self.vis_batch = frames
-        return frames, absolute_index_map
+                self.vis_actions = actions
+        return frames, absolute_index_map, actions
 
     def run_loop(self):
         last_sample_time = None
         while not self.lr_anneal_steps or self.step < self.lr_anneal_steps:
             try:
-                frames, absolute_index_map = self.get_next_batch()
+                frames, absolute_index_map, actions = self.get_next_batch()
                 # print(f"rank: {dist.get_rank()}, indices: {absolute_index_map[:,0].tolist()}, device: {dist_util.dev()}")
             except RuntimeError as e:
                 print(e)
@@ -354,7 +361,7 @@ class TrainLoop:
                 break
 
             for _ in range(self.steps_per_experience):
-                self.run_step(frames, None, absolute_index_map)
+                self.run_step(frames, None, absolute_index_map, actions)
                 if self.step % self.log_interval == 0:
                     logger.dumpkvs()
                 if self.step % self.save_interval == 0:
@@ -370,9 +377,9 @@ class TrainLoop:
                 self.step += 1
         self.save()
 
-    def run_step(self, batch1, batch2, absolute_index_map=None):
+    def run_step(self, batch1, batch2, absolute_index_map=None, actions=None):
         t0 = time()
-        self.forward_backward(batch1, batch2, absolute_index_map)
+        self.forward_backward(batch1, batch2, absolute_index_map, actions)
         if self.use_fp16:
             self.optimize_fp16()
         else:
@@ -380,7 +387,7 @@ class TrainLoop:
         self.log_step()
         logger.logkv("timing/step_time", time() - t0)
     
-    def forward_backward(self, batch1, batch2, absolute_index_map=None):
+    def forward_backward(self, batch1, batch2, absolute_index_map=None, actions=None):
         zero_grad(self.master_params)
 
         batch_size = batch1.shape[0]
@@ -388,8 +395,22 @@ class TrainLoop:
         for i in range(0, batch_size, self.microbatch):
             micro1 = batch1[i : i + self.microbatch]
             micro2 = batch2[i : i + self.microbatch] if batch2 is not None else None
+            micro_actions = actions[i : i + self.microbatch] if actions is not None else None
             if self.masking_mode == "autoregressive":
                 micro, frame_indices, obs_mask, latent_mask = self.get_autoregressive_masks(micro1)
+                # frame_indices (local, into micro1's T dim) must be the identity
+                # here, or the causal-shift action cache gathered below (and the
+                # RPE frame_indices used elsewhere) would be silently mis-paired
+                # with frames.
+                expected = th.arange(frame_indices.shape[1], device=frame_indices.device)
+                expected = expected.unsqueeze(0).expand_as(frame_indices)
+                if not th.equal(frame_indices, expected):
+                    raise ValueError(
+                        "get_autoregressive_masks did not return an identity frame "
+                        f"selection: frame_indices={frame_indices[0].tolist()} but "
+                        f"expected arange({frame_indices.shape[1]}). Action gathering "
+                        "below assumes this identity; fix the mismatch before proceeding."
+                    )
             elif self.masking_mode == "none":
                 micro, frame_indices, obs_mask, latent_mask = self.get_joint_masks(micro1)
             elif self.masking_mode == "flexible":
@@ -398,6 +419,13 @@ class TrainLoop:
                 micro, frame_indices, obs_mask, latent_mask = self.get_autoregressive_flexible_masks(micro1)
             else:
                 raise ValueError(f"Unknown masking mode: {self.masking_mode}")
+
+            if micro_actions is not None:
+                # Gather with the SAME local frame_indices used to select/reorder
+                # frames, BEFORE frame_indices is overwritten with absolute indices
+                # below -- otherwise actions silently mis-pair with frames.
+                gather_idx = frame_indices.unsqueeze(-1).expand(-1, -1, micro_actions.shape[-1])
+                micro_actions = th.gather(micro_actions, 1, gather_idx)
 
             if absolute_index_map is not None:
                 # Convert frame indices to indices in one long video frame for RPE attention to work with.
@@ -408,6 +436,11 @@ class TrainLoop:
             obs_mask = obs_mask.to(dist_util.dev())
             latent_mask = latent_mask.to(dist_util.dev())
 
+            model_kwargs = {'frame_indices': frame_indices, 'obs_mask': obs_mask,
+                             'latent_mask': latent_mask, 'x0': micro}
+            if micro_actions is not None:
+                model_kwargs['actions'] = micro_actions.to(dist_util.dev(), dtype=th.float32)
+
             last_batch = (i + self.microbatch) >= batch1.shape[0]
             t, weights = self.schedule_sampler.sample(micro.shape[0], dist_util.dev())
 
@@ -416,8 +449,7 @@ class TrainLoop:
                 self.ddp_model,
                 micro,
                 t,
-                model_kwargs={'frame_indices': frame_indices, 'obs_mask': obs_mask,
-                              'latent_mask': latent_mask, 'x0': micro},
+                model_kwargs=model_kwargs,
                 latent_mask=(1-obs_mask) if self.pad_with_random_frames else latent_mask,
                 eval_mask=latent_mask,
             )
@@ -572,16 +604,24 @@ class TrainLoop:
             # deduped -- silently spending ~a third of the sampling budget on
             # noise levels training never saw. See gaussian_diffusion.heun_sample.
             sched_sigma_max = float(self.diffusion.timestep2sigma(self.diffusion.num_timesteps - 1))
+            model_kwargs = {
+                'frame_indices': frame_indices.to(dist_util.dev()),
+                'x0': batch.to(dist_util.dev()),
+                'obs_mask': obs_mask.to(dist_util.dev()),
+                'latent_mask': latent_mask.to(dist_util.dev())}
+            if self.vis_actions is not None:
+                # Gather with the SAME local frame_indices used to select/reorder
+                # vis_batch's frames (mirrors forward_backward's action gather),
+                # so an action-conditioned model sees real actions here instead of
+                # going off-distribution on a null action it never trained on.
+                gather_idx = frame_indices.unsqueeze(-1).expand(-1, -1, self.vis_actions.shape[-1])
+                model_kwargs['actions'] = th.gather(self.vis_actions, 1, gather_idx).to(dist_util.dev(), dtype=th.float32)
             samples, _ = self.diffusion.heun_sample(
                 self.model,
                 batch.shape,
                 sigma_max=sched_sigma_max,
                 clip_denoised=True,
-                model_kwargs={
-                    'frame_indices': frame_indices.to(dist_util.dev()),
-                    'x0': batch.to(dist_util.dev()),
-                    'obs_mask': obs_mask.to(dist_util.dev()),
-                    'latent_mask': latent_mask.to(dist_util.dev())},
+                model_kwargs=model_kwargs,
                 latent_mask=latent_mask,
                 return_attn_weights=True,
                 return_decoded=False,

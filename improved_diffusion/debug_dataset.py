@@ -3,8 +3,11 @@ import warnings
 from pathlib import Path
 
 import h5py
+import numpy as np
 import torch
 from torch.utils.data import Dataset
+
+from improved_diffusion.debug_actions import load_or_build as load_or_build_actions
 
 
 class ContinuousDebugDataset(Dataset):
@@ -30,6 +33,7 @@ class ContinuousDebugDataset(Dataset):
         self.original_frame_range = frame_range
 
         self._h5_handles = {}
+        self._action_arrays = {}
         self._handle_pid = None
 
         self._validate_parameters()
@@ -129,11 +133,23 @@ class ContinuousDebugDataset(Dataset):
             # New process (e.g. a forked DataLoader worker): never reuse a
             # handle that may have been inherited from the parent process.
             self._h5_handles = {}
+            self._action_arrays = {}
             self._handle_pid = pid
         path = str(path)
         if path not in self._h5_handles:
             self._h5_handles[path] = h5py.File(path, "r")
         return self._h5_handles[path]
+
+    def _get_action_array(self, session_dir):
+        pid = os.getpid()
+        if self._handle_pid != pid:
+            self._h5_handles = {}
+            self._action_arrays = {}
+            self._handle_pid = pid
+        session_dir = str(session_dir)
+        if session_dir not in self._action_arrays:
+            self._action_arrays[session_dir] = load_or_build_actions(session_dir)
+        return self._action_arrays[session_dir]
 
     def _close_handles(self):
         for handle in getattr(self, "_h5_handles", {}).values():
@@ -142,6 +158,7 @@ class ContinuousDebugDataset(Dataset):
             except Exception:
                 pass
         self._h5_handles = {}
+        self._action_arrays = {}
         self._handle_pid = None
 
     def __getitem__(self, idx):
@@ -162,8 +179,14 @@ class ContinuousDebugDataset(Dataset):
         if frames.shape[0] != self.T:
             raise IndexError(f"Incomplete window at index {idx}, should have been discarded.")
 
+        session_dir = path.parent.parent
+        action_array = self._get_action_array(session_dir)
+        actions = torch.from_numpy(
+            np.asarray(action_array[local_start:local_start + self.T])
+        ).float()
+
         absolute_index_map = torch.arange(start_frame, end_frame, dtype=torch.int64)
-        return frames, absolute_index_map
+        return frames, absolute_index_map, actions
 
     def set_train(self):
         self.is_test = False

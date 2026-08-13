@@ -198,6 +198,7 @@ def create_argparser():
         debug_validation_root="",
         debug_validation_out="",
         debug_validation_per_task=False,
+        cfg_scale=1.0,  # sampling-time only; not a model kwarg. 1.0 = no guidance.
     )
     defaults.update(model_and_diffusion_defaults(model_type='vdt'))
     parser = argparse.ArgumentParser()

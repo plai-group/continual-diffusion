@@ -206,15 +206,27 @@ class _CFGWrapper(nn.Module):
 
 
 def _swap_actions(actions, n_obs):
-    """Counterfactual actions on the generated half: negate the mouse dims
-    (8, 9) and swap the a/d strafe keys (dims 1, 3). Observed half untouched."""
+    """Counterfactual actions on the generated half: the OPPOSITE action on
+    every axis. Observed half untouched, since those frames are given.
+
+        w <-> s          (dims 0, 2)  forward / back
+        a <-> d          (dims 1, 3)  strafe left / right
+        space <-> shift  (dims 4, 5)  up / down
+        left <-> right   (dims 6, 7)  mouse buttons
+        dx, dy negated   (dims 8, 9)  look direction
+
+    A full inversion rather than a partial one: if the model is listening, every
+    axis of the counterfactual should push the frame the other way, which makes
+    the true-vs-swap divergence as large as this world allows.
+    """
     out = actions.clone()
     gen = actions[:, n_obs:, :]
     swapped = gen.clone()
+    for i, j in ((0, 2), (1, 3), (4, 5), (6, 7)):
+        swapped[..., i] = gen[..., j]
+        swapped[..., j] = gen[..., i]
     swapped[..., 8] = -gen[..., 8]
     swapped[..., 9] = -gen[..., 9]
-    swapped[..., 1] = gen[..., 3]
-    swapped[..., 3] = gen[..., 1]
     out[:, n_obs:, :] = swapped
     return out
 
@@ -250,20 +262,40 @@ def _action_vec_to_bar(vec):
     }
 
 
-def _render_triple_overlay(frames_true, frames_swap, frames_zero,
+def _label_panel(panel, text):
+    """Draw a panel name in the top bar's empty middle band."""
+    cv2.putText(panel, text, (panel.shape[1] // 2 - 60, 60),
+                cv2.FONT_HERSHEY_SIMPLEX, 1.6, (0, 0, 255), 3, cv2.LINE_AA)
+    return panel
+
+
+def _render_triple_overlay(frames_gt, frames_true, frames_swap, frames_zero,
                            actions_true, actions_swap, actions_zero,
                            n_observed, out_path, title=None):
-    """3-row mp4: true / swap / zero continuations, stacked. Same imageio/libx264
-    settings as decode_debug.render_overlay -- cv2's mp4v does not play in wandb.
+    """2x2 grid mp4:  GT | TRUE  over  SWAP | ZERO.
 
-    Each row's action bar is derived from that row's own action tensor, so the
-    swap row visibly shows the swapped keys / reversed mouse it was given.
+    GT is included so the generated half can be judged against reality, not only
+    against the other two continuations -- past frame n_observed the true/swap/
+    zero rows are all model output and share no ground truth.
+
+    Laid out as a grid rather than 4 stacked rows because stacking gives a
+    1280x3472 video, which wandb renders unusably small.
+
+    Each panel's action bar comes from that panel's own action tensor, so the
+    swap panel visibly shows the swapped keys / reversed mouse it was given.
+    GT carries the true actions, being the real recording.
+
+    Same imageio/libx264 settings as decode_debug.render_overlay -- cv2's mp4v
+    encodes fine and then will not play in wandb.
     """
+    frames_gt = np.asarray(frames_gt)
     frames_true = np.asarray(frames_true)
     frames_swap = np.asarray(frames_swap)
     frames_zero = np.asarray(frames_zero)
     T = frames_true.shape[0]
-    acts = [np.asarray(a) for a in (actions_true, actions_swap, actions_zero)]
+    acts = [np.asarray(a) for a in
+            (actions_true, actions_true, actions_swap, actions_zero)]
+    labels = ["GT", "TRUE", "SWAP", "ZERO"]
 
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -277,12 +309,16 @@ def _render_triple_overlay(frames_true, frames_swap, frames_zero,
     )
     for t in range(T):
         border = t < n_observed
-        rows = [
-            _overlay_frame(_to_uint8_frame(frames[t]),
-                           _action_vec_to_bar(act[t]), border=border)
-            for frames, act in zip((frames_true, frames_swap, frames_zero), acts)
+        panels = [
+            _label_panel(
+                _overlay_frame(_to_uint8_frame(frames[t]),
+                               _action_vec_to_bar(act[t]), border=border),
+                lab)
+            for frames, act, lab in zip(
+                (frames_gt, frames_true, frames_swap, frames_zero), acts, labels)
         ]
-        writer.append_data(cv2.vconcat(rows))
+        writer.append_data(cv2.vconcat([cv2.hconcat(panels[:2]),
+                                        cv2.hconcat(panels[2:])]))
     writer.close()
     return out_path
 
@@ -447,6 +483,7 @@ def run_debug_validation(model, diffusion, valset, device, out_dir,
                     if log_videos:
                         mp4_swap = out_dir / f"step{step}_{slug}_swap.mp4"
                         _render_triple_overlay(
+                            frames_gt=gt.cpu().numpy(),
                             frames_true=true_full.cpu().numpy(),
                             frames_swap=swap_full.cpu().numpy(),
                             frames_zero=zero_full.cpu().numpy(),

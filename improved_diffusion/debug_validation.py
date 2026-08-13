@@ -226,16 +226,44 @@ def _zero_actions(actions, n_obs):
     return out
 
 
-def _render_triple_overlay(frames_true, frames_swap, frames_zero, session_db_path,
-                            start_frame_idx, n_observed, out_path, title=None):
+#: order of the 6 key dims in the 10-d action vector; names must match the
+#: labels decode_debug draws, i.e. the values of its KEY_ID_TO_NAME.
+_ACTION_KEY_NAMES = ["w", "a", "s", "d", "space", "Shift_L"]
+_ACTION_CLICK_NAMES = ["left", "right"]
+
+
+def _action_vec_to_bar(vec):
+    """One 10-d action vector -> the dict decode_debug._overlay_frame draws.
+
+    Lets each row of the swap overlay show the actions it was ACTUALLY generated
+    with. Reading the bar from the session DB instead would paint the true
+    actions onto the swap and zero rows too, which hides the very thing the
+    overlay exists to show.
+    """
+    vec = np.asarray(vec, dtype=np.float32)
+    unsymlog = lambda v: float(np.sign(v) * np.expm1(abs(v)))
+    return {
+        "keys": [n for i, n in enumerate(_ACTION_KEY_NAMES) if vec[i] > 0.5],
+        "clicks": [n for i, n in enumerate(_ACTION_CLICK_NAMES) if vec[6 + i] > 0.5],
+        "mouseDX": unsymlog(vec[8]),
+        "mouseDY": unsymlog(vec[9]),
+    }
+
+
+def _render_triple_overlay(frames_true, frames_swap, frames_zero,
+                           actions_true, actions_swap, actions_zero,
+                           n_observed, out_path, title=None):
     """3-row mp4: true / swap / zero continuations, stacked. Same imageio/libx264
     settings as decode_debug.render_overlay -- cv2's mp4v does not play in wandb.
+
+    Each row's action bar is derived from that row's own action tensor, so the
+    swap row visibly shows the swapped keys / reversed mouse it was given.
     """
     frames_true = np.asarray(frames_true)
     frames_swap = np.asarray(frames_swap)
     frames_zero = np.asarray(frames_zero)
     T = frames_true.shape[0]
-    actions = get_frame_actions(session_db_path, start_frame_idx, T)
+    acts = [np.asarray(a) for a in (actions_true, actions_swap, actions_zero)]
 
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -250,8 +278,9 @@ def _render_triple_overlay(frames_true, frames_swap, frames_zero, session_db_pat
     for t in range(T):
         border = t < n_observed
         rows = [
-            _overlay_frame(_to_uint8_frame(frames[t]), actions[t], border=border)
-            for frames in (frames_true, frames_swap, frames_zero)
+            _overlay_frame(_to_uint8_frame(frames[t]),
+                           _action_vec_to_bar(act[t]), border=border)
+            for frames, act in zip((frames_true, frames_swap, frames_zero), acts)
         ]
         writer.append_data(cv2.vconcat(rows))
     writer.close()
@@ -421,8 +450,9 @@ def run_debug_validation(model, diffusion, valset, device, out_dir,
                             frames_true=true_full.cpu().numpy(),
                             frames_swap=swap_full.cpu().numpy(),
                             frames_zero=zero_full.cpu().numpy(),
-                            session_db_path=str(row["session_db"]),
-                            start_frame_idx=row["window_start"],
+                            actions_true=act_true_j[0].cpu().numpy(),
+                            actions_swap=act_swap_j[0].cpu().numpy(),
+                            actions_zero=act_zero_j[0].cpu().numpy(),
                             n_observed=n_obs, out_path=str(mp4_swap),
                             title=row["prompt"],
                         )

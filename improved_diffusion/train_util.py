@@ -505,7 +505,10 @@ class TrainLoop:
     def _log_grad_norm(self):
         sqsum = 0.0
         for p in self.master_params:
-            if not p.requires_grad:
+            # p.grad is None for any parameter not reached by the backward pass.
+            # clip_grad_norm_ already filters these; this did not, so a single
+            # unused parameter crashed the first optimizer step.
+            if not p.requires_grad or p.grad is None:
                 continue
             sqsum += (p.grad ** 2).sum().item()
         logger.logkv_mean("grad_norm", np.sqrt(sqsum))

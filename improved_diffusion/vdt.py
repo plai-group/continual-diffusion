@@ -397,7 +397,13 @@ class VDT(nn.Module):
         y = self.y_embedder(y, self.training)    # (N, D)
 
         if actions is not None and self.action_embedder is not None:
-            c = t.unsqueeze(1) + self.action_embedder(actions, self.training, force_action_drop)  # (N, T, D)
+            # `y` is kept here even though num_classes=0 makes it a learned
+            # constant: dropping it leaves y_embedder unreachable by backward,
+            # and an orphaned parameter with p.grad None crashed _log_grad_norm
+            # on the first optimizer step. It is expressively free -- the action
+            # embedder has its own bias -- so this costs nothing.
+            c = t.unsqueeze(1) + y.unsqueeze(1) + \
+                self.action_embedder(actions, self.training, force_action_drop)  # (N, T, D)
         else:
             c = t + y                         # (N, D)
 

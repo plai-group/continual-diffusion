@@ -24,8 +24,14 @@ set -euo pipefail
 
 REPO=/ubc/cs/research/plai-scratch/ctardy/projects/continual-diffusion
 CORPUS_SRC=/ubc/cs/research/plai-scratch/ctardy/projects/plaicraft-data-preprocessing/processed/vdt_corpus/debug_24x40
-VAL_ROOT=/ubc/cs/research/plai-scratch/ctardy/projects/plaicraft-data-preprocessing/processed
-VAL_DB=$REPO/data/validation_debug_24x40_average.db
+# Must match what plaicraft-model-pi0's live train scripts use, or the
+# comparison is against a different recording:
+#   DATASET_PATH=${PREPROCESSING_ROOT}/processed/debug_v2
+#   VALIDATION_DATABASE_PATH=.../data/debug_v2/validation_debug_static_20x12.db
+# 8 tasks, session 1781634290000. Note this DB puts the resolution in
+# player_email and the session id in Session_ID (the _average DBs swap them).
+VAL_ROOT=/ubc/cs/research/plai-scratch/ctardy/projects/plaicraft-data-preprocessing/processed/debug_v2
+VAL_DB=/ubc/cs/research/plai-scratch/ctardy/projects/plaicraft-model-pi0/data/debug_v2/validation_debug_static_40x24.db
 VAL_OUT=$REPO/results/debug_validation
 
 SIF=/ubc/cs/research/ubc_ml/plaicraft/containers/plaicraft_ubuntu2404.sif
@@ -71,10 +77,10 @@ EMA_RATE=0.999,0.9999      # index 0 drives log_samples; 0.9999 alone is a
 
 # -- logging / eval cadence
 SAMPLE_INTERVAL=2500       # drives BOTH the built-in video-0 sample AND the 9
-                           # issue-22 validation overlays + val/video/* metrics.
+                           # 8 issue-22 validation overlays + val/video/* metrics.
                            # Also fires once at step == MAX_FRAMES (=20).
 SAVE_INTERVAL=20000
-PER_TASK_SCALARS=False     # True adds 9 tasks x 6 metrics = 54 wandb channels.
+PER_TASK_SCALARS=False     # True adds 8 tasks x 6 metrics = 48 wandb channels.
 # -----------------------------------------------------------------------------
 
 cd "$REPO"

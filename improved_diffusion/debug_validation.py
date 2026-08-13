@@ -293,7 +293,28 @@ def _render_triple_overlay(frames_gt, frames_true, frames_swap, frames_zero,
     frames_swap = np.asarray(frames_swap)
     frames_zero = np.asarray(frames_zero)
     T = frames_true.shape[0]
-    acts = [np.asarray(a) for a in
+
+    def _to_display(a):
+        """Shift the causal action cache back to the DISPLAY convention.
+
+        The cache is causal: row i is the action from window [i-1, i), i.e. the
+        one that CAUSED frame i. That is right for conditioning the model, but
+        drawing it as-is paints an action onto the very frame it produced -- a
+        click appears simultaneously with its own effect, which reads as though
+        causality were violated.
+
+        decode_debug.get_frame_actions (used by the 2-row val/overlay) instead
+        returns the RAW action for window [i, i+1), so the input renders one
+        frame BEFORE its consequence. Match that here, or the two overlays
+        disagree by one frame. cache[i+1] == raw[i], and the final frame has no
+        successor so its bar is blank.
+        """
+        a = np.asarray(a)
+        out = np.zeros_like(a)
+        out[:-1] = a[1:]
+        return out
+
+    acts = [_to_display(a) for a in
             (actions_true, actions_true, actions_swap, actions_zero)]
     labels = ["GT", "TRUE", "SWAP", "ZERO"]
 

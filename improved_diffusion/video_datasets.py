@@ -161,7 +161,6 @@ def load_data(dataset_name, batch_size, T=None, deterministic=False, num_workers
     loader = DataLoader(dataset, batch_size=batch_size, num_workers=num_workers, sampler=sampler)
     while True:
         yield from loader
-        raise StopIteration()
 
 
 def get_eval_dataset(dataset_name, T=None, seed=0, train=False, eval_dataset_config=eval_dataset_configs["default"],

@@ -206,9 +206,8 @@ class _CFGWrapper(nn.Module):
         return eps_uncond + self.w * (eps_cond - eps_uncond), None
 
 
-def _swap_actions(actions, n_obs):
-    """Counterfactual actions on the generated half: the OPPOSITE action on
-    every axis. Observed half untouched, since those frames are given.
+def _invert_actions(actions):
+    """The OPPOSITE action on every axis.
 
         w <-> s          (dims 0, 2)  forward / back
         a <-> d          (dims 1, 3)  strafe left / right
@@ -216,27 +215,35 @@ def _swap_actions(actions, n_obs):
         left <-> right   (dims 6, 7)  mouse buttons
         dx, dy negated   (dims 8, 9)  look direction
 
-    A full inversion rather than a partial one: if the model is listening, every
-    axis of the counterfactual should push the frame the other way, which makes
-    the true-vs-swap divergence as large as this world allows.
+    A full inversion rather than a partial one: if the model is listening,
+    every axis pushes the frame the other way, which makes the true-vs-swap
+    divergence as large as this world allows.
     """
-    out = actions.clone()
-    gen = actions[:, n_obs:, :]
-    swapped = gen.clone()
+    swapped = actions.clone()
     for i, j in ((0, 2), (1, 3), (4, 5), (6, 7)):
-        swapped[..., i] = gen[..., j]
-        swapped[..., j] = gen[..., i]
-    swapped[..., 8] = -gen[..., 8]
-    swapped[..., 9] = -gen[..., 9]
-    out[:, n_obs:, :] = swapped
-    return out
+        swapped[..., i] = actions[..., j]
+        swapped[..., j] = actions[..., i]
+    swapped[..., 8] = -actions[..., 8]
+    swapped[..., 9] = -actions[..., 9]
+    return swapped
 
 
-def _zero_actions(actions, n_obs):
-    """All-zero actions on the generated half. Observed half untouched."""
-    out = actions.clone()
-    out[:, n_obs:, :] = 0.0
-    return out
+def _swap_actions(actions, where):
+    """Invert the actions on the rows  selects; leave the rest alone.
+
+     is a (B, T, 1) 0/1 mask. For an action-generating model it selects
+    the OBSERVED rows, so the intervention rewrites the action history and the
+    model then generates the future actions and frames itself -- the panel
+    shows what it predicted under that history. For a purely action-conditioned
+    model there is nothing to generate, so it selects the LATENT rows instead
+    and the counterfactual is imposed directly on the frames being produced.
+    """
+    return th.where(where.bool(), _invert_actions(actions), actions)
+
+
+def _zero_actions(actions, where):
+    """Zero the actions on the rows  selects; leave the rest alone."""
+    return th.where(where.bool(), th.zeros_like(actions), actions)
 
 
 #: order of the 6 key dims in the 10-d action vector; names must match the
@@ -496,20 +503,26 @@ def run_debug_validation(model, diffusion, valset, device, out_dir,
                     # An overlay failure must never take down a training run.
                     print(f"[debug_validation] overlay failed for row {row['num']}: {e!r}")
 
-            # THE SWAP TEST (acceptance criterion): same model, same context,
-            # three action tensors differing only on the generated half. If
-            # conditioning works these L2s are non-zero; if the model ignores
-            # actions they collapse toward 0. Never let a failure here kill a
-            # training run.
+            # THE SWAP TEST (acceptance criterion): same model, same GT frame
+            # context, same starting noise, three action tensors differing only
+            # on the rows the model is given. If conditioning works these L2s
+            # are non-zero; if the model ignores actions they collapse toward 0.
+            # Never let a failure here kill a training run.
             if swap_test and action_conditioned and act_chunk is not None:
                 try:
                     act_true_j = act_chunk[j:j + 1]
-                    gen_act_j = (samples_act[j] if samples_act is not None else None)
-                    act_swap_j = _swap_actions(act_true_j, n_obs)
-                    act_zero_j = _zero_actions(act_true_j, n_obs)
                     x0_j = x0[j:j + 1]
                     obs_mask_j = obs_mask[j:j + 1]
                     latent_mask_j = latent_mask[j:j + 1]
+                    obs_act_mask_j = frame_mask_to_action_mask(obs_mask_j)
+                    # Probe an action-generating model by rewriting its action
+                    # HISTORY and letting it generate the future; probe a
+                    # conditioned-only model by imposing the counterfactual on
+                    # the future directly, since it generates no actions.
+                    intervene_on = (obs_act_mask_j if generates_actions
+                                    else 1.0 - obs_act_mask_j)
+                    act_swap_j = _swap_actions(act_true_j, intervene_on)
+                    act_zero_j = _zero_actions(act_true_j, intervene_on)
                     # Same starting noise for all three passes -- only the actions
                     # tensor should differ between them, or the comparison is
                     # dominated by heun_sample's noise rather than by whether the
@@ -535,25 +548,26 @@ def run_debug_validation(model, diffusion, valset, device, out_dir,
                                     "frame_indices": None, "x0": x0_j,
                                     "obs_mask": obs_mask_j, "latent_mask": latent_mask_j,
                                     "actions": act,
-                                    # In generation mode the action tokens are
-                                    # denoised too, so a swapped action only acts
-                                    # as conditioning if it is pinned everywhere.
+                                    # Pin the history only. The future action
+                                    # tokens are denoised jointly with the video,
+                                    # so each panel shows what the model actually
+                                    # predicted under that history.
                                     **({"actions0": act,
-                                        "obs_action_mask": th.ones(
-                                            act.shape[0], act.shape[1], 1,
-                                            device=act.device, dtype=act.dtype)}
+                                        "obs_action_mask": obs_act_mask_j}
                                        if generates_actions else {}),
                                 },
                                 latent_mask=latent_mask_j.cpu(), return_decoded=False,
                             )
+                        act_out = None
                         if isinstance(s, tuple):
-                            s = s[0]
+                            s, act_out = s
                         s = s.to(device)
-                        return (s * latent_mask_j + x0_j * obs_mask_j)[0]
+                        video = (s * latent_mask_j + x0_j * obs_mask_j)[0]
+                        return video, (act_out[0] if act_out is not None else None)
 
-                    true_full = _sample_with_actions(act_true_j)
-                    swap_full = _sample_with_actions(act_swap_j)
-                    zero_full = _sample_with_actions(act_zero_j)
+                    true_full, true_act = _sample_with_actions(act_true_j)
+                    swap_full, swap_act = _sample_with_actions(act_swap_j)
+                    zero_full, zero_act = _sample_with_actions(act_zero_j)
 
                     true01 = _to01(true_full[n_obs:])
                     swap01 = _to01(swap_full[n_obs:])
@@ -571,24 +585,23 @@ def run_debug_validation(model, diffusion, valset, device, out_dir,
                         mp4_swap = out_dir / f"step{step}_{slug}_swap.mp4"
                         _render_triple_overlay(
                             frames_gt=gt.cpu().numpy(),
-                            # The swap and zero passes pin their actions on every
-                            # frame -- that is what makes them a counterfactual --
-                            # so their action tokens are clamped and there is
-                            # nothing generated to look at there. The second panel
-                            # therefore shows the free rollout from the main
-                            # validation pass, which is teacher-forced on the
-                            # observed prefix only. val/swap/* below is still
-                            # computed from the three pinned passes.
-                            frames_true=(pred.cpu().numpy() if gen_act_j is not None
-                                         else true_full.cpu().numpy()),
+                            # All three passes share the GT frame context and
+                            # are teacher-forced on the action history they were
+                            # given, then run free. So each panel shows that
+                            # pass's history -- true, inverted, zeroed -- over
+                            # the observed frames, followed by the actions the
+                            # model actually generated under it.
+                            frames_true=true_full.cpu().numpy(),
                             frames_swap=swap_full.cpu().numpy(),
                             frames_zero=zero_full.cpu().numpy(),
                             actions_gt=act_true_j[0].cpu().numpy(),
-                            actions_true=(gen_act_j if gen_act_j is not None
+                            actions_true=(true_act if true_act is not None
                                           else act_true_j[0].cpu().numpy()),
-                            actions_swap=act_swap_j[0].cpu().numpy(),
-                            actions_zero=act_zero_j[0].cpu().numpy(),
-                            true_label=("GEN" if gen_act_j is not None else "TRUE"),
+                            actions_swap=(swap_act if swap_act is not None
+                                          else act_swap_j[0].cpu().numpy()),
+                            actions_zero=(zero_act if zero_act is not None
+                                          else act_zero_j[0].cpu().numpy()),
+                            true_label=("GEN" if true_act is not None else "TRUE"),
                             n_observed=n_obs, out_path=str(mp4_swap),
                             title=row["prompt"],
                         )

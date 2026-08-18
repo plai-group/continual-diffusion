@@ -1074,7 +1074,22 @@ class GaussianDiffusion:
                 terms["loss_action"] = mse_action
 
                 action_weight = call_kwargs.get('action_loss_weight', getattr(self, 'action_loss_weight', 1.0))
-                total_loss = loss_video + action_weight * mse_action
+                # mean_flat divides by the FULL element count, so loss_video is
+                # per-pixel (T*C*H*W) while mse_action is per-action-number
+                # (T*action_dim). Adding the two means with equal weight is a
+                # ~288x per-element over-weighting of the action head, which
+                # starves the shared trunk of video gradient.
+                #
+                # DreamZero (arXiv:2602.15922) instead takes one squared error
+                # over the concatenated [z, a] vector and carries no lambda at
+                # all -- which makes the action term's weight exactly the
+                # dimension ratio. Recover that here from the shapes, so it
+                # stays correct if resolution, T, patch size or the diffusion
+                # space change. action_loss_weight then reads as a multiple of
+                # that parity rather than as an absolute scale.
+                dim_ratio = actions_in[0].numel() / x_start[0].numel()
+                terms["action_dim_ratio"] = th.full_like(loss_video, dim_ratio)
+                total_loss = loss_video + action_weight * dim_ratio * mse_action
                 terms["loss_total"] = total_loss
                 terms["loss"] = total_loss
             else:

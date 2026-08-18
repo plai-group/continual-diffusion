@@ -145,15 +145,20 @@ def test_gaussian_diffusion_training_losses():
 
     terms = diffusion.training_losses(model, x, t, model_kwargs=model_kwargs, latent_mask=latent_mask)
 
-    required_keys = ["loss", "loss_video", "loss_action", "loss_total", "mse", "eval-mse"]
+    required_keys = ["loss", "loss_video", "loss_action", "loss_total", "mse", "eval-mse",
+                     "action_dim_ratio"]
     # loss_vid / loss_act were aliases of loss_video / loss_action; one name each.
     for k in ("loss_vid", "loss_act"):
         assert k not in terms, f"Stale alias '{k}' is back in diffusion terms"
     for k in required_keys:
         assert k in terms, f"Missing key '{k}' in diffusion terms: {list(terms.keys())}"
 
-    # Check loss equation: loss_total == loss_video + 1.5 * loss_action
-    expected_total = terms["loss_video"] + 1.5 * terms["loss_action"]
+    # loss_total == loss_video + weight * (D_a/D_v) * loss_action. The dimension
+    # ratio is what keeps the two mean_flat terms comparable per element; without
+    # it a 10-d action vector carries the same weight as a whole frame of pixels.
+    ratio = actions[0].numel() / x[0].numel()
+    assert torch.allclose(terms["action_dim_ratio"], torch.full_like(terms["loss_video"], ratio))
+    expected_total = terms["loss_video"] + 1.5 * ratio * terms["loss_action"]
     assert torch.allclose(terms["loss_total"], expected_total, atol=1e-5), "Loss total formula mismatch"
     assert torch.allclose(terms["loss"], terms["loss_total"], atol=1e-5), "Loss mismatch"
     print(f"  [PASS] training_losses computed all terms:")

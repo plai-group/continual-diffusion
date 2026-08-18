@@ -397,6 +397,10 @@ def run_debug_validation(model, diffusion, valset, device, out_dir,
             latent_mask=latent_mask.cpu(),
             return_decoded=False,
         )
+        samples_act = None
+        if isinstance(samples, tuple):
+            samples_video, samples_act = samples
+            samples = samples_video
         samples = samples.to(device)
         # Keep the observed half exactly as given; only the generated half is model output.
         samples = samples * latent_mask + x0 * obs_mask
@@ -413,6 +417,20 @@ def run_debug_validation(model, diffusion, valset, device, out_dir,
             rec = {"row": row["num"], "prompt": row["prompt"], "type": row["test_type"]}
             rec.update({f"next/{k}": v for k, v in m_next.items()})
             rec.update({f"roll/{k}": v for k, v in m_roll.items()})
+            if samples_act is not None and act_chunk is not None:
+                p_act = samples_act[j].to(device)
+                g_act = act_chunk[j].to(device)
+                next_p_k = (p_act[n_obs:n_obs+1, :8] > 0.5).float()
+                next_g_k = (g_act[n_obs:n_obs+1, :8] > 0.5).float()
+                rec["next/key_acc"] = float((next_p_k == next_g_k).float().mean().item())
+                rec["next/mouse_l1"] = float((p_act[n_obs:n_obs+1, 8:10] - g_act[n_obs:n_obs+1, 8:10]).abs().mean().item())
+                rec["next/mouse_mse"] = float(((p_act[n_obs:n_obs+1, 8:10] - g_act[n_obs:n_obs+1, 8:10])**2).mean().item())
+
+                roll_p_k = (p_act[n_obs:, :8] > 0.5).float()
+                roll_g_k = (g_act[n_obs:, :8] > 0.5).float()
+                rec["roll/key_acc"] = float((roll_p_k == roll_g_k).float().mean().item())
+                rec["roll/mouse_l1"] = float((p_act[n_obs:, 8:10] - g_act[n_obs:, 8:10]).abs().mean().item())
+                rec["roll/mouse_mse"] = float(((p_act[n_obs:, 8:10] - g_act[n_obs:, 8:10])**2).mean().item())
             per_row.append(rec)
 
             slug = valset.slug(row)
@@ -482,6 +500,8 @@ def run_debug_validation(model, diffusion, valset, device, out_dir,
                                 },
                                 latent_mask=latent_mask_j.cpu(), return_decoded=False,
                             )
+                        if isinstance(s, tuple):
+                            s = s[0]
                         s = s.to(device)
                         return (s * latent_mask_j + x0_j * obs_mask_j)[0]
 
@@ -526,8 +546,15 @@ def run_debug_validation(model, diffusion, valset, device, out_dir,
     METRIC_KEYS = ("psnr", "ssim", "lpips", "l2", "rmse", "l1")
     for scope, prefix in (("next", "val/video"), ("roll", "val/video_roll")):
         for k in METRIC_KEYS:
-            vals = [r[f"{scope}/{k}"] for r in per_row]
-            agg[f"{prefix}/{k}"] = float(np.mean(vals))
+            vals = [r[f"{scope}/{k}"] for r in per_row if f"{scope}/{k}" in r]
+            if vals:
+                agg[f"{prefix}/{k}"] = float(np.mean(vals))
+    ACT_METRIC_KEYS = ("key_acc", "mouse_l1", "mouse_mse")
+    for scope, prefix in (("next", "val/action"), ("roll", "val/action_roll")):
+        for k in ACT_METRIC_KEYS:
+            vals = [r[f"{scope}/{k}"] for r in per_row if f"{scope}/{k}" in r]
+            if vals:
+                agg[f"{prefix}/{k}"] = float(np.mean(vals))
 
     if swap_rows:
         agg["val/swap/l2_true_vs_swap"] = float(np.mean([r["l2_true_swap"] for r in swap_rows]))

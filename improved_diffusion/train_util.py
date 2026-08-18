@@ -439,7 +439,15 @@ class TrainLoop:
             model_kwargs = {'frame_indices': frame_indices, 'obs_mask': obs_mask,
                              'latent_mask': latent_mask, 'x0': micro}
             if micro_actions is not None:
-                model_kwargs['actions'] = micro_actions.to(dist_util.dev(), dtype=th.float32)
+                micro_act_dev = micro_actions.to(dist_util.dev(), dtype=th.float32)
+                model_kwargs['actions'] = micro_act_dev
+                if getattr(self.model, 'generate_actions', False) or getattr(self.args, 'generate_actions', False):
+                    obs_act_mask = obs_mask.view(obs_mask.shape[0], obs_mask.shape[1], 1) if obs_mask.ndim == 5 else obs_mask
+                    latent_act_mask = latent_mask.view(latent_mask.shape[0], latent_mask.shape[1], 1) if latent_mask.ndim == 5 else latent_mask
+                    model_kwargs['obs_action_mask'] = obs_act_mask
+                    model_kwargs['latent_action_mask'] = latent_act_mask
+                    model_kwargs['actions0'] = micro_act_dev
+                    model_kwargs['action_loss_weight'] = getattr(self.args, 'action_loss_weight', 1.0)
 
             last_batch = (i + self.microbatch) >= batch1.shape[0]
             t, weights = self.schedule_sampler.sample(micro.shape[0], dist_util.dev())
@@ -629,6 +637,8 @@ class TrainLoop:
                 return_attn_weights=True,
                 return_decoded=False,
             )
+            if isinstance(samples, tuple):
+                samples, _ = samples
             # NOTE: Don't decode latent samples
             samples = (samples.cpu() * latent_mask + batch * obs_mask).float()
             _mark_as_observed(samples[:, :n_obs])

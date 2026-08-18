@@ -146,6 +146,8 @@ class _WrappedModel:
         self.rescale_timesteps = rescale_timesteps
         self.original_num_steps = original_num_steps
 
+    def __getattr__(self, name):
+        return getattr(self.model, name)
 
     def __call__(self, x, timesteps, **kwargs):
         ts = timesteps

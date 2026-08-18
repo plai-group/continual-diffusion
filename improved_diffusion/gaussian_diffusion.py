@@ -330,16 +330,34 @@ class GaussianDiffusion:
         assert (
             model_mean.shape == model_log_variance.shape == pred_xstart.shape == x.shape
         )
+        # Discriminate the model's second return value explicitly, based on
+        # the model itself, instead of relying on isinstance(..., th.Tensor).
+        # VDT action-generation models return an action tensor (or None) here;
+        # the UNet returns an attention-weights dict (or None, depending on
+        # return_attn_weights). The model may be DDP/DataParallel-wrapped, so
+        # fall back to `.module` when the attribute isn't found directly.
+        action_dim = getattr(
+            model, 'action_dim', getattr(getattr(model, 'module', None), 'action_dim', 0)
+        )
+        model_generates_actions = getattr(
+            model, 'generate_actions', getattr(getattr(model, 'module', None), 'generate_actions', False)
+        )
+        is_action_model = action_dim > 0 and model_generates_actions
+
         pred_actstart = None
-        if isinstance(model_out_act, th.Tensor):
-            if self.model_mean_type == ModelMeanType.START_X:
-                pred_actstart = model_out_act
-            elif self.model_mean_type == ModelMeanType.EPSILON:
-                act_t = model_kwargs.get('actions', None)
-                if act_t is not None:
-                    pred_actstart = self._predict_xstart_from_eps(x_t=act_t, t=t, eps=model_out_act)
-                else:
+        attn = None
+        if is_action_model:
+            if model_out_act is not None:
+                if self.model_mean_type == ModelMeanType.START_X:
                     pred_actstart = model_out_act
+                elif self.model_mean_type == ModelMeanType.EPSILON:
+                    act_t = model_kwargs.get('actions', None)
+                    if act_t is not None:
+                        pred_actstart = self._predict_xstart_from_eps(x_t=act_t, t=t, eps=model_out_act)
+                    else:
+                        pred_actstart = model_out_act
+        else:
+            attn = model_out_act
 
         return {
             "mean": model_mean,
@@ -347,7 +365,7 @@ class GaussianDiffusion:
             "log_variance": model_log_variance,
             "pred_xstart": pred_xstart,
             "pred_actstart": pred_actstart,
-            "attn": model_out_act if not isinstance(model_out_act, th.Tensor) else None,
+            "attn": attn,
         }
 
     def do_edm_x0_prediction_scaling(self, t, xt, output):
@@ -1038,7 +1056,6 @@ class GaussianDiffusion:
             terms["eval-mse"] = mean_flat((target - model_output) ** 2, mask=eval_mask)
             loss_video = terms["mse"] + terms.get("vb", 0)
             terms["loss_video"] = loss_video
-            terms["loss_vid"] = loss_video
 
             if model_out_act is not None and is_action_gen:
                 target_act = {
@@ -1054,7 +1071,6 @@ class GaussianDiffusion:
                     latent_action_mask = latent_mask.view(latent_mask.shape[0], latent_mask.shape[1], 1) if (isinstance(latent_mask, th.Tensor) and latent_mask.ndim == 5) else latent_mask
                 mse_action = mean_flat((target_act - model_out_act) ** 2, mask=latent_action_mask)
                 terms["loss_action"] = mse_action
-                terms["loss_act"] = mse_action
 
                 action_weight = call_kwargs.get('action_loss_weight', getattr(self, 'action_loss_weight', 1.0))
                 total_loss = loss_video + action_weight * mse_action

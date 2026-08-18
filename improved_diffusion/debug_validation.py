@@ -24,6 +24,7 @@ import torch as th
 import torch.nn as nn
 
 from . import debug_actions
+from .action_masks import frame_mask_to_action_mask
 from .logger import logger
 from .rng_util import RNG
 from .decode_debug import (
@@ -407,9 +408,12 @@ def run_debug_validation(model, diffusion, valset, device, out_dir,
             if generates_actions:
                 # Teacher forcing: the observed prefix's actions are pinned to
                 # ground truth and the generated half is denoised jointly with
-                # the video. teacher_force_actions=False pins nothing, so the
-                # model must generate the observed half too (free rollout).
-                obs_act_mask = obs_mask.view(b, T, 1)
+                # the video. The action mask lags the frame mask by one row --
+                # see action_masks -- so the action taken at the last observed
+                # frame, which produces the first generated frame, is pinned
+                # too. teacher_force_actions=False pins nothing, so the model
+                # must generate the observed half too (free rollout).
+                obs_act_mask = frame_mask_to_action_mask(obs_mask)
                 if not teacher_force_actions:
                     obs_act_mask = th.zeros_like(obs_act_mask)
                 model_kwargs["actions0"] = act_chunk

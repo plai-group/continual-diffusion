@@ -23,6 +23,7 @@ from .fp16_util import (
     unflatten_master_params,
     zero_grad,
 )
+from .action_masks import frame_mask_to_action_mask
 from .nn import update_ema
 from .resample import LossAwareSampler, UniformSampler
 from .rng_util import rng_decorator, RNG
@@ -442,8 +443,8 @@ class TrainLoop:
                 micro_act_dev = micro_actions.to(dist_util.dev(), dtype=th.float32)
                 model_kwargs['actions'] = micro_act_dev
                 if getattr(self.model, 'generate_actions', False) or getattr(self.args, 'generate_actions', False):
-                    obs_act_mask = obs_mask.view(obs_mask.shape[0], obs_mask.shape[1], 1) if obs_mask.ndim == 5 else obs_mask
-                    latent_act_mask = latent_mask.view(latent_mask.shape[0], latent_mask.shape[1], 1) if latent_mask.ndim == 5 else latent_mask
+                    obs_act_mask = frame_mask_to_action_mask(obs_mask)
+                    latent_act_mask = frame_mask_to_action_mask(latent_mask)
                     model_kwargs['obs_action_mask'] = obs_act_mask
                     model_kwargs['latent_action_mask'] = latent_act_mask
                     model_kwargs['actions0'] = micro_act_dev

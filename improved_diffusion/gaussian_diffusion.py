@@ -11,6 +11,7 @@ import math
 import numpy as np
 import torch as th
 
+from .action_masks import frame_mask_to_action_mask
 from .nn import mean_flat
 from .losses import normal_kl, discretized_gaussian_log_likelihood
 
@@ -849,7 +850,7 @@ class GaussianDiffusion:
                 obs_act_indicator = cur_kwargs.get("obs_action_mask", None)
                 if obs_act_indicator is None and "obs_mask" in cur_kwargs:
                     om = cur_kwargs["obs_mask"]
-                    obs_act_indicator = om.view(om.shape[0], om.shape[1], 1) if (isinstance(om, th.Tensor) and om.ndim == 5) else om
+                    obs_act_indicator = frame_mask_to_action_mask(om) if isinstance(om, th.Tensor) else om
                 if obs_act_indicator is None:
                     obs_act_indicator = 0
                 latent_act_indicator = 1 - obs_act_indicator
@@ -1018,7 +1019,7 @@ class GaussianDiffusion:
                 call_kwargs['actions0'] = actions_in
                 if 'obs_action_mask' not in call_kwargs and 'obs_mask' in call_kwargs:
                     om = call_kwargs['obs_mask']
-                    call_kwargs['obs_action_mask'] = om.view(om.shape[0], om.shape[1], 1) if (isinstance(om, th.Tensor) and om.ndim == 5) else om
+                    call_kwargs['obs_action_mask'] = frame_mask_to_action_mask(om) if isinstance(om, th.Tensor) else om
 
             model_output, model_out_act = model(x_t, timesteps=self._scale_timesteps(t), **call_kwargs)
 

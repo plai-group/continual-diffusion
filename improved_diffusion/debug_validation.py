@@ -299,6 +299,27 @@ def _action_bars(a):
     return [_action_vec_to_bar(d[t]) for t in range(d.shape[0])]
 
 
+def _action_metrics(p_act, g_act, sl):
+    """Action metrics over one frame window, plus the all-zeros baseline.
+
+    Keys are pressed 2-33% of the time in this corpus, so the do-nothing
+    predictor already scores ~0.93 key_acc and its mouse_mse is ~3.4. Without
+    the *_trivial series a dead action head and a learning one look alike on
+    the dashboard. They are measured from the GT rows in this batch rather
+    than hard-coded, so they track whatever data the run actually saw.
+    """
+    p_k, g_k = (p_act[sl, :8] > 0.5).float(), (g_act[sl, :8] > 0.5).float()
+    p_m, g_m = p_act[sl, 8:10], g_act[sl, 8:10]
+    return {
+        "key_acc": float((p_k == g_k).float().mean().item()),
+        "mouse_l1": float((p_m - g_m).abs().mean().item()),
+        "mouse_mse": float(((p_m - g_m) ** 2).mean().item()),
+        "key_acc_trivial": float((g_k == 0).float().mean().item()),
+        "mouse_l1_trivial": float(g_m.abs().mean().item()),
+        "mouse_mse_trivial": float((g_m ** 2).mean().item()),
+    }
+
+
 def _label_panel(panel, text):
     """Draw a panel name in the top bar's empty middle band."""
     cv2.putText(panel, text, (panel.shape[1] // 2 - 60, 60),
@@ -460,28 +481,10 @@ def run_debug_validation(model, diffusion, valset, device, out_dir,
             if samples_act is not None and act_chunk is not None:
                 p_act = samples_act[j].to(device)
                 g_act = act_chunk[j].to(device)
-                next_p_k = (p_act[n_obs:n_obs+1, :8] > 0.5).float()
-                next_g_k = (g_act[n_obs:n_obs+1, :8] > 0.5).float()
-                rec["next/key_acc"] = float((next_p_k == next_g_k).float().mean().item())
-                rec["next/mouse_l1"] = float((p_act[n_obs:n_obs+1, 8:10] - g_act[n_obs:n_obs+1, 8:10]).abs().mean().item())
-                rec["next/mouse_mse"] = float(((p_act[n_obs:n_obs+1, 8:10] - g_act[n_obs:n_obs+1, 8:10])**2).mean().item())
-
-                roll_p_k = (p_act[n_obs:, :8] > 0.5).float()
-                roll_g_k = (g_act[n_obs:, :8] > 0.5).float()
-                rec["roll/key_acc"] = float((roll_p_k == roll_g_k).float().mean().item())
-                rec["roll/mouse_l1"] = float((p_act[n_obs:, 8:10] - g_act[n_obs:, 8:10]).abs().mean().item())
-                rec["roll/mouse_mse"] = float(((p_act[n_obs:, 8:10] - g_act[n_obs:, 8:10])**2).mean().item())
-
-                # What the all-zeros predictor would score on these same rows.
-                # Keys are pressed 2-33%% of the time, so doing nothing already
-                # scores ~0.93 key_acc -- without this series a dead head and a
-                # learning one look alike on the dashboard. Measured from the GT
-                # in this batch rather than hard-coded, so it cannot go stale.
-                for scope, sl in (("next", slice(n_obs, n_obs + 1)), ("roll", slice(n_obs, None))):
-                    g_k, g_m = (g_act[sl, :8] > 0.5).float(), g_act[sl, 8:10]
-                    rec[f"{scope}/key_acc_trivial"] = float((g_k == 0).float().mean().item())
-                    rec[f"{scope}/mouse_l1_trivial"] = float(g_m.abs().mean().item())
-                    rec[f"{scope}/mouse_mse_trivial"] = float((g_m ** 2).mean().item())
+                for scope, sl in (("next", slice(n_obs, n_obs + 1)),
+                                  ("roll", slice(n_obs, None))):
+                    rec.update({f"{scope}/{k}": v
+                                for k, v in _action_metrics(p_act, g_act, sl).items()})
             per_row.append(rec)
 
             slug = valset.slug(row)

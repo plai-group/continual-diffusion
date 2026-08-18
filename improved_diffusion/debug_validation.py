@@ -348,7 +348,8 @@ def _render_triple_overlay(frames_gt, frames_true, frames_swap, frames_zero,
 def run_debug_validation(model, diffusion, valset, device, out_dir,
                          step=0, chunk_size=3, log_videos=True,
                          per_task_scalars=False, actions=True,
-                         swap_test=True, cfg_scale=1.0):
+                         swap_test=True, cfg_scale=1.0,
+                         teacher_force_actions=True):
     """Sample every validation row, render overlays, log metrics to wandb.
 
     Returns the aggregate metric dict (also logged via ``logger.logkv``).
@@ -357,7 +358,13 @@ def run_debug_validation(model, diffusion, valset, device, out_dir,
     out_dir.mkdir(parents=True, exist_ok=True)
     metrics = _get_metrics(device)
 
-    action_conditioned = getattr(model, "action_embedder", None) is not None
+    _m = getattr(model, "module", model)
+    # Generation mode has no action_embedder (the action is a denoised token,
+    # not a conditioning vector), so gating on it hid the whole action path.
+    generates_actions = (bool(getattr(_m, "generate_actions", False))
+                         and getattr(_m, "action_dim", 0) > 0)
+    action_conditioned = (getattr(_m, "action_embedder", None) is not None
+                          or generates_actions)
     sampling_model = _CFGWrapper(model, cfg_scale) if cfg_scale != 1.0 else model
 
     T, n_obs = valset.T, valset.n_observed
@@ -385,6 +392,16 @@ def run_debug_validation(model, diffusion, valset, device, out_dir,
         }
         if act_chunk is not None:
             model_kwargs["actions"] = act_chunk
+            if generates_actions:
+                # Teacher forcing: the observed prefix's actions are pinned to
+                # ground truth and the generated half is denoised jointly with
+                # the video. teacher_force_actions=False pins nothing, so the
+                # model must generate the observed half too (free rollout).
+                obs_act_mask = obs_mask.view(b, T, 1)
+                if not teacher_force_actions:
+                    obs_act_mask = th.zeros_like(obs_act_mask)
+                model_kwargs["actions0"] = act_chunk
+                model_kwargs["obs_action_mask"] = obs_act_mask
 
         # Match the schedule's true max sigma; see the note in train_util.log_samples.
         sched_sigma_max = float(diffusion.timestep2sigma(diffusion.num_timesteps - 1))
@@ -497,6 +514,14 @@ def run_debug_validation(model, diffusion, valset, device, out_dir,
                                     "frame_indices": None, "x0": x0_j,
                                     "obs_mask": obs_mask_j, "latent_mask": latent_mask_j,
                                     "actions": act,
+                                    # In generation mode the action tokens are
+                                    # denoised too, so a swapped action only acts
+                                    # as conditioning if it is pinned everywhere.
+                                    **({"actions0": act,
+                                        "obs_action_mask": th.ones(
+                                            act.shape[0], act.shape[1], 1,
+                                            device=act.device, dtype=act.dtype)}
+                                       if generates_actions else {}),
                                 },
                                 latent_mask=latent_mask_j.cpu(), return_decoded=False,
                             )

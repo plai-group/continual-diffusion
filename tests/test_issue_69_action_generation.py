@@ -59,7 +59,7 @@ def test_vdt_shapes_and_grads():
     assert vdt_gen.action_x_embedder is not None
     assert vdt_gen.action_pos_embed is not None
     assert vdt_gen.action_pos_embed.shape == (1, 1, 384)
-    assert vdt_gen.action_final_layer is not None
+    assert vdt_gen.action_head is not None
 
     v_out_g, a_out_g = vdt_gen(x, timesteps=t, actions=actions)
     assert v_out_g.shape == (B, T, C, H, W), f"Expected {(B, T, C, H, W)}, got {v_out_g.shape}"
@@ -82,7 +82,7 @@ def test_vdt_shapes_and_grads():
     loss.backward()
     assert vdt_gen.action_pos_embed.grad is not None, "action_pos_embed received no gradient"
     assert vdt_gen.action_x_embedder.weight.grad is not None, "action_x_embedder received no gradient"
-    assert vdt_gen.action_final_layer.linear.weight.grad is not None, "action_final_layer received no gradient"
+    assert vdt_gen.action_head.linear.weight.grad is not None, "action_head received no gradient"
     assert vdt_gen.final_layer.linear.weight.grad is not None, "final_layer received no gradient"
     print("  [PASS] All action and video sub-modules received gradients during backward pass")
 
@@ -162,7 +162,7 @@ def test_gaussian_diffusion_training_losses():
     loss = terms["loss"].mean()
     loss.backward()
     assert model.action_x_embedder.weight.grad is not None
-    assert model.action_final_layer.linear.weight.grad is not None
+    assert model.action_head.linear.weight.grad is not None
     assert model.final_layer.linear.weight.grad is not None
     print("  [PASS] Backward pass through total loss completed successfully")
 
@@ -267,12 +267,12 @@ def test_cli_and_defaults():
     assert args.action_dim == 10
     print("  [PASS] Argument parser correctly parsed --generate_actions and --action_loss_weight")
 
-    args2 = parser.parse_args([
-        "--action_generation", "True",
-        "--action_dim", "10",
-    ])
-    assert args2.action_generation is True
-    print("  [PASS] Argument parser alias --action_generation parsed successfully")
+    # generate_actions is the only flag; the old --action_generation alias was
+    # removed (two names for one switch invited exactly this confusion).
+    args2 = parser.parse_args(["--action_dim", "10"])
+    assert args2.generate_actions is False
+    assert not hasattr(args2, "action_generation")
+    print("  [PASS] generate_actions defaults to False and has no alias")
 
 
 if __name__ == "__main__":

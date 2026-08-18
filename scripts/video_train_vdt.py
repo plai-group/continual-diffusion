@@ -65,8 +65,6 @@ def num_available_cores():
 
 def main():
     args = create_argparser().parse_args()
-    if getattr(args, 'action_generation', False):
-        args.generate_actions = True
     if args.num_workers == -1:
         # Set the number of workers automatically.
         args.num_workers = max(num_available_cores() - 1, 1)
@@ -202,7 +200,6 @@ def create_argparser():
         debug_validation_per_task=False,
         cfg_scale=1.0,  # sampling-time only; not a model kwarg. 1.0 = no guidance.
         generate_actions=False,
-        action_generation=False,
         action_loss_weight=1.0,
     )
     defaults.update(model_and_diffusion_defaults(model_type='vdt'))

@@ -163,6 +163,11 @@ class ActionEmbedder(nn.Module):
 
 def drop_path(x, drop_prob: float = 0., training: bool = False):
     """Drop paths (Stochastic Depth) per sample (when applied in main path of residual blocks).
+    This is the same as the DropConnect impl I created for EfficientNet, etc networks, however,
+    the original name is misleading as 'Drop Connect' is a different form of dropout in a separate paper...
+    See discussion: https://github.com/tensorflow/tpu/issues/494#issuecomment-532968956 ... I've opted for
+    changing the layer and argument names to 'drop path' rather than mix DropConnect as a layer name and use
+    'survival rate' as the argument.
     """
     if drop_prob == 0. or not training:
         return x
@@ -199,6 +204,7 @@ class VDTBlock(nn.Module):
 
         ## Temporal Attention Parameters
         if self.mode == 'video':
+            
             self.temporal_norm1 = nn.LayerNorm(hidden_size)
             self.temporal_attn = Attention(
               hidden_size, num_heads=num_heads, qkv_bias=True)
@@ -232,7 +238,7 @@ class VDTBlock(nn.Module):
         return x
 
 class DropPath(nn.Module):
-    """Drop paths (Stochastic Depth) per sample (when applied in main path of residual blocks).
+    """Drop paths (Stochastic Depth) per sample  (when applied in main path of residual blocks).
     """
     def __init__(self, drop_prob=None):
         super(DropPath, self).__init__()
@@ -262,9 +268,9 @@ class FinalLayer(nn.Module):
         return x
 
 
-class ActionFinalLayer(nn.Module):
+class ActionHead(nn.Module):
     """
-    The final layer of VDT for predicting actions.
+    The output head of VDT for predicting actions.
     """
     def __init__(self, hidden_size, action_dim, num_frames):
         super().__init__()
@@ -321,17 +327,17 @@ class VDT(nn.Module):
             if generate_actions:
                 self.action_x_embedder = nn.Linear(action_dim, hidden_size, bias=True)
                 self.action_pos_embed = nn.Parameter(torch.zeros(1, 1, hidden_size))
-                self.action_final_layer = ActionFinalLayer(hidden_size, action_dim, num_frames)
+                self.action_head = ActionHead(hidden_size, action_dim, num_frames)
                 self.action_embedder = None
             else:
                 self.action_x_embedder = None
                 self.action_pos_embed = None
-                self.action_final_layer = None
+                self.action_head = None
                 self.action_embedder = ActionEmbedder(action_dim, hidden_size, action_dropout_prob)
         else:
             self.action_x_embedder = None
             self.action_pos_embed = None
-            self.action_final_layer = None
+            self.action_head = None
             self.action_embedder = None
 
         num_patches = self.x_embedder.num_patches
@@ -400,11 +406,11 @@ class VDT(nn.Module):
         nn.init.constant_(self.final_layer.linear.weight, 0)
         nn.init.constant_(self.final_layer.linear.bias, 0)
 
-        if self.action_final_layer is not None:
-            nn.init.constant_(self.action_final_layer.adaLN_modulation[-1].weight, 0)
-            nn.init.constant_(self.action_final_layer.adaLN_modulation[-1].bias, 0)
-            nn.init.constant_(self.action_final_layer.linear.weight, 0)
-            nn.init.constant_(self.action_final_layer.linear.bias, 0)
+        if self.action_head is not None:
+            nn.init.constant_(self.action_head.adaLN_modulation[-1].weight, 0)
+            nn.init.constant_(self.action_head.adaLN_modulation[-1].bias, 0)
+            nn.init.constant_(self.action_head.linear.weight, 0)
+            nn.init.constant_(self.action_head.linear.bias, 0)
 
     def unpatchify(self, x):
         """
@@ -464,6 +470,11 @@ class VDT(nn.Module):
         y = self.y_embedder(y, self.training)    # (B, D)
 
         if not self.generate_actions and actions is not None and self.action_embedder is not None:
+            # `y` is kept here even though num_classes=0 makes it a learned
+            # constant: dropping it leaves y_embedder unreachable by backward,
+            # and an orphaned parameter with p.grad None crashed _log_grad_norm
+            # on the first optimizer step. It is expressively free -- the action
+            # embedder has its own bias -- so this costs nothing.
             c = t.unsqueeze(1) + y.unsqueeze(1) + \
                 self.action_embedder(actions, self.training, force_action_drop)  # (B, T, D)
         else:
@@ -477,9 +488,9 @@ class VDT(nn.Module):
         x_out = self.unpatchify(x_out)            # (B*T, out_channels, H, W)
         x_out = x_out.view(B, T, x_out.shape[-3], x_out.shape[-2], x_out.shape[-1])
 
-        if generating_actions and self.action_final_layer is not None:
+        if generating_actions and self.action_head is not None:
             action_tokens_out = tokens[:, N:, :]  # (B*T, 1, D)
-            act_out = self.action_final_layer(action_tokens_out, c)  # (B*T, 1, action_dim)
+            act_out = self.action_head(action_tokens_out, c)  # (B*T, 1, action_dim)
             act_out = act_out.view(B, T, self.action_dim)
             return x_out, act_out
 
@@ -489,9 +500,14 @@ class VDT(nn.Module):
         """
         Forward pass of VDT, but also batches the unconditional forward pass for classifier-free guidance.
         """
+        # https://github.com/openai/glide-text2im/blob/main/notebooks/text2im.ipynb
         half = x[: len(x) // 2]
         combined = torch.cat([half, half], dim=0)
         model_out, _ = self.forward(combined, timesteps=t)
+        # For exact reproducibility reasons, we apply classifier-free guidance on only
+        # three channels by default. The standard approach to cfg applies it to all channels.
+        # This can be done by uncommenting the following line and commenting-out the line following that.
+        # eps, rest = model_out[:, :self.in_channels], model_out[:, self.in_channels:]
         eps, rest = model_out[:, :3], model_out[:, 3:]
         cond_eps, uncond_eps = torch.split(eps, len(eps) // 2, dim=0)
         half_eps = uncond_eps + cfg_scale * (cond_eps - uncond_eps)
@@ -502,12 +518,19 @@ class VDT(nn.Module):
 #################################################################################
 #                   Sine/Cosine Positional Embedding Functions                  #
 #################################################################################
+# https://github.com/facebookresearch/mae/blob/main/util/pos_embed.py
 
 def get_2d_sincos_pos_embed(embed_dim, grid_size, cls_token=False, extra_tokens=0):
+    """
+    grid_size: grid_size tuple (height, width)
+    return:
+    pos_embed: [grid_size*grid_size, embed_dim] or [1+grid_size*grid_size, embed_dim] (w/ or w/o cls_token)
+    """
     if isinstance(grid_size, int):
         grid_size = (grid_size, grid_size)
 
     h, w = grid_size
+
     grid_h = np.arange(h, dtype=np.float32)
     grid_w = np.arange(w, dtype=np.float32)
     grid = np.meshgrid(grid_w, grid_h)  # here w goes first
@@ -522,13 +545,21 @@ def get_2d_sincos_pos_embed(embed_dim, grid_size, cls_token=False, extra_tokens=
 
 def get_2d_sincos_pos_embed_from_grid(embed_dim, grid):
     assert embed_dim % 2 == 0
+
+    # use half of dimensions to encode grid_h
     emb_h = get_1d_sincos_pos_embed_from_grid(embed_dim // 2, grid[0])  # (H*W, D/2)
     emb_w = get_1d_sincos_pos_embed_from_grid(embed_dim // 2, grid[1])  # (H*W, D/2)
+
     emb = np.concatenate([emb_h, emb_w], axis=1) # (H*W, D)
     return emb
 
 
 def get_1d_sincos_pos_embed_from_grid(embed_dim, pos):
+    """
+    embed_dim: output dimension for each position
+    pos: a list of positions to be encoded: size (M,)
+    out: (M, D)
+    """
     assert embed_dim % 2 == 0
     omega = np.arange(embed_dim // 2, dtype=np.float64)
     omega /= embed_dim / 2.

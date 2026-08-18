@@ -150,8 +150,8 @@ singularity exec --nv \
     --max_frames "$MAX_FRAMES" \
     --masking_mode "$MASKING_MODE" \
     --learn_sigma "$LEARN_SIGMA" \
-    --action_dim "$ACTION_DIM" 
-    --generate_actions True 
+    --action_dim "$ACTION_DIM" \
+    --generate_actions True \
     --action_loss_weight 1.0 \
     --action_dropout_prob "$ACTION_DROPOUT_PROB" \
     --cfg_scale "$CFG_SCALE" \

@@ -262,6 +262,35 @@ def _action_vec_to_bar(vec):
     }
 
 
+def _to_display_actions(a):
+    """Shift the causal action cache back to the DISPLAY convention.
+
+    The cache is causal: row i is the action from window [i-1, i), i.e. the
+    one that CAUSED frame i. That is right for conditioning the model, but
+    drawing it as-is paints an action onto the very frame it produced -- a
+    click appears simultaneously with its own effect, which reads as though
+    causality were violated.
+
+    decode_debug.get_frame_actions (used by the 2-row val/overlay) instead
+    returns the RAW action for window [i, i+1), so the input renders one
+    frame BEFORE its consequence. Match that here, or the two overlays
+    disagree by one frame. cache[i+1] == raw[i], and the final frame has no
+    successor so its bar is blank.
+    """
+    if hasattr(a, 'detach'):
+        a = a.detach().float().cpu().numpy()
+    a = np.asarray(a)
+    out = np.zeros_like(a)
+    out[:-1] = a[1:]
+    return out
+
+
+def _action_bars(a):
+    """(T, 10) causal action array -> the T bar dicts render_overlay draws."""
+    d = _to_display_actions(a)
+    return [_action_vec_to_bar(d[t]) for t in range(d.shape[0])]
+
+
 def _label_panel(panel, text):
     """Draw a panel name in the top bar's empty middle band."""
     cv2.putText(panel, text, (panel.shape[1] // 2 - 60, 60),
@@ -270,8 +299,8 @@ def _label_panel(panel, text):
 
 
 def _render_triple_overlay(frames_gt, frames_true, frames_swap, frames_zero,
-                           actions_true, actions_swap, actions_zero,
-                           n_observed, out_path, title=None):
+                           actions_gt, actions_true, actions_swap, actions_zero,
+                           n_observed, out_path, title=None, true_label="TRUE"):
     """2x2 grid mp4:  GT | TRUE  over  SWAP | ZERO.
 
     GT is included so the generated half can be judged against reality, not only
@@ -283,7 +312,10 @@ def _render_triple_overlay(frames_gt, frames_true, frames_swap, frames_zero,
 
     Each panel's action bar comes from that panel's own action tensor, so the
     swap panel visibly shows the swapped keys / reversed mouse it was given.
-    GT carries the true actions, being the real recording.
+    GT carries the recorded actions. When the model generates actions, the
+    second panel carries the ones it GENERATED (label GEN), so GT vs GEN is a
+    direct read of action-prediction quality; otherwise it carries the true
+    actions it was conditioned on (label TRUE).
 
     Same imageio/libx264 settings as decode_debug.render_overlay -- cv2's mp4v
     encodes fine and then will not play in wandb.
@@ -294,29 +326,9 @@ def _render_triple_overlay(frames_gt, frames_true, frames_swap, frames_zero,
     frames_zero = np.asarray(frames_zero)
     T = frames_true.shape[0]
 
-    def _to_display(a):
-        """Shift the causal action cache back to the DISPLAY convention.
-
-        The cache is causal: row i is the action from window [i-1, i), i.e. the
-        one that CAUSED frame i. That is right for conditioning the model, but
-        drawing it as-is paints an action onto the very frame it produced -- a
-        click appears simultaneously with its own effect, which reads as though
-        causality were violated.
-
-        decode_debug.get_frame_actions (used by the 2-row val/overlay) instead
-        returns the RAW action for window [i, i+1), so the input renders one
-        frame BEFORE its consequence. Match that here, or the two overlays
-        disagree by one frame. cache[i+1] == raw[i], and the final frame has no
-        successor so its bar is blank.
-        """
-        a = np.asarray(a)
-        out = np.zeros_like(a)
-        out[:-1] = a[1:]
-        return out
-
-    acts = [_to_display(a) for a in
-            (actions_true, actions_true, actions_swap, actions_zero)]
-    labels = ["GT", "TRUE", "SWAP", "ZERO"]
+    acts = [_to_display_actions(a) for a in
+            (actions_gt, actions_true, actions_swap, actions_zero)]
+    labels = ["GT", true_label, "SWAP", "ZERO"]
 
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -464,6 +476,10 @@ def run_debug_validation(model, diffusion, valset, device, out_dir,
                     render_overlay(
                         gt_frames=gt.cpu().numpy(),
                         pred_frames=pred.cpu().numpy(),
+                        # Top row keeps the recorded actions; the predicted row
+                        # shows what the model actually produced.
+                        pred_actions=(_action_bars(samples_act[j])
+                                      if samples_act is not None else None),
                         session_db_path=str(row["session_db"]),
                         start_frame_idx=row["window_start"],
                         out_path=str(mp4),
@@ -484,6 +500,7 @@ def run_debug_validation(model, diffusion, valset, device, out_dir,
             if swap_test and action_conditioned and act_chunk is not None:
                 try:
                     act_true_j = act_chunk[j:j + 1]
+                    gen_act_j = (samples_act[j] if samples_act is not None else None)
                     act_swap_j = _swap_actions(act_true_j, n_obs)
                     act_zero_j = _zero_actions(act_true_j, n_obs)
                     x0_j = x0[j:j + 1]
@@ -550,12 +567,24 @@ def run_debug_validation(model, diffusion, valset, device, out_dir,
                         mp4_swap = out_dir / f"step{step}_{slug}_swap.mp4"
                         _render_triple_overlay(
                             frames_gt=gt.cpu().numpy(),
-                            frames_true=true_full.cpu().numpy(),
+                            # The swap and zero passes pin their actions on every
+                            # frame -- that is what makes them a counterfactual --
+                            # so their action tokens are clamped and there is
+                            # nothing generated to look at there. The second panel
+                            # therefore shows the free rollout from the main
+                            # validation pass, which is teacher-forced on the
+                            # observed prefix only. val/swap/* below is still
+                            # computed from the three pinned passes.
+                            frames_true=(pred.cpu().numpy() if gen_act_j is not None
+                                         else true_full.cpu().numpy()),
                             frames_swap=swap_full.cpu().numpy(),
                             frames_zero=zero_full.cpu().numpy(),
-                            actions_true=act_true_j[0].cpu().numpy(),
+                            actions_gt=act_true_j[0].cpu().numpy(),
+                            actions_true=(gen_act_j if gen_act_j is not None
+                                          else act_true_j[0].cpu().numpy()),
                             actions_swap=act_swap_j[0].cpu().numpy(),
                             actions_zero=act_zero_j[0].cpu().numpy(),
+                            true_label=("GEN" if gen_act_j is not None else "TRUE"),
                             n_observed=n_obs, out_path=str(mp4_swap),
                             title=row["prompt"],
                         )

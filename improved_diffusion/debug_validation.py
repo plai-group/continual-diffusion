@@ -471,6 +471,17 @@ def run_debug_validation(model, diffusion, valset, device, out_dir,
                 rec["roll/key_acc"] = float((roll_p_k == roll_g_k).float().mean().item())
                 rec["roll/mouse_l1"] = float((p_act[n_obs:, 8:10] - g_act[n_obs:, 8:10]).abs().mean().item())
                 rec["roll/mouse_mse"] = float(((p_act[n_obs:, 8:10] - g_act[n_obs:, 8:10])**2).mean().item())
+
+                # What the all-zeros predictor would score on these same rows.
+                # Keys are pressed 2-33%% of the time, so doing nothing already
+                # scores ~0.93 key_acc -- without this series a dead head and a
+                # learning one look alike on the dashboard. Measured from the GT
+                # in this batch rather than hard-coded, so it cannot go stale.
+                for scope, sl in (("next", slice(n_obs, n_obs + 1)), ("roll", slice(n_obs, None))):
+                    g_k, g_m = (g_act[sl, :8] > 0.5).float(), g_act[sl, 8:10]
+                    rec[f"{scope}/key_acc_trivial"] = float((g_k == 0).float().mean().item())
+                    rec[f"{scope}/mouse_l1_trivial"] = float(g_m.abs().mean().item())
+                    rec[f"{scope}/mouse_mse_trivial"] = float((g_m ** 2).mean().item())
             per_row.append(rec)
 
             slug = valset.slug(row)
@@ -620,7 +631,8 @@ def run_debug_validation(model, diffusion, valset, device, out_dir,
             vals = [r[f"{scope}/{k}"] for r in per_row if f"{scope}/{k}" in r]
             if vals:
                 agg[f"{prefix}/{k}"] = float(np.mean(vals))
-    ACT_METRIC_KEYS = ("key_acc", "mouse_l1", "mouse_mse")
+    ACT_METRIC_KEYS = ("key_acc", "mouse_l1", "mouse_mse",
+                       "key_acc_trivial", "mouse_l1_trivial", "mouse_mse_trivial")
     for scope, prefix in (("next", "val/action"), ("roll", "val/action_roll")):
         for k in ACT_METRIC_KEYS:
             vals = [r[f"{scope}/{k}"] for r in per_row if f"{scope}/{k}" in r]

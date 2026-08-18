@@ -1,6 +1,6 @@
-"""
-Comprehensive Test Suite for Issue #69: Action Generation in VDT
-"""
+"""Action generation in VDT: the action token's shapes and gradients, its
+term in the diffusion loss, joint video+action sampling, and the CLI flags
+that switch it on."""
 
 import os
 import sys
@@ -276,11 +276,11 @@ def test_cli_and_defaults():
 
 
 if __name__ == "__main__":
-    print("Running Issue #69 Test Suite...")
+    print("Running VDT action-generation tests...")
     test_vdt_shapes_and_grads()
     test_gaussian_diffusion_training_losses()
     test_heun_sample()
     test_cli_and_defaults()
     print("\n" + "=" * 60)
-    print("ALL ISSUE #69 TESTS PASSED SUCCESSFULLY!")
+    print("ALL VDT ACTION-GENERATION TESTS PASSED")
     print("=" * 60)

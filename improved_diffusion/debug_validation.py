@@ -529,11 +529,7 @@ def run_debug_validation(model, diffusion, valset, device, out_dir,
                     # An overlay failure must never take down a training run.
                     print(f"[debug_validation] overlay failed for row {row['num']}: {e!r}")
 
-            # THE SWAP TEST (acceptance criterion): same model, same GT frame
-            # context, same starting noise, three action tensors differing only
-            # on the rows the model is given. If conditioning works these L2s
-            # are non-zero; if the model ignores actions they collapse toward 0.
-            # Never let a failure here kill a training run.
+            # The swap test (acceptance criterion): true/swapped/zero actions on the same context.
             if swap_test and action_conditioned and act_chunk is not None:
                 try:
                     act_true_j = act_chunk[j:j + 1]
@@ -568,14 +564,7 @@ def run_debug_validation(model, diffusion, valset, device, out_dir,
                     # dominated by heun_sample's noise rather than by whether the
                     # model listens to actions.
                     shared_noise = th.randn(*x0_j.shape, device=device)
-                    # Pinning `noise=` is NOT sufficient. heun_sample is an EDM
-                    # sampler with stochastic churn: with S_churn=80 over 50 steps
-                    # gamma is min(80/50, sqrt(2)-1) = 0.414, and it draws a fresh
-                    # th.randn_like from the GLOBAL rng at every step
-                    # (gaussian_diffusion.py:829). Without a fixed seed around each
-                    # pass those independent draws swamp the action effect and
-                    # val/swap/* would measure the sampler, not the conditioning --
-                    # it would look non-zero even for a model that ignores actions.
+                    # heun_sample's churn draws from the global RNG each step; reseed per pass too.
                     swap_seed = 20250813 + int(row["num"])
 
                     def _sample_with_actions(act):

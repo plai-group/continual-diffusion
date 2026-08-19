@@ -1,9 +1,4 @@
-# improved_diffusion/debug_actions.py
-#
-# Per-frame action vectors for the plaicraft-debug sqlite session DBs, cached
-# to disk as <session_dir>/actions_10d.npy. Reuses the same window-timing and
-# table-schema logic as decode_debug.get_frame_actions (100 ms/frame; keyboard
-# / mouse_click / mouse_movement tables) rather than re-deriving it.
+# Per-frame action vectors for plaicraft-debug sessions, cached to <session_dir>/actions_10d.npy.
 import os
 import sqlite3
 from pathlib import Path

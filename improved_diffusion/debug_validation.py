@@ -481,8 +481,14 @@ def run_debug_validation(model, diffusion, valset, device, out_dir,
             if samples_act is not None and act_chunk is not None:
                 p_act = samples_act[j].to(device)
                 g_act = act_chunk[j].to(device)
-                for scope, sl in (("next", slice(n_obs, n_obs + 1)),
-                                  ("roll", slice(n_obs, None))):
+                # The action mask lags the frame mask by one row (see
+                # action_masks), so row n_obs is the PINNED action that
+                # produces the first generated frame. Scoring it reads back
+                # ground truth the model was handed. The first action the
+                # model actually generates is row n_obs + 1.
+                first_gen = n_obs + 1
+                for scope, sl in (("next", slice(first_gen, first_gen + 1)),
+                                  ("roll", slice(first_gen, None))):
                     rec.update({f"{scope}/{k}": v
                                 for k, v in _action_metrics(p_act, g_act, sl).items()})
             per_row.append(rec)

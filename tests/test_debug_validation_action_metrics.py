@@ -10,6 +10,7 @@ from pathlib import Path
 
 import torch
 
+from improved_diffusion.action_masks import frame_mask_to_action_mask
 from improved_diffusion.debug_validation import _action_metrics
 
 T, n_obs = 6, 3
@@ -82,3 +83,24 @@ def test_trivial_keys_are_aggregated():
     keys = re.search(r"ACT_METRIC_KEYS = \((.*?)\)", src, re.S).group(1)
     for k in ("key_acc_trivial", "mouse_l1_trivial", "mouse_mse_trivial"):
         assert k in keys
+
+
+def test_metric_window_starts_at_the_first_generated_action():
+    """The scored window must skip the action the model was handed.
+
+    The action mask lags the frame mask by one row, so row n_obs is pinned to
+    ground truth -- it is the action that produces the first generated frame.
+    Scoring it reads the answer back: a run whose next/key_acc is exactly 1.0
+    and next/mouse_mse exactly 0.0 at every eval point has this bug.
+    """
+    n_obs = 10
+    obs = torch.zeros(1, 20, 1, 1, 1)
+    obs[:, :n_obs] = 1.0
+    act = frame_mask_to_action_mask(obs)[0, :, 0]
+    first_latent = int((act == 0).nonzero()[0].item())
+
+    src = Path("improved_diffusion/debug_validation.py").read_text()
+    offset = int(re.search(r"first_gen = n_obs \+ (\d+)", src).group(1))
+    assert n_obs + offset == first_latent, "window must start at first latent action"
+    assert "slice(first_gen, first_gen + 1)" in src
+    assert "slice(first_gen, None)" in src

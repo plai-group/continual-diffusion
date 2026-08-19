@@ -201,6 +201,11 @@ def create_argparser():
         cfg_scale=1.0,  # sampling-time only; not a model kwarg. 1.0 = no guidance.
         generate_actions=False,
         action_loss_weight=1.0,
+        # Warm start: take weights from a checkpoint of a different
+        # architecture, keep the step counter at 0, leave optimizer and EMA
+        # fresh. --resume_checkpoint is the wrong tool (strict load, and it
+        # reads the step back out of the filename).
+        init_from_checkpoint="",
     )
     defaults.update(model_and_diffusion_defaults(model_type='vdt'))
     parser = argparse.ArgumentParser()

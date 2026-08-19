@@ -171,6 +171,41 @@ class TrainLoop:
                     resume_checkpoint, map_location=dist_util.dev()
                 )['state_dict']
             )
+        elif getattr(self.args, 'init_from_checkpoint', ''):
+            self._warm_start(self.args.init_from_checkpoint)
+
+    def _warm_start(self, path):
+        """Initialise the trunk from a checkpoint of a DIFFERENT architecture.
+
+        Unlike a resume this keeps self.step at 0 and leaves the optimizer and
+        EMA fresh -- the point is to inherit trained weights, not to continue a
+        run. resume_checkpoint cannot do it: it is a strict load and it parses
+        the step out of the filename.
+        """
+        print(f"warm start from: {path}")
+        sd = dist_util.load_state_dict(path, map_location=dist_util.dev())['state_dict']
+        missing, unexpected = self.model.load_state_dict(sd, strict=False)
+        print(f"  reused {len(sd) - len(unexpected)}/{len(sd)} donor tensors; "
+              f"{len(missing)} missing, {len(unexpected)} unexpected")
+        if missing:
+            print(f"  missing:    {sorted(missing)}")
+        if unexpected:
+            print(f"  unexpected: {sorted(unexpected)}")
+
+        # The donor trunk has never seen an extra sequence token. A randomly
+        # initialised action embedder would inject a full-scale garbage token
+        # into converged attention and burn the warm start off in a few hundred
+        # steps. Zeroing it makes the token a constant, the mildest available
+        # perturbation, and it trains away from there.
+        zeroed = []
+        for name, p in self.model.named_parameters():
+            if name in missing and ('action_x_embedder' in name
+                                    or 'action_pos_embed' in name):
+                with th.no_grad():
+                    p.zero_()
+                zeroed.append(name)
+        if zeroed:
+            print(f"  zero-initialised action-token path: {sorted(zeroed)}")
 
     def _load_ema_parameters(self, rate):
         ema_params = copy.deepcopy(self.master_params)

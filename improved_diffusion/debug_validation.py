@@ -404,7 +404,10 @@ def run_debug_validation(model, diffusion, valset, device, out_dir,
     # not a conditioning vector), so gating on it hid the whole action path.
     generates_actions = (bool(getattr(_m, "generate_actions", False))
                          and getattr(_m, "action_dim", 0) > 0)
+    # Token-cond mode has neither an action_embedder nor a generation head,
+    # but it still needs the actions -- they are its conditioning signal.
     action_conditioned = (getattr(_m, "action_embedder", None) is not None
+                          or getattr(_m, "action_x_embedder", None) is not None
                           or generates_actions)
     sampling_model = _CFGWrapper(model, cfg_scale) if cfg_scale != 1.0 else model
 

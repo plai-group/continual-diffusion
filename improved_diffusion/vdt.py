@@ -310,6 +310,7 @@ class VDT(nn.Module):
         action_dim=0,
         action_dropout_prob=0.0,
         generate_actions=False,
+        action_token_cond=False,
     ):
         super().__init__()
         self.learn_sigma = learn_sigma
@@ -319,15 +320,23 @@ class VDT(nn.Module):
         self.num_heads = num_heads
         self.action_dim = action_dim
         self.generate_actions = generate_actions
+        # Token conditioning WITHOUT generation: the action rides in the
+        # sequence like a patch, but it is never noised and carries no loss.
+        # Separates "an action token in the sequence" from "an action the model
+        # must denoise" -- #69 changed both at once and could not tell which of
+        # the two cost the video quality.
+        self.action_token_cond = bool(action_token_cond) and not generate_actions
 
         self.x_embedder = PatchEmbed(input_size, patch_size, in_channels, hidden_size, bias=True)
         self.t_embedder = TimestepEmbedder(hidden_size)
         self.y_embedder = LabelEmbedder(num_classes, hidden_size, class_dropout_prob)
         if action_dim > 0:
-            if generate_actions:
+            if generate_actions or self.action_token_cond:
                 self.action_x_embedder = nn.Linear(action_dim, hidden_size, bias=True)
                 self.action_pos_embed = nn.Parameter(torch.zeros(1, 1, hidden_size))
-                self.action_head = ActionHead(hidden_size, action_dim, num_frames)
+                # No head in token-cond mode: there is nothing to read back out.
+                self.action_head = (ActionHead(hidden_size, action_dim, num_frames)
+                                    if generate_actions else None)
                 self.action_embedder = None
             else:
                 self.action_x_embedder = None
@@ -449,8 +458,12 @@ class VDT(nn.Module):
         patch_tokens = self.x_embedder(x) + self.pos_embed  # (B*T, N, D), where N = (H*W) / patch_size ** 2
         N = patch_tokens.shape[1]
 
-        generating_actions = (self.action_dim > 0 and self.generate_actions and self.action_x_embedder is not None and actions is not None)
-        if generating_actions:
+        # True whenever the action rides in the sequence, whether or not it is
+        # also being denoised. In token-cond mode the caller passes no
+        # obs_action_mask/actions0, so `actions` falls through clean.
+        use_action_tokens = (self.action_dim > 0 and self.action_x_embedder is not None
+                             and actions is not None)
+        if use_action_tokens:
             if obs_action_mask is not None and actions0 is not None:
                 actions = actions * (1 - obs_action_mask) + actions0 * obs_action_mask
             action_tokens = self.action_x_embedder(actions)  # (B, T, D)
@@ -488,7 +501,7 @@ class VDT(nn.Module):
         x_out = self.unpatchify(x_out)            # (B*T, out_channels, H, W)
         x_out = x_out.view(B, T, x_out.shape[-3], x_out.shape[-2], x_out.shape[-1])
 
-        if generating_actions and self.action_head is not None:
+        if use_action_tokens and self.action_head is not None:
             action_tokens_out = tokens[:, N:, :]  # (B*T, 1, D)
             act_out = self.action_head(action_tokens_out, c)  # (B*T, 1, action_dim)
             act_out = act_out.view(B, T, self.action_dim)

@@ -229,14 +229,17 @@ def _invert_actions(actions):
 
 
 def _swap_actions(actions, where):
-    """Invert the actions on the rows  selects; leave the rest alone.
+    """Invert the actions on the rows `where` selects; leave the rest alone.
 
-     is a (B, T, 1) 0/1 mask. For an action-generating model it selects
-    the OBSERVED rows, so the intervention rewrites the action history and the
-    model then generates the future actions and frames itself -- the panel
-    shows what it predicted under that history. For a purely action-conditioned
-    model there is nothing to generate, so it selects the LATENT rows instead
-    and the counterfactual is imposed directly on the frames being produced.
+    `where` is a (B, T, 1) 0/1 mask selecting rows n_obs..T-1: the actions that
+    drive the generated frames. The history stays true, so every panel's action
+    bar agrees with the ground-truth context frames underneath it.
+
+    For an action-generating model row n_obs is pinned (it is `observed` in the
+    action mask) and rows n_obs+1.. stay latent, so the swap lands on the
+    boundary action and the model then generates its own future actions and
+    frames under it. For a conditioned-only model there is nothing to generate
+    and the whole swapped future is imposed directly.
     """
     return th.where(where.bool(), _invert_actions(actions), actions)
 
@@ -538,12 +541,26 @@ def run_debug_validation(model, diffusion, valset, device, out_dir,
                     obs_mask_j = obs_mask[j:j + 1]
                     latent_mask_j = latent_mask[j:j + 1]
                     obs_act_mask_j = frame_mask_to_action_mask(obs_mask_j)
-                    # Probe an action-generating model by rewriting its action
-                    # HISTORY and letting it generate the future; probe a
-                    # conditioned-only model by imposing the counterfactual on
-                    # the future directly, since it generates no actions.
-                    intervene_on = (obs_act_mask_j if generates_actions
-                                    else 1.0 - obs_act_mask_j)
+                    # Intervene on the actions that DRIVE THE GENERATED FRAMES,
+                    # and leave the history true.
+                    #
+                    # The action mask lags the frame mask by one row, so the
+                    # action producing the first generated frame is row n_obs
+                    # -- which frame_mask_to_action_mask marks OBSERVED. So the
+                    # rows to rewrite are the complement of the frame mask,
+                    # n_obs..T-1, not the complement of the action mask.
+                    #
+                    # Rewriting the history instead (the previous behaviour for
+                    # generating models) was wrong twice over. The context
+                    # frames are pinned to ground truth, so a flipped history
+                    # painted an action bar that contradicted the video beneath
+                    # it -- the overlay said `d` while the frames strafed left.
+                    # And the future action rows stayed latent, so the model
+                    # simply regenerated the true continuation from the
+                    # unchanged frames and the flip washed out: l2_true_vs_swap
+                    # read ~3x SMALLER than l2_true_vs_zero.
+                    intervene_on = 1.0 - obs_mask_j.reshape(
+                        obs_mask_j.shape[0], obs_mask_j.shape[1], 1)
                     act_swap_j = _swap_actions(act_true_j, intervene_on)
                     act_zero_j = _zero_actions(act_true_j, intervene_on)
                     # Same starting noise for all three passes -- only the actions
@@ -609,11 +626,11 @@ def run_debug_validation(model, diffusion, valset, device, out_dir,
                         _render_triple_overlay(
                             frames_gt=gt.cpu().numpy(),
                             # All three passes share the GT frame context and
-                            # are teacher-forced on the action history they were
-                            # given, then run free. So each panel shows that
-                            # pass's history -- true, inverted, zeroed -- over
-                            # the observed frames, followed by the actions the
-                            # model actually generated under it.
+                            # the same true action history; they differ only
+                            # from row n_obs on, where the swap/zero lands.
+                            # heun_sample composites the pinned rows back over
+                            # its own prediction, so each panel's bar is what
+                            # actually drove that panel's frames.
                             frames_true=true_full.cpu().numpy(),
                             frames_swap=swap_full.cpu().numpy(),
                             frames_zero=zero_full.cpu().numpy(),

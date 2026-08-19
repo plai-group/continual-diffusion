@@ -48,7 +48,16 @@ class Logger(object):
                 d["dummy"] = 1  # so we don't get a warning about empty dict
         out = d.copy()  # Return the dict for unit testing purposes
         if self.comm is None or self.comm.rank == 0:
-            wandb.log({**self.name2val, **self.nondistributed_name2val})
+            merged = {**self.name2val, **self.nondistributed_name2val}
+            # Pass the real training step explicitly. Without this, wandb's
+            # internal _step counter free-runs from 0 on every process start;
+            # after a resume, that means new log calls silently overwrite the
+            # run's EARLIEST history rows (same _step indices as early
+            # training) instead of appending new ones, so nothing logged
+            # after the first resume ever becomes visible on the dashboard,
+            # even though checkpoints and the live summary are unaffected.
+            step = merged.get('step')
+            wandb.log(merged, step=int(step) if step is not None else None)
         self.name2val.clear()
         self.name2cnt.clear()
         self.nondistributed_name2val.clear()

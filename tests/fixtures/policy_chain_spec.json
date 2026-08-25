@@ -1,0 +1,186 @@
+{
+  "version": 1,
+  "fps": 10,
+  "state_dependent": false,
+  "action_dims": [
+    "w",
+    "a",
+    "s",
+    "d",
+    "space",
+    "shift",
+    "mouse1",
+    "mouse3"
+  ],
+  "relevel_phase": "level",
+  "menu": {
+    "look_up": 2,
+    "look_down": 2,
+    "free_look": 3,
+    "jerk": 6,
+    "walk": 3,
+    "backward": 3,
+    "strafe": 2,
+    "pulse_walk": 2,
+    "look_walk": 2,
+    "jump": 2,
+    "crouch": 2,
+    "brighten": 2,
+    "darken": 2
+  },
+  "phases": {
+    "level": {
+      "arch": "none",
+      "relevel": false,
+      "mouse": "dy_any",
+      "dur": [
+        7,
+        12
+      ]
+    },
+    "look_up": {
+      "arch": "none",
+      "relevel": true,
+      "mouse": "dy_neg",
+      "dur": [
+        9,
+        14
+      ]
+    },
+    "look_down": {
+      "arch": "none",
+      "relevel": true,
+      "mouse": "dy_pos",
+      "dur": [
+        9,
+        14
+      ]
+    },
+    "free_look": {
+      "arch": "none",
+      "relevel": true,
+      "mouse": "both",
+      "dur": [
+        10,
+        18
+      ]
+    },
+    "jerk": {
+      "arch": "none",
+      "relevel": false,
+      "mouse": "dx",
+      "dur": [
+        2,
+        8
+      ]
+    },
+    "walk": {
+      "arch": "hold",
+      "relevel": false,
+      "mouse": "dx",
+      "dur": [
+        2,
+        5
+      ],
+      "key": "w"
+    },
+    "backward": {
+      "arch": "hold",
+      "relevel": false,
+      "mouse": "none",
+      "dur": [
+        2,
+        5
+      ],
+      "key": "s"
+    },
+    "look_walk": {
+      "arch": "hold",
+      "relevel": true,
+      "mouse": "dy_pos",
+      "dur": [
+        2,
+        5
+      ],
+      "key": "w"
+    },
+    "crouch": {
+      "arch": "hold",
+      "relevel": false,
+      "mouse": "none",
+      "dur": [
+        1,
+        18
+      ],
+      "key": "shift"
+    },
+    "brighten": {
+      "arch": "hold",
+      "relevel": false,
+      "mouse": "none",
+      "dur": [
+        1,
+        20
+      ],
+      "key": "mouse1"
+    },
+    "darken": {
+      "arch": "hold",
+      "relevel": false,
+      "mouse": "none",
+      "dur": [
+        1,
+        20
+      ],
+      "key": "mouse3"
+    },
+    "strafe": {
+      "arch": "lead_hold",
+      "relevel": false,
+      "mouse": "none",
+      "dur": [
+        4,
+        9
+      ],
+      "keys": [
+        "a",
+        "d"
+      ],
+      "lead_key": "w",
+      "lead": [
+        1,
+        3
+      ],
+      "lead_prob": 0.5
+    },
+    "pulse_walk": {
+      "arch": "pulse",
+      "relevel": false,
+      "mouse": "none",
+      "dur": [
+        4,
+        8
+      ],
+      "key": "w",
+      "flip_prob": 0.4
+    },
+    "jump": {
+      "arch": "plan",
+      "relevel": false,
+      "mouse": "none",
+      "key": "space",
+      "bursts": [
+        2,
+        3
+      ],
+      "press": [
+        1,
+        10
+      ],
+      "gap": [
+        5,
+        9
+      ]
+    }
+  }
+}

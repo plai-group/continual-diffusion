@@ -66,23 +66,19 @@ def _losses(model, diffusion, action_dim, action_loss_weight):
 
 
 def test_dim_ratio_matches_element_count_fraction():
-    # action_dim_ratio is a pure shape computation (independent of the model's
-    # random forward output), so a single call is enough to pin it down.
+    # action_dim_ratio is a pure shape computation, so a single call pins it down.
     model, diffusion = _build(action_dim=10)
     terms = _losses(model, diffusion, action_dim=10, action_loss_weight=1.0)
 
     expected_ratio = (T * 10) / (T * C * H * W)  # 80 / 24576
     assert terms["action_dim_ratio"].shape == (B,)
     for v in terms["action_dim_ratio"].tolist():
-        # action_dim_ratio is stored in a float32 tensor, so compare with a
-        # tolerance rather than expecting bit-exact equality to the float64
-        # fraction computed here.
+        # Stored as float32, so compare with a tolerance against the float64 fraction.
         assert math.isclose(v, expected_ratio, rel_tol=1e-6)
 
 
 def test_doubling_action_dim_doubles_ratio():
-    # Holding the video shape fixed, the ratio is linear in action_dim --
-    # this is what makes it self-correcting when action_dim changes.
+    # With the video shape fixed the ratio is linear in action_dim, which is what makes it self-correcting.
     model10, diffusion10 = _build(action_dim=10)
     model20, diffusion20 = _build(action_dim=20)
 
@@ -93,9 +89,7 @@ def test_doubling_action_dim_doubles_ratio():
 
 
 def test_action_loss_weight_multiplies_dim_ratio_on_top():
-    # action_loss_weight is an extra multiplier on top of dim_ratio, not a
-    # replacement for it -- and w=0 must zero the action term out exactly,
-    # since that's what lets action-free runs reproduce old loss curves.
+    # action_loss_weight multiplies dim_ratio rather than replacing it, and w=0 must zero the action term exactly.
     model, diffusion = _build(action_dim=10)
     for w in (0.0, 1.0, 4.0):
         terms = _losses(model, diffusion, action_dim=10, action_loss_weight=w)
@@ -108,17 +102,13 @@ def test_action_loss_weight_multiplies_dim_ratio_on_top():
 
 
 def test_video_loss_unaffected_by_action_weight():
-    # Regression guard: loss_video/mse are computed before the dim_ratio
-    # branch and must not move when action_loss_weight changes, otherwise
-    # training curves from before this change stop being comparable to ones
-    # after it.
+    # Regression guard: loss_video/mse are computed before the dim_ratio branch and must not move when action_loss_weight changes.
     model, diffusion = _build(action_dim=10)
 
     mse_by_weight = {}
     loss_video_by_weight = {}
     for w in (0.0, 1.0, 4.0):
-        # Reseed before each call so q_sample's internal noise draws (for
-        # both video and actions) are identical across weights.
+        # Reseed before each call so q_sample's noise draws are identical across weights.
         torch.manual_seed(0)
         terms = _losses(model, diffusion, action_dim=10, action_loss_weight=w)
         mse_by_weight[w] = terms["mse"]

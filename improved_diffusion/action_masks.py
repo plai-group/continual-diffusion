@@ -1,18 +1,12 @@
-"""Alignment between the frame mask and the action mask.
+"""Shift a frame mask to match the causal cache debug_actions.build_action_array
+builds: cache row i = the action that caused frame i (recorded during frame
+i-1's window).
 
-The action cache is CAUSAL: row i holds the action from window [i-1, i), i.e.
-the one that produced frame i. The environment is a_t -> s_{t+1}, so the action
-*taken at* frame i lives at cache row i+1.
-
-A state is (frame, action). Observing the first n frames therefore means
-observing n frames AND the n actions taken during them -- cache rows 1..n --
-so the action mask is the frame mask shifted one step later. Row 0 is the
-action that produced the first frame; it precedes the window, so it inherits
-frame 0's status rather than being derived from a predecessor.
-
-Using the frame mask directly leaves cache[n] latent, which makes the model
-generate the action at the boundary frame -- the very action that is supposed
-to explain the first generated frame.
+Observing frames 0..n-1 implies row n -- the action that caused frame n,
+already decided during frame n-1 -- is known too, one row past the frame
+mask's own cutoff. E.g. n=10: frames 0-9 observed, but cache row 10 is also
+known. Left unshifted, row n stays latent and the model has to generate the
+action that already explains the first frame it's asked to generate.
 """
 
 

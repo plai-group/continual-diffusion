@@ -314,11 +314,7 @@ class VDT(nn.Module):
         self.num_heads = num_heads
         self.action_dim = action_dim
         self.generate_actions = generate_actions
-        # Token conditioning WITHOUT generation: the action rides in the
-        # sequence like a patch, but it is never noised and carries no loss.
-        # Separates "an action token in the sequence" from "an action the model
-        # must denoise" -- #69 changed both at once and could not tell which of
-        # the two cost the video quality.
+        # Token conditioning WITHOUT generation: the action rides in the sequence like a patch, but is never noised and carries no loss.
         self.action_token_cond = bool(action_token_cond) and not generate_actions
 
         self.x_embedder = PatchEmbed(input_size, patch_size, in_channels, hidden_size, bias=True)
@@ -452,9 +448,7 @@ class VDT(nn.Module):
         patch_tokens = self.x_embedder(x) + self.pos_embed  # (B*T, N, D), where N = (H*W) / patch_size ** 2
         N = patch_tokens.shape[1]
 
-        # True whenever the action rides in the sequence, whether or not it is
-        # also being denoised. In token-cond mode the caller passes no
-        # obs_action_mask/actions0, so `actions` falls through clean.
+        # True whenever the action rides in the sequence, denoised or not; token-cond passes no obs_action_mask/actions0, so `actions` falls through clean.
         use_action_tokens = (self.action_dim > 0 and self.action_x_embedder is not None
                              and actions is not None)
         if use_action_tokens:

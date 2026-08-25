@@ -18,8 +18,7 @@ def test_prefix_mask_gains_the_boundary_row():
     act = frame_mask_to_action_mask(obs)
 
     assert act.shape == (B, T, 1)
-    # The action taken at the last observed frame produces the first generated
-    # frame, so it is observed too.
+    # The action taken at the last observed frame produces the first generated frame, so it is observed too.
     assert act[:, n_obs].eq(1).all(), 'boundary action must be ground truth'
     assert act[:, : n_obs + 1].eq(1).all()
     assert act[:, n_obs + 1 :].eq(0).all()

@@ -147,15 +147,7 @@ class _WrappedModel:
         self.original_num_steps = original_num_steps
 
     def __getattr__(self, name):
-        # __getattr__ only fires when normal attribute lookup fails. If this
-        # instance was built without __init__ running (e.g. copy.copy,
-        # copy.deepcopy, unpickling, or any __new__ path that skips
-        # __init__), self.model isn't set yet, so evaluating `self.model`
-        # here would itself miss and re-enter __getattr__, recursing until
-        # RecursionError. Guard the "model" name itself, plus the dunder
-        # names copy/pickle probe (__deepcopy__, __getstate__, __setstate__,
-        # __reduce_ex__, etc.), so those raise a normal AttributeError
-        # instead of recursing or forwarding to a possibly-missing model.
+        # Guard "model" and dunders: on copy/pickle paths that skip __init__, self.model is unset and would re-enter __getattr__ forever.
         if name == "model" or (name.startswith("__") and name.endswith("__")):
             raise AttributeError(name)
         model = self.__dict__.get("model")

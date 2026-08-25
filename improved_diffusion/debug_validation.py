@@ -403,12 +403,10 @@ def run_debug_validation(model, diffusion, valset, device, out_dir,
     metrics = _get_metrics(device)
 
     _m = getattr(model, "module", model)
-    # Generation mode has no action_embedder (the action is a denoised token,
-    # not a conditioning vector), so gating on it hid the whole action path.
+    # Generation mode has no action_embedder (the action is a denoised token), so gating on it hid the action path.
     generates_actions = (bool(getattr(_m, "generate_actions", False))
                          and getattr(_m, "action_dim", 0) > 0)
-    # Token-cond mode has neither an action_embedder nor a generation head,
-    # but it still needs the actions -- they are its conditioning signal.
+    # Token-cond mode has no action_embedder and no generation head, but actions are still its conditioning signal.
     action_conditioned = (getattr(_m, "action_embedder", None) is not None
                           or getattr(_m, "action_x_embedder", None) is not None
                           or generates_actions)
@@ -440,13 +438,7 @@ def run_debug_validation(model, diffusion, valset, device, out_dir,
         if act_chunk is not None:
             model_kwargs["actions"] = act_chunk
             if generates_actions:
-                # Teacher forcing: the observed prefix's actions are pinned to
-                # ground truth and the generated half is denoised jointly with
-                # the video. The action mask lags the frame mask by one row --
-                # see action_masks -- so the action taken at the last observed
-                # frame, which produces the first generated frame, is pinned
-                # too. teacher_force_actions=False pins nothing, so the model
-                # must generate the observed half too (free rollout).
+                # Teacher forcing pins the observed prefix's actions to GT (mask lags the frame mask by one row, see action_masks); False pins nothing, i.e. free rollout.
                 obs_act_mask = frame_mask_to_action_mask(obs_mask)
                 if not teacher_force_actions:
                     obs_act_mask = th.zeros_like(obs_act_mask)
@@ -487,11 +479,7 @@ def run_debug_validation(model, diffusion, valset, device, out_dir,
             if samples_act is not None and act_chunk is not None:
                 p_act = samples_act[j].to(device)
                 g_act = act_chunk[j].to(device)
-                # The action mask lags the frame mask by one row (see
-                # action_masks), so row n_obs is the PINNED action that
-                # produces the first generated frame. Scoring it reads back
-                # ground truth the model was handed. The first action the
-                # model actually generates is row n_obs + 1.
+                # Row n_obs is pinned GT (the action mask lags by one row), so the first genuinely generated action is row n_obs + 1.
                 first_gen = n_obs + 1
                 for scope, sl in (("next", slice(first_gen, first_gen + 1)),
                                   ("roll", slice(first_gen, None))):
@@ -513,8 +501,7 @@ def run_debug_validation(model, diffusion, valset, device, out_dir,
                     render_overlay(
                         gt_frames=gt.cpu().numpy(),
                         pred_frames=pred.cpu().numpy(),
-                        # Top row keeps the recorded actions; the predicted row
-                        # shows what the model actually produced.
+                        # Top row keeps the recorded actions; this row shows what the model produced.
                         pred_actions=(_action_bars(samples_act[j])
                                       if samples_act is not None else None),
                         session_db_path=str(row["session_db"]),
@@ -537,32 +524,12 @@ def run_debug_validation(model, diffusion, valset, device, out_dir,
                     obs_mask_j = obs_mask[j:j + 1]
                     latent_mask_j = latent_mask[j:j + 1]
                     obs_act_mask_j = frame_mask_to_action_mask(obs_mask_j)
-                    # Intervene on the actions that DRIVE THE GENERATED FRAMES,
-                    # and leave the history true.
-                    #
-                    # The action mask lags the frame mask by one row, so the
-                    # action producing the first generated frame is row n_obs
-                    # -- which frame_mask_to_action_mask marks OBSERVED. So the
-                    # rows to rewrite are the complement of the frame mask,
-                    # n_obs..T-1, not the complement of the action mask.
-                    #
-                    # Rewriting the history instead (the previous behaviour for
-                    # generating models) was wrong twice over. The context
-                    # frames are pinned to ground truth, so a flipped history
-                    # painted an action bar that contradicted the video beneath
-                    # it -- the overlay said `d` while the frames strafed left.
-                    # And the future action rows stayed latent, so the model
-                    # simply regenerated the true continuation from the
-                    # unchanged frames and the flip washed out: l2_true_vs_swap
-                    # read ~3x SMALLER than l2_true_vs_zero.
+                    # Rewrite only the actions driving the generated frames: rows n_obs..T-1, the frame-mask complement, not the action-mask complement (which lags one row) -- leave the history true.
                     intervene_on = 1.0 - obs_mask_j.reshape(
                         obs_mask_j.shape[0], obs_mask_j.shape[1], 1)
                     act_swap_j = _swap_actions(act_true_j, intervene_on)
                     act_zero_j = _zero_actions(act_true_j, intervene_on)
-                    # Same starting noise for all three passes -- only the actions
-                    # tensor should differ between them, or the comparison is
-                    # dominated by heun_sample's noise rather than by whether the
-                    # model listens to actions.
+                    # Same starting noise for all three passes, so only the actions tensor differs.
                     shared_noise = th.randn(*x0_j.shape, device=device)
                     # heun_sample's churn draws from the global RNG each step; reseed per pass too.
                     swap_seed = 20250813 + int(row["num"])
@@ -577,10 +544,7 @@ def run_debug_validation(model, diffusion, valset, device, out_dir,
                                     "frame_indices": None, "x0": x0_j,
                                     "obs_mask": obs_mask_j, "latent_mask": latent_mask_j,
                                     "actions": act,
-                                    # Pin the history only. The future action
-                                    # tokens are denoised jointly with the video,
-                                    # so each panel shows what the model actually
-                                    # predicted under that history.
+                                    # Pin the history only; future action tokens are denoised jointly with the video.
                                     **({"actions0": act,
                                         "obs_action_mask": obs_act_mask_j}
                                        if generates_actions else {}),
@@ -614,12 +578,7 @@ def run_debug_validation(model, diffusion, valset, device, out_dir,
                         mp4_swap = out_dir / f"step{step}_{slug}_swap.mp4"
                         _render_triple_overlay(
                             frames_gt=gt.cpu().numpy(),
-                            # All three passes share the GT frame context and
-                            # the same true action history; they differ only
-                            # from row n_obs on, where the swap/zero lands.
-                            # heun_sample composites the pinned rows back over
-                            # its own prediction, so each panel's bar is what
-                            # actually drove that panel's frames.
+                            # All three passes share the GT frame context and true action history, differing only from row n_obs on.
                             frames_true=true_full.cpu().numpy(),
                             frames_swap=swap_full.cpu().numpy(),
                             frames_zero=zero_full.cpu().numpy(),

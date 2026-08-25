@@ -331,12 +331,7 @@ class GaussianDiffusion:
         assert (
             model_mean.shape == model_log_variance.shape == pred_xstart.shape == x.shape
         )
-        # Discriminate the model's second return value explicitly, based on
-        # the model itself, instead of relying on isinstance(..., th.Tensor).
-        # VDT action-generation models return an action tensor (or None) here;
-        # the UNet returns an attention-weights dict (or None, depending on
-        # return_attn_weights). The model may be DDP/DataParallel-wrapped, so
-        # fall back to `.module` when the attribute isn't found directly.
+        # Discriminate by model type (checking .module for DDP), not isinstance(..., th.Tensor) -- VDT returns actions here, UNet returns attn weights.
         action_dim = getattr(
             model, 'action_dim', getattr(getattr(model, 'module', None), 'action_dim', 0)
         )
@@ -1074,19 +1069,7 @@ class GaussianDiffusion:
                 terms["loss_action"] = mse_action
 
                 action_weight = call_kwargs.get('action_loss_weight', getattr(self, 'action_loss_weight', 1.0))
-                # mean_flat divides by the FULL element count, so loss_video is
-                # per-pixel (T*C*H*W) while mse_action is per-action-number
-                # (T*action_dim). Adding the two means with equal weight is a
-                # ~288x per-element over-weighting of the action head, which
-                # starves the shared trunk of video gradient.
-                #
-                # DreamZero (arXiv:2602.15922) instead takes one squared error
-                # over the concatenated [z, a] vector and carries no lambda at
-                # all -- which makes the action term's weight exactly the
-                # dimension ratio. Recover that here from the shapes, so it
-                # stays correct if resolution, T, patch size or the diffusion
-                # space change. action_loss_weight then reads as a multiple of
-                # that parity rather than as an absolute scale.
+                # mean_flat is per-element, so equal-weighting over-weights action ~288x; scale by dim_ratio (DreamZero, arXiv:2602.15922) to restore parity.
                 dim_ratio = actions_in[0].numel() / x_start[0].numel()
                 terms["action_dim_ratio"] = th.full_like(loss_video, dim_ratio)
                 total_loss = loss_video + action_weight * dim_ratio * mse_action

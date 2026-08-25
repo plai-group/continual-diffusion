@@ -192,11 +192,7 @@ class TrainLoop:
         if unexpected:
             print(f"  unexpected: {sorted(unexpected)}")
 
-        # The donor trunk has never seen an extra sequence token. A randomly
-        # initialised action embedder would inject a full-scale garbage token
-        # into converged attention and burn the warm start off in a few hundred
-        # steps. Zeroing it makes the token a constant, the mildest available
-        # perturbation, and it trains away from there.
+        # The donor trunk never saw an extra sequence token; zeroing makes the new token a constant rather than full-scale noise in converged attention.
         zeroed = []
         for name, p in self.model.named_parameters():
             if name in missing and ('action_x_embedder' in name

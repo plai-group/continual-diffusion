@@ -98,8 +98,7 @@ def test_warm_start_reuses_the_trunk_and_zeroes_the_token_path():
     shared = len(donor.state_dict()) - len(unexpected)
     assert shared > 200, f"only {shared} tensors carried over"
 
-    # Mirrors TrainLoop._warm_start: the donor never saw an extra token, so the
-    # new one starts as a constant rather than as random noise in the sequence.
+    # Mirrors TrainLoop._warm_start: the new token starts as a constant, not as random noise in the sequence.
     for name, p in target.named_parameters():
         if name in missing:
             with torch.no_grad():

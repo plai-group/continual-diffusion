@@ -153,9 +153,7 @@ def test_gaussian_diffusion_training_losses():
     for k in required_keys:
         assert k in terms, f"Missing key '{k}' in diffusion terms: {list(terms.keys())}"
 
-    # loss_total == loss_video + weight * (D_a/D_v) * loss_action. The dimension
-    # ratio is what keeps the two mean_flat terms comparable per element; without
-    # it a 10-d action vector carries the same weight as a whole frame of pixels.
+    # loss_total == loss_video + weight * (D_a/D_v) * loss_action; the ratio keeps the two mean_flat terms comparable per element.
     ratio = actions[0].numel() / x[0].numel()
     assert torch.allclose(terms["action_dim_ratio"], torch.full_like(terms["loss_video"], ratio))
     expected_total = terms["loss_video"] + 1.5 * ratio * terms["loss_action"]
@@ -275,8 +273,7 @@ def test_cli_and_defaults():
     assert args.action_dim == 10
     print("  [PASS] Argument parser correctly parsed --generate_actions and --action_loss_weight")
 
-    # generate_actions is the only flag; the old --action_generation alias was
-    # removed (two names for one switch invited exactly this confusion).
+    # generate_actions is the only flag; the old --action_generation alias was removed.
     args2 = parser.parse_args(["--action_dim", "10"])
     assert args2.generate_actions is False
     assert not hasattr(args2, "action_generation")

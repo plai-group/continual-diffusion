@@ -1,5 +1,6 @@
 {
   "version": 1,
+  "policy": "SmoothPolicyV3",
   "fps": 10,
   "state_dependent": false,
   "action_dims": [

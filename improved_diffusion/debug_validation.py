@@ -38,6 +38,10 @@ from .decode_debug import (
 VIDEO_FPS = 10
 MS_PER_FRAME = 1000 // VIDEO_FPS
 
+# Distinct bases so the overlay and swap passes never share a noise draw.
+_SWAP_SEED_BASE = 20250813
+_OVERLAY_SEED_BASE = _SWAP_SEED_BASE + 500_000
+
 # LPIPS runs a VGG backbone with five 2x downsamples; a 24x40 frame collapses to
 # nothing by the last stage. Upsample (nearest, to avoid inventing detail that
 # is not in the source pixels) before scoring.
@@ -447,15 +451,17 @@ def run_debug_validation(model, diffusion, valset, device, out_dir,
 
         # Match the schedule's true max sigma; see the note in train_util.log_samples.
         sched_sigma_max = float(diffusion.timestep2sigma(diffusion.num_timesteps - 1))
-        samples, _ = diffusion.heun_sample(
-            sampling_model,
-            x0.shape,
-            sigma_max=sched_sigma_max,
-            clip_denoised=True,
-            model_kwargs=model_kwargs,
-            latent_mask=latent_mask.cpu(),
-            return_decoded=False,
-        )
+        # Seeded on step so overlays are reproducible without freezing one noise draw for the whole run.
+        with RNG(_OVERLAY_SEED_BASE + step + lo):
+            samples, _ = diffusion.heun_sample(
+                sampling_model,
+                x0.shape,
+                sigma_max=sched_sigma_max,
+                clip_denoised=True,
+                model_kwargs=model_kwargs,
+                latent_mask=latent_mask.cpu(),
+                return_decoded=False,
+            )
         samples_act = None
         if isinstance(samples, tuple):
             samples_video, samples_act = samples
@@ -529,10 +535,11 @@ def run_debug_validation(model, diffusion, valset, device, out_dir,
                         obs_mask_j.shape[0], obs_mask_j.shape[1], 1)
                     act_swap_j = _swap_actions(act_true_j, intervene_on)
                     act_zero_j = _zero_actions(act_true_j, intervene_on)
+                    # Without the step term one hard noise draw stays frozen for the life of the run.
+                    swap_seed = _SWAP_SEED_BASE + int(row["num"]) + step
                     # Same starting noise for all three passes, so only the actions tensor differs.
-                    shared_noise = th.randn(*x0_j.shape, device=device)
-                    # heun_sample's churn draws from the global RNG each step; reseed per pass too.
-                    swap_seed = 20250813 + int(row["num"])
+                    with RNG(swap_seed):
+                        shared_noise = th.randn(*x0_j.shape, device=device)
 
                     def _sample_with_actions(act):
                         with RNG(swap_seed):

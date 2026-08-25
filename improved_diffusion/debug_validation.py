@@ -24,6 +24,7 @@ import torch as th
 import torch.nn as nn
 
 from . import debug_actions
+from .action_masks import frame_mask_to_action_mask
 from .logger import logger
 from .rng_util import RNG
 from .decode_debug import (
@@ -205,9 +206,8 @@ class _CFGWrapper(nn.Module):
         return eps_uncond + self.w * (eps_cond - eps_uncond), None
 
 
-def _swap_actions(actions, n_obs):
-    """Counterfactual actions on the generated half: the OPPOSITE action on
-    every axis. Observed half untouched, since those frames are given.
+def _invert_actions(actions):
+    """The OPPOSITE action on every axis.
 
         w <-> s          (dims 0, 2)  forward / back
         a <-> d          (dims 1, 3)  strafe left / right
@@ -215,27 +215,38 @@ def _swap_actions(actions, n_obs):
         left <-> right   (dims 6, 7)  mouse buttons
         dx, dy negated   (dims 8, 9)  look direction
 
-    A full inversion rather than a partial one: if the model is listening, every
-    axis of the counterfactual should push the frame the other way, which makes
-    the true-vs-swap divergence as large as this world allows.
+    A full inversion rather than a partial one: if the model is listening,
+    every axis pushes the frame the other way, which makes the true-vs-swap
+    divergence as large as this world allows.
     """
-    out = actions.clone()
-    gen = actions[:, n_obs:, :]
-    swapped = gen.clone()
+    swapped = actions.clone()
     for i, j in ((0, 2), (1, 3), (4, 5), (6, 7)):
-        swapped[..., i] = gen[..., j]
-        swapped[..., j] = gen[..., i]
-    swapped[..., 8] = -gen[..., 8]
-    swapped[..., 9] = -gen[..., 9]
-    out[:, n_obs:, :] = swapped
-    return out
+        swapped[..., i] = actions[..., j]
+        swapped[..., j] = actions[..., i]
+    swapped[..., 8] = -actions[..., 8]
+    swapped[..., 9] = -actions[..., 9]
+    return swapped
 
 
-def _zero_actions(actions, n_obs):
-    """All-zero actions on the generated half. Observed half untouched."""
-    out = actions.clone()
-    out[:, n_obs:, :] = 0.0
-    return out
+def _swap_actions(actions, where):
+    """Invert the actions on the rows `where` selects; leave the rest alone.
+
+    `where` is a (B, T, 1) 0/1 mask selecting rows n_obs..T-1: the actions that
+    drive the generated frames. The history stays true, so every panel's action
+    bar agrees with the ground-truth context frames underneath it.
+
+    For an action-generating model row n_obs is pinned (it is `observed` in the
+    action mask) and rows n_obs+1.. stay latent, so the swap lands on the
+    boundary action and the model then generates its own future actions and
+    frames under it. For a conditioned-only model there is nothing to generate
+    and the whole swapped future is imposed directly.
+    """
+    return th.where(where.bool(), _invert_actions(actions), actions)
+
+
+def _zero_actions(actions, where):
+    """Zero the actions on the rows `where` selects; leave the rest alone."""
+    return th.where(where.bool(), th.zeros_like(actions), actions)
 
 
 #: order of the 6 key dims in the 10-d action vector; names must match the
@@ -262,6 +273,56 @@ def _action_vec_to_bar(vec):
     }
 
 
+def _to_display_actions(a):
+    """Shift the causal action cache back to the DISPLAY convention.
+
+    The cache is causal: row i is the action from window [i-1, i), i.e. the
+    one that CAUSED frame i. That is right for conditioning the model, but
+    drawing it as-is paints an action onto the very frame it produced -- a
+    click appears simultaneously with its own effect, which reads as though
+    causality were violated.
+
+    decode_debug.get_frame_actions (used by the 2-row val/overlay) instead
+    returns the RAW action for window [i, i+1), so the input renders one
+    frame BEFORE its consequence. Match that here, or the two overlays
+    disagree by one frame. cache[i+1] == raw[i], and the final frame has no
+    successor so its bar is blank.
+    """
+    if hasattr(a, 'detach'):
+        a = a.detach().float().cpu().numpy()
+    a = np.asarray(a)
+    out = np.zeros_like(a)
+    out[:-1] = a[1:]
+    return out
+
+
+def _action_bars(a):
+    """(T, 10) causal action array -> the T bar dicts render_overlay draws."""
+    d = _to_display_actions(a)
+    return [_action_vec_to_bar(d[t]) for t in range(d.shape[0])]
+
+
+def _action_metrics(p_act, g_act, sl):
+    """Action metrics over one frame window, plus the all-zeros baseline.
+
+    Keys are pressed 2-33% of the time in this corpus, so the do-nothing
+    predictor already scores ~0.93 key_acc and its mouse_mse is ~3.4. Without
+    the *_trivial series a dead action head and a learning one look alike on
+    the dashboard. They are measured from the GT rows in this batch rather
+    than hard-coded, so they track whatever data the run actually saw.
+    """
+    p_k, g_k = (p_act[sl, :8] > 0.5).float(), (g_act[sl, :8] > 0.5).float()
+    p_m, g_m = p_act[sl, 8:10], g_act[sl, 8:10]
+    return {
+        "key_acc": float((p_k == g_k).float().mean().item()),
+        "mouse_l1": float((p_m - g_m).abs().mean().item()),
+        "mouse_mse": float(((p_m - g_m) ** 2).mean().item()),
+        "key_acc_trivial": float((g_k == 0).float().mean().item()),
+        "mouse_l1_trivial": float(g_m.abs().mean().item()),
+        "mouse_mse_trivial": float((g_m ** 2).mean().item()),
+    }
+
+
 def _label_panel(panel, text):
     """Draw a panel name in the top bar's empty middle band."""
     cv2.putText(panel, text, (panel.shape[1] // 2 - 60, 60),
@@ -270,8 +331,8 @@ def _label_panel(panel, text):
 
 
 def _render_triple_overlay(frames_gt, frames_true, frames_swap, frames_zero,
-                           actions_true, actions_swap, actions_zero,
-                           n_observed, out_path, title=None):
+                           actions_gt, actions_true, actions_swap, actions_zero,
+                           n_observed, out_path, title=None, true_label="TRUE"):
     """2x2 grid mp4:  GT | TRUE  over  SWAP | ZERO.
 
     GT is included so the generated half can be judged against reality, not only
@@ -283,7 +344,10 @@ def _render_triple_overlay(frames_gt, frames_true, frames_swap, frames_zero,
 
     Each panel's action bar comes from that panel's own action tensor, so the
     swap panel visibly shows the swapped keys / reversed mouse it was given.
-    GT carries the true actions, being the real recording.
+    GT carries the recorded actions. When the model generates actions, the
+    second panel carries the ones it GENERATED (label GEN), so GT vs GEN is a
+    direct read of action-prediction quality; otherwise it carries the true
+    actions it was conditioned on (label TRUE).
 
     Same imageio/libx264 settings as decode_debug.render_overlay -- cv2's mp4v
     encodes fine and then will not play in wandb.
@@ -294,29 +358,9 @@ def _render_triple_overlay(frames_gt, frames_true, frames_swap, frames_zero,
     frames_zero = np.asarray(frames_zero)
     T = frames_true.shape[0]
 
-    def _to_display(a):
-        """Shift the causal action cache back to the DISPLAY convention.
-
-        The cache is causal: row i is the action from window [i-1, i), i.e. the
-        one that CAUSED frame i. That is right for conditioning the model, but
-        drawing it as-is paints an action onto the very frame it produced -- a
-        click appears simultaneously with its own effect, which reads as though
-        causality were violated.
-
-        decode_debug.get_frame_actions (used by the 2-row val/overlay) instead
-        returns the RAW action for window [i, i+1), so the input renders one
-        frame BEFORE its consequence. Match that here, or the two overlays
-        disagree by one frame. cache[i+1] == raw[i], and the final frame has no
-        successor so its bar is blank.
-        """
-        a = np.asarray(a)
-        out = np.zeros_like(a)
-        out[:-1] = a[1:]
-        return out
-
-    acts = [_to_display(a) for a in
-            (actions_true, actions_true, actions_swap, actions_zero)]
-    labels = ["GT", "TRUE", "SWAP", "ZERO"]
+    acts = [_to_display_actions(a) for a in
+            (actions_gt, actions_true, actions_swap, actions_zero)]
+    labels = ["GT", true_label, "SWAP", "ZERO"]
 
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -348,7 +392,8 @@ def _render_triple_overlay(frames_gt, frames_true, frames_swap, frames_zero,
 def run_debug_validation(model, diffusion, valset, device, out_dir,
                          step=0, chunk_size=3, log_videos=True,
                          per_task_scalars=False, actions=True,
-                         swap_test=True, cfg_scale=1.0):
+                         swap_test=True, cfg_scale=1.0,
+                         teacher_force_actions=True):
     """Sample every validation row, render overlays, log metrics to wandb.
 
     Returns the aggregate metric dict (also logged via ``logger.logkv``).
@@ -357,7 +402,14 @@ def run_debug_validation(model, diffusion, valset, device, out_dir,
     out_dir.mkdir(parents=True, exist_ok=True)
     metrics = _get_metrics(device)
 
-    action_conditioned = getattr(model, "action_embedder", None) is not None
+    _m = getattr(model, "module", model)
+    # Generation mode has no action_embedder (the action is a denoised token), so gating on it hid the action path.
+    generates_actions = (bool(getattr(_m, "generate_actions", False))
+                         and getattr(_m, "action_dim", 0) > 0)
+    # Token-cond mode has no action_embedder and no generation head, but actions are still its conditioning signal.
+    action_conditioned = (getattr(_m, "action_embedder", None) is not None
+                          or getattr(_m, "action_x_embedder", None) is not None
+                          or generates_actions)
     sampling_model = _CFGWrapper(model, cfg_scale) if cfg_scale != 1.0 else model
 
     T, n_obs = valset.T, valset.n_observed
@@ -385,6 +437,13 @@ def run_debug_validation(model, diffusion, valset, device, out_dir,
         }
         if act_chunk is not None:
             model_kwargs["actions"] = act_chunk
+            if generates_actions:
+                # Teacher forcing pins the observed prefix's actions to GT (mask lags the frame mask by one row, see action_masks); False pins nothing, i.e. free rollout.
+                obs_act_mask = frame_mask_to_action_mask(obs_mask)
+                if not teacher_force_actions:
+                    obs_act_mask = th.zeros_like(obs_act_mask)
+                model_kwargs["actions0"] = act_chunk
+                model_kwargs["obs_action_mask"] = obs_act_mask
 
         # Match the schedule's true max sigma; see the note in train_util.log_samples.
         sched_sigma_max = float(diffusion.timestep2sigma(diffusion.num_timesteps - 1))
@@ -397,6 +456,10 @@ def run_debug_validation(model, diffusion, valset, device, out_dir,
             latent_mask=latent_mask.cpu(),
             return_decoded=False,
         )
+        samples_act = None
+        if isinstance(samples, tuple):
+            samples_video, samples_act = samples
+            samples = samples_video
         samples = samples.to(device)
         # Keep the observed half exactly as given; only the generated half is model output.
         samples = samples * latent_mask + x0 * obs_mask
@@ -413,6 +476,15 @@ def run_debug_validation(model, diffusion, valset, device, out_dir,
             rec = {"row": row["num"], "prompt": row["prompt"], "type": row["test_type"]}
             rec.update({f"next/{k}": v for k, v in m_next.items()})
             rec.update({f"roll/{k}": v for k, v in m_roll.items()})
+            if samples_act is not None and act_chunk is not None:
+                p_act = samples_act[j].to(device)
+                g_act = act_chunk[j].to(device)
+                # Row n_obs is pinned GT (the action mask lags by one row), so the first genuinely generated action is row n_obs + 1.
+                first_gen = n_obs + 1
+                for scope, sl in (("next", slice(first_gen, first_gen + 1)),
+                                  ("roll", slice(first_gen, None))):
+                    rec.update({f"{scope}/{k}": v
+                                for k, v in _action_metrics(p_act, g_act, sl).items()})
             per_row.append(rec)
 
             slug = valset.slug(row)
@@ -429,6 +501,9 @@ def run_debug_validation(model, diffusion, valset, device, out_dir,
                     render_overlay(
                         gt_frames=gt.cpu().numpy(),
                         pred_frames=pred.cpu().numpy(),
+                        # Top row keeps the recorded actions; this row shows what the model produced.
+                        pred_actions=(_action_bars(samples_act[j])
+                                      if samples_act is not None else None),
                         session_db_path=str(row["session_db"]),
                         start_frame_idx=row["window_start"],
                         out_path=str(mp4),
@@ -445,12 +520,16 @@ def run_debug_validation(model, diffusion, valset, device, out_dir,
             if swap_test and action_conditioned and act_chunk is not None:
                 try:
                     act_true_j = act_chunk[j:j + 1]
-                    act_swap_j = _swap_actions(act_true_j, n_obs)
-                    act_zero_j = _zero_actions(act_true_j, n_obs)
                     x0_j = x0[j:j + 1]
                     obs_mask_j = obs_mask[j:j + 1]
                     latent_mask_j = latent_mask[j:j + 1]
-                    # Same noise across all three passes so only the actions differ.
+                    obs_act_mask_j = frame_mask_to_action_mask(obs_mask_j)
+                    # Rewrite only the actions driving the generated frames: rows n_obs..T-1, the frame-mask complement, not the action-mask complement (which lags one row) -- leave the history true.
+                    intervene_on = 1.0 - obs_mask_j.reshape(
+                        obs_mask_j.shape[0], obs_mask_j.shape[1], 1)
+                    act_swap_j = _swap_actions(act_true_j, intervene_on)
+                    act_zero_j = _zero_actions(act_true_j, intervene_on)
+                    # Same starting noise for all three passes, so only the actions tensor differs.
                     shared_noise = th.randn(*x0_j.shape, device=device)
                     # heun_sample's churn draws from the global RNG each step; reseed per pass too.
                     swap_seed = 20250813 + int(row["num"])
@@ -465,15 +544,23 @@ def run_debug_validation(model, diffusion, valset, device, out_dir,
                                     "frame_indices": None, "x0": x0_j,
                                     "obs_mask": obs_mask_j, "latent_mask": latent_mask_j,
                                     "actions": act,
+                                    # Pin the history only; future action tokens are denoised jointly with the video.
+                                    **({"actions0": act,
+                                        "obs_action_mask": obs_act_mask_j}
+                                       if generates_actions else {}),
                                 },
                                 latent_mask=latent_mask_j.cpu(), return_decoded=False,
                             )
+                        act_out = None
+                        if isinstance(s, tuple):
+                            s, act_out = s
                         s = s.to(device)
-                        return (s * latent_mask_j + x0_j * obs_mask_j)[0]
+                        video = (s * latent_mask_j + x0_j * obs_mask_j)[0]
+                        return video, (act_out[0] if act_out is not None else None)
 
-                    true_full = _sample_with_actions(act_true_j)
-                    swap_full = _sample_with_actions(act_swap_j)
-                    zero_full = _sample_with_actions(act_zero_j)
+                    true_full, true_act = _sample_with_actions(act_true_j)
+                    swap_full, swap_act = _sample_with_actions(act_swap_j)
+                    zero_full, zero_act = _sample_with_actions(act_zero_j)
 
                     true01 = _to01(true_full[n_obs:])
                     swap01 = _to01(swap_full[n_obs:])
@@ -491,12 +578,18 @@ def run_debug_validation(model, diffusion, valset, device, out_dir,
                         mp4_swap = out_dir / f"step{step}_{slug}_swap.mp4"
                         _render_triple_overlay(
                             frames_gt=gt.cpu().numpy(),
+                            # All three passes share the GT frame context and true action history, differing only from row n_obs on.
                             frames_true=true_full.cpu().numpy(),
                             frames_swap=swap_full.cpu().numpy(),
                             frames_zero=zero_full.cpu().numpy(),
-                            actions_true=act_true_j[0].cpu().numpy(),
-                            actions_swap=act_swap_j[0].cpu().numpy(),
-                            actions_zero=act_zero_j[0].cpu().numpy(),
+                            actions_gt=act_true_j[0].cpu().numpy(),
+                            actions_true=(true_act if true_act is not None
+                                          else act_true_j[0].cpu().numpy()),
+                            actions_swap=(swap_act if swap_act is not None
+                                          else act_swap_j[0].cpu().numpy()),
+                            actions_zero=(zero_act if zero_act is not None
+                                          else act_zero_j[0].cpu().numpy()),
+                            true_label=("GEN" if true_act is not None else "TRUE"),
                             n_observed=n_obs, out_path=str(mp4_swap),
                             title=row["prompt"],
                         )
@@ -512,8 +605,16 @@ def run_debug_validation(model, diffusion, valset, device, out_dir,
     METRIC_KEYS = ("psnr", "ssim", "lpips", "l2", "rmse", "l1")
     for scope, prefix in (("next", "val/video"), ("roll", "val/video_roll")):
         for k in METRIC_KEYS:
-            vals = [r[f"{scope}/{k}"] for r in per_row]
-            agg[f"{prefix}/{k}"] = float(np.mean(vals))
+            vals = [r[f"{scope}/{k}"] for r in per_row if f"{scope}/{k}" in r]
+            if vals:
+                agg[f"{prefix}/{k}"] = float(np.mean(vals))
+    ACT_METRIC_KEYS = ("key_acc", "mouse_l1", "mouse_mse",
+                       "key_acc_trivial", "mouse_l1_trivial", "mouse_mse_trivial")
+    for scope, prefix in (("next", "val/action"), ("roll", "val/action_roll")):
+        for k in ACT_METRIC_KEYS:
+            vals = [r[f"{scope}/{k}"] for r in per_row if f"{scope}/{k}" in r]
+            if vals:
+                agg[f"{prefix}/{k}"] = float(np.mean(vals))
 
     if swap_rows:
         agg["val/swap/l2_true_vs_swap"] = float(np.mean([r["l2_true_swap"] for r in swap_rows]))

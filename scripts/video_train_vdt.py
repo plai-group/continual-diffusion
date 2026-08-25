@@ -35,9 +35,11 @@ def init_wandb(config, id):
     wandb_dir = os.environ.get("MY_WANDB_DIR", "none")
     if wandb_dir == "none":
         wandb_dir = None
+    # Without resume=, wandb restarts the history file-stream at row 0 and the backend drops every colliding row, so a resumed run logs nothing.
     wandb.init(entity=os.environ['WANDB_ENTITY'],
                project=os.environ['WANDB_PROJECT'],
-               config=config, dir=wandb_dir, id=id)
+               config=config, dir=wandb_dir, id=id,
+               resume="allow" if id else None)
     print(f"Wandb run id: {wandb.run.id}")
     num_nodes = 1
     if "SLURM_JOB_NODELIST" in os.environ:
@@ -199,6 +201,10 @@ def create_argparser():
         debug_validation_out="",
         debug_validation_per_task=False,
         cfg_scale=1.0,  # sampling-time only; not a model kwarg. 1.0 = no guidance.
+        generate_actions=False,
+        action_loss_weight=1.0,
+        # Warm start from a different architecture: step counter stays 0, optimizer/EMA stay fresh (--resume_checkpoint loads strict and reads the step from the filename).
+        init_from_checkpoint="",
     )
     defaults.update(model_and_diffusion_defaults(model_type='vdt'))
     parser = argparse.ArgumentParser()

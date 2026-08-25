@@ -2,21 +2,11 @@
 term in the diffusion loss, joint video+action sampling, and the CLI flags
 that switch it on."""
 
-import os
 import sys
 import torch
-import torch.nn as nn
-import numpy as np
 
-from improved_diffusion.vdt import VDT, VDT_S_2, VDT_SM_2, VDT_M_2, VDT_L_2
-from improved_diffusion.script_util import (
-    create_model_and_diffusion,
-    model_and_diffusion_defaults,
-    vdt_model_and_diffusion_defaults,
-    create_vdt_model_and_diffusion,
-    create_gaussian_diffusion,
-)
-from improved_diffusion.resample import UniformSampler
+from improved_diffusion.vdt import VDT_S_2, VDT_SM_2, VDT_M_2, VDT_L_2
+from improved_diffusion.script_util import create_vdt_model_and_diffusion
 
 
 def test_vdt_shapes_and_grads():

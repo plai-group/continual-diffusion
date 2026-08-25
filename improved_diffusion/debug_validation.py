@@ -245,7 +245,7 @@ def _swap_actions(actions, where):
 
 
 def _zero_actions(actions, where):
-    """Zero the actions on the rows  selects; leave the rest alone."""
+    """Zero the actions on the rows `where` selects; leave the rest alone."""
     return th.where(where.bool(), th.zeros_like(actions), actions)
 
 

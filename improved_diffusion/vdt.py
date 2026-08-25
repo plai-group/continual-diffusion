@@ -436,9 +436,6 @@ class VDT(nn.Module):
         x: (B, T, C, H, W) tensor of spatial inputs (images or latent representations of images)
         timesteps: (B,) tensor of diffusion timesteps
         """
-        if timesteps is None and 'timesteps' in kwargs:
-            timesteps = kwargs['timesteps']
-
         B, T, C, H, W = x.shape
         if obs_mask is not None and x0 is not None:
             x = x * (1 - obs_mask) + x0 * obs_mask

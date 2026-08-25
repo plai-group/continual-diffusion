@@ -199,3 +199,102 @@ def test_evaluate_reports_kl_diagnostics_and_bottoms_out_on_a_perfect_model(chai
     assert bad["multikey_rate"] == 0.0        # a flat 0.5 head never crosses the threshold
     assert good["filter_collapse_rate"] == 0.0
     assert len(good["reliability"]["count"]) == 10
+
+
+# ── model side: the readout must work against a real VDT before a GPU job depends on it ────────
+
+class _FakeDataset:
+    """Held-out corpus windows, without needing a corpus."""
+
+    def __init__(self, spec, n=6, T=20, C=3, H=32, W=32, seed=7):
+        self.T, self.n = T, n
+        rng = random.Random(seed)
+        self.frames = [np.random.RandomState(seed + i).randn(T, C, H, W).astype("float32")
+                       for i in range(n)]
+        self.actions = []
+        for _ in range(n):
+            a = np.zeros((T, 10), dtype="float32")
+            for t, (k, sig) in enumerate(_sample(spec, T, rng)):
+                if k >= 0:
+                    a[t, k] = 1.0
+                a[t, 8] = 1.0 if sig in (SIG_DX, SIG_BOTH) else 0.0
+                a[t, 9] = {SIG_DY_NEG: -1.0, SIG_DY_POS: 1.0, SIG_BOTH: 1.0}.get(sig, 0.0)
+            self.actions.append(a)
+
+    def __len__(self):
+        return self.n
+
+    def __getitem__(self, i):
+        import torch
+        return (torch.from_numpy(self.frames[i]), torch.arange(self.T),
+                torch.from_numpy(self.actions[i]))
+
+
+def _build_vdt(T=20):
+    from improved_diffusion.script_util import create_vdt_model_and_diffusion
+    return create_vdt_model_and_diffusion(
+        model_name="VDT-S", patch_size=4, input_size=(32, 32), in_channels=3,
+        num_frames=T, learn_sigma=False, sigma_small=False, diffusion_steps=100,
+        diffusion_space_kwargs=dict(diffusion_space="pixel", pre_encoded=False),
+        noise_schedule="linear", timestep_respacing="", use_kl=False,
+        predict_xstart=False, rescale_timesteps=True, rescale_learned_sigmas=True,
+        use_checkpoint=False, use_edm_scaling=False, action_dim=10,
+        action_dropout_prob=0.0, generate_actions=True, action_loss_weight=1.0,
+    )
+
+
+def test_model_press_probabilities_are_in_range_and_vary_with_context(spec):
+    import torch
+    from improved_diffusion.debug_policy_kl import model_press_probabilities
+
+    model, diffusion = _build_vdt()
+    with torch.no_grad():
+        for p in model.action_head.linear.parameters():
+            p.add_(torch.randn_like(p) * 0.05)
+    ds = _FakeDataset(spec, n=4)
+    x0 = torch.stack([ds[i][0] for i in range(4)])
+    actions = torch.stack([ds[i][2] for i in range(4)])
+    obs = torch.zeros(4, ds.T, 1, 1, 1)
+    obs[:, :10] = 1.0
+
+    q = model_press_probabilities(model, diffusion, x0, actions, obs, 1.0 - obs)
+    assert q.shape == (4, ds.T, N_KEY_DIMS)
+    assert q.min() >= 0.0 and q.max() <= 1.0
+    assert q.std() > 0.0, "head output does not depend on the context at all"
+
+
+def test_run_policy_kl_end_to_end(chain, spec):
+    from improved_diffusion.debug_policy_kl import run_policy_kl
+
+    model, diffusion = _build_vdt()
+    metrics = run_policy_kl(model, diffusion, _FakeDataset(spec), chain,
+                            device="cpu", n_windows=4, batch_size=2)
+    assert metrics["n_windows"] == 4
+    assert np.isfinite(metrics["kl_total"]) and metrics["kl_total"] >= 0.0
+    assert set(metrics["kl_per_dim"]) == set(chain.dims[:N_KEY_DIMS])
+    # The head is zero-initialised, so every probability is 0.5 and the KL is the distance from
+    # the policy's marginals to a coin flip -- large, finite, and identical across dims that the
+    # policy never presses.
+    assert metrics["kl_total"] > 1.0
+    assert metrics["filter_collapse_rate"] == 0.0
+
+
+def test_log_policy_kl_emits_every_series(chain, spec):
+    from improved_diffusion.debug_policy_kl import log_policy_kl, run_policy_kl
+
+    class _Logger:
+        def __init__(self): self.kv = {}
+        def logkv(self, k, v, distributed=True): self.kv[k] = v
+
+    model, diffusion = _build_vdt()
+    metrics = run_policy_kl(model, diffusion, _FakeDataset(spec), chain,
+                            device="cpu", n_windows=2, batch_size=2)
+    log = _Logger()
+    log_policy_kl(metrics, log)
+    assert "val/kl/total" in log.kv
+    assert "val/kl/multikey_rate" in log.kv
+    assert "val/kl/calibration_error" in log.kv
+    assert any(k.startswith("val/kl/dim/") for k in log.kv)
+    assert any(k.startswith("val/kl/frame/") for k in log.kv)
+    assert any(k.startswith("val/kl/reliability/") for k in log.kv)
+    assert all(np.isfinite(v) for v in log.kv.values())

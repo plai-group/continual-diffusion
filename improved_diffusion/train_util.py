@@ -65,9 +65,11 @@ class TrainLoop:
         clip_grad=None,
         optimizer='adam',
         debug_validation=None,
+        policy_kl=None,
     ):
         # (valset, out_dir) for the issue-58 plaicraft-debug validation set, or None.
         self.debug_validation = debug_validation
+        self.policy_kl = policy_kl
         self.args = args
         self.model = model
         self.diffusion = diffusion
@@ -691,6 +693,18 @@ class TrainLoop:
                     )
                 except Exception as e:
                     print(f"[debug_validation] skipped at step {self.step}: {e!r}")
+
+            # plaicraft-debug#70: policy divergence on held-out corpus windows. A different data
+            # source from the curated tasks above, so it is wired separately rather than through
+            # run_debug_validation. Never let it kill a run either.
+            if self.policy_kl is not None:
+                from .debug_policy_kl import log_policy_kl, run_policy_kl
+                kl_dataset, kl_chain, kl_windows = self.policy_kl
+                try:
+                    log_policy_kl(run_policy_kl(self.model, self.diffusion, kl_dataset, kl_chain,
+                                                dist_util.dev(), n_windows=kl_windows), logger)
+                except Exception as e:
+                    print(f"[policy_kl] skipped at step {self.step}: {e!r}")
 
             logger.logkv("timing/sampling_time", time() - sample_start, distributed=False)
 

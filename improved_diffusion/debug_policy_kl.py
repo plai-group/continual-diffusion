@@ -355,3 +355,89 @@ def evaluate(chain, gt_actions, q_model, n_obs, n_bins=10):
         "calibration_error": float(
             np.abs((bin_q - bin_p)[seen]).sum() / max(bin_hits.sum(), 1.0)),
     }
+
+
+# -- model side --------------------------------------------------------------------------------
+
+def model_press_probabilities(model, diffusion, x0, actions, obs_mask, latent_mask):
+    """p(press | context) from one forward pass at the schedule's maximum sigma.
+
+    At sigma_max the noised action carries no information about the true one, so the Bernoulli
+    head's optimum collapses from E[a0 | a_t, context] to E[a0 | context] -- which for a binary
+    a0 is exactly the press probability. No Monte Carlo, no sampling loop.
+    """
+    import torch as th
+    from .action_masks import frame_mask_to_action_mask
+
+    t = diffusion.num_timesteps - 1
+    sigma_max = float(diffusion.timestep2sigma(t))
+    scale = float(diffusion.sqrt_alphas_cumprod[t])
+    device = x0.device
+    with th.no_grad():
+        noise_x = th.randn_like(x0) * sigma_max * scale
+        noise_a = th.randn_like(actions) * sigma_max * scale
+        out = diffusion.p_mean_variance(
+            model, noise_x.to(th.float32),
+            th.full((x0.shape[0],), t, device=device, dtype=th.int32),
+            clip_denoised=True,
+            model_kwargs={
+                "frame_indices": None, "x0": x0,
+                "obs_mask": obs_mask, "latent_mask": latent_mask,
+                "actions": noise_a.to(th.float32),
+                "actions0": actions,
+                "obs_action_mask": frame_mask_to_action_mask(obs_mask),
+            },
+        )
+    act = out.get("pred_actstart")
+    if act is None:
+        raise RuntimeError("model produced no pred_actstart; is generate_actions set?")
+    return act[..., :N_KEY_DIMS].float().cpu().numpy()
+
+
+def run_policy_kl(model, diffusion, dataset, chain, device, n_windows=64,
+                  batch_size=8, n_obs=None, seed=20250824):
+    """Filter the policy over held-out corpus windows and score the head against it.
+
+    Held-out corpus windows, not the curated validation tasks: those are human-recorded and hold
+    two keys at once, which the policy can never do, so the filter's likelihood there is zero.
+    """
+    import numpy as _np
+    import torch as th
+
+    T = dataset.T
+    n_obs = T // 2 if n_obs is None else n_obs
+    idx = _np.random.RandomState(seed).choice(
+        len(dataset), size=min(n_windows, len(dataset)), replace=False)
+
+    gt_all, q_all = [], []
+    for lo in range(0, len(idx), batch_size):
+        rows = [dataset[int(i)] for i in idx[lo:lo + batch_size]]
+        x0 = th.stack([r[0] for r in rows]).to(device)
+        actions = th.stack([r[2] for r in rows]).to(device, dtype=th.float32)
+        obs_mask = th.zeros(x0.shape[0], T, 1, 1, 1, device=device)
+        obs_mask[:, :n_obs] = 1.0
+        q_all.append(model_press_probabilities(
+            model, diffusion, x0, actions, obs_mask, 1.0 - obs_mask))
+        gt_all.append(actions.cpu().numpy())
+
+    metrics = evaluate(chain, _np.concatenate(gt_all), _np.concatenate(q_all), n_obs)
+    metrics["n_windows"] = int(len(idx))
+    return metrics
+
+
+def log_policy_kl(metrics, logger, prefix="val/kl"):
+    """Flatten the metrics dict onto the logger; the reliability curve goes out per bin."""
+    logger.logkv(f"{prefix}/total", metrics["kl_total"], distributed=False)
+    for dim, value in metrics["kl_per_dim"].items():
+        logger.logkv(f"{prefix}/dim/{dim}", value, distributed=False)
+    for i, value in enumerate(metrics["kl_per_frame"]):
+        logger.logkv(f"{prefix}/frame/{i}", value, distributed=False)
+    logger.logkv(f"{prefix}/multikey_rate", metrics["multikey_rate"], distributed=False)
+    logger.logkv(f"{prefix}/filter_collapse_rate", metrics["filter_collapse_rate"],
+                 distributed=False)
+    logger.logkv(f"{prefix}/calibration_error", metrics["calibration_error"], distributed=False)
+    rel = metrics["reliability"]
+    for i, (mq, mp) in enumerate(zip(rel["mean_q"], rel["mean_p"])):
+        if rel["count"][i] > 0:
+            logger.logkv(f"{prefix}/reliability/bin{i}_predicted", mq, distributed=False)
+            logger.logkv(f"{prefix}/reliability/bin{i}_actual", mp, distributed=False)

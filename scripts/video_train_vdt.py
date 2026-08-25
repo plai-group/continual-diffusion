@@ -129,6 +129,23 @@ def main():
         print(f"debug validation: {len(valset.rows)} rows -> {out_dir}")
         debug_validation = (valset, out_dir, args.debug_validation_per_task)
 
+    # plaicraft-debug#70: KL against the training policy, filtered from the chain spec the
+    # corpus was generated with. Held-out corpus windows, not the curated validation tasks.
+    policy_kl = None
+    if args.policy_kl_windows > 0 and args.generate_actions:
+        from improved_diffusion.debug_policy_kl import PolicyChain, find_spec, load_spec
+        from improved_diffusion.video_datasets import (
+            eval_dataset_configs, get_data_path, get_eval_dataset)
+        spec_path = find_spec(args.policy_kl_spec or None, get_data_path(args.dataset))
+        if spec_path is None:
+            print("policy KL: no policy_chain_spec.json at the corpus root; skipping")
+        else:
+            kl_dataset = get_eval_dataset(
+                args.dataset, T=args.T, train=False,
+                eval_dataset_config=eval_dataset_configs["continuous"])
+            print(f"policy KL: {spec_path} over {len(kl_dataset)} held-out windows")
+            policy_kl = (kl_dataset, PolicyChain(load_spec(spec_path)), args.policy_kl_windows)
+
     print("training...")
     TrainLoop(
         model=model,
@@ -156,6 +173,7 @@ def main():
         clip_grad=args.clip_grad,
         optimizer=args.optimizer,
         debug_validation=debug_validation,
+        policy_kl=policy_kl,
         args=args,
     ).run_loop()
 
@@ -200,6 +218,8 @@ def create_argparser():
         debug_validation_root="",
         debug_validation_out="",
         debug_validation_per_task=False,
+        policy_kl_windows=0,
+        policy_kl_spec="",
         cfg_scale=1.0,  # sampling-time only; not a model kwarg. 1.0 = no guidance.
         generate_actions=False,
         action_loss_weight=1.0,

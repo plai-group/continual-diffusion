@@ -10,10 +10,21 @@ import math
 
 import numpy as np
 import torch as th
+import torch.nn.functional as F
 
 from .action_masks import frame_mask_to_action_mask
 from .nn import mean_flat
 from .losses import normal_kl, discretized_gaussian_log_likelihood
+
+
+# Action dims 0-7 are key/click indicators; 8-9 are symlog mouse deltas and stay real-valued.
+N_BINARY_ACTION_DIMS = 8
+
+
+def actions_from_logits(raw):
+    """Map the action head's raw output to action space: sigmoid on the binary dims, identity on the rest."""
+    n = min(N_BINARY_ACTION_DIMS, raw.shape[-1])
+    return th.cat([th.sigmoid(raw[..., :n]), raw[..., n:]], dim=-1)
 
 
 def get_named_beta_schedule(schedule_name, num_diffusion_timesteps):
@@ -343,15 +354,9 @@ class GaussianDiffusion:
         pred_actstart = None
         attn = None
         if is_action_model:
+            # The action branch is always x0-prediction regardless of the video branch: a sigmoid cannot predict unbounded eps.
             if model_out_act is not None:
-                if self.model_mean_type == ModelMeanType.START_X:
-                    pred_actstart = model_out_act
-                elif self.model_mean_type == ModelMeanType.EPSILON:
-                    act_t = model_kwargs.get('actions', None)
-                    if act_t is not None:
-                        pred_actstart = self._predict_xstart_from_eps(x_t=act_t, t=t, eps=model_out_act)
-                    else:
-                        pred_actstart = model_out_act
+                pred_actstart = actions_from_logits(model_out_act)
         else:
             attn = model_out_act
 
@@ -1054,25 +1059,26 @@ class GaussianDiffusion:
             terms["loss_video"] = loss_video
 
             if model_out_act is not None and is_action_gen:
-                target_act = {
-                    ModelMeanType.PREVIOUS_X: self.q_posterior_mean_variance(
-                        x_start=actions_in, x_t=act_t, t=t
-                    )[0],
-                    ModelMeanType.START_X: actions_in,
-                    ModelMeanType.EPSILON: noise_act,
-                }[self.model_mean_type]
-                assert model_out_act.shape == target_act.shape == actions_in.shape
+                assert model_out_act.shape == actions_in.shape
                 latent_action_mask = call_kwargs.get('latent_action_mask', None)
                 if latent_action_mask is None and latent_mask is not None:
-                    latent_action_mask = latent_mask.view(latent_mask.shape[0], latent_mask.shape[1], 1) if (isinstance(latent_mask, th.Tensor) and latent_mask.ndim == 5) else latent_mask
-                mse_action = mean_flat((target_act - model_out_act) ** 2, mask=latent_action_mask)
-                terms["loss_action"] = mse_action
+                    latent_action_mask = frame_mask_to_action_mask(latent_mask)
+                # Binary dims: BCE on logits (MSE through a saturated sigmoid vanishes exactly where the error is largest).
+                n_bin = min(N_BINARY_ACTION_DIMS, actions_in.shape[-1])
+                per_elem = th.cat([
+                    F.binary_cross_entropy_with_logits(
+                        model_out_act[..., :n_bin], actions_in[..., :n_bin], reduction="none"),
+                    (actions_in[..., n_bin:] - model_out_act[..., n_bin:]) ** 2,
+                ], dim=-1)
+                # One tensor of the same shape as before, so dim_ratio below still balances video against actions unchanged.
+                loss_action = mean_flat(per_elem, mask=latent_action_mask)
+                terms["loss_action"] = loss_action
 
                 action_weight = call_kwargs.get('action_loss_weight', getattr(self, 'action_loss_weight', 1.0))
                 # mean_flat is per-element, so equal-weighting over-weights action ~288x; scale by dim_ratio (DreamZero, arXiv:2602.15922) to restore parity.
                 dim_ratio = actions_in[0].numel() / x_start[0].numel()
                 terms["action_dim_ratio"] = th.full_like(loss_video, dim_ratio)
-                total_loss = loss_video + action_weight * dim_ratio * mse_action
+                total_loss = loss_video + action_weight * dim_ratio * loss_action
                 terms["loss_total"] = total_loss
                 terms["loss"] = total_loss
             else:

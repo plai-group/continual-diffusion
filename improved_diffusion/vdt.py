@@ -264,7 +264,10 @@ class FinalLayer(nn.Module):
 
 class ActionHead(nn.Module):
     """
-    The output head of VDT for predicting actions.
+    The output head of VDT for predicting actions. Raw output: logits on the
+    binary key/click dims, real values on the mouse dims. gaussian_diffusion's
+    actions_from_logits maps it to action space; the loss consumes the logits
+    directly so BCE stays numerically stable.
     """
     def __init__(self, hidden_size, action_dim, num_frames):
         super().__init__()

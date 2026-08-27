@@ -11,7 +11,6 @@ import math
 import numpy as np
 import torch as th
 
-from .action_masks import frame_mask_to_action_mask
 from .nn import mean_flat
 from .losses import normal_kl, discretized_gaussian_log_likelihood
 
@@ -267,7 +266,7 @@ class GaussianDiffusion:
 
         B, C = x.shape[:2]
         assert t.shape == (B,)
-        model_output, model_out_act = model(x, self._scale_timesteps(t), return_attn_weights=return_attn_weights, **model_kwargs)
+        model_output, attn_weights = model(x, self._scale_timesteps(t), return_attn_weights=return_attn_weights, **model_kwargs)
         if th.isinf(model_output.mean()):
             raise ValueError("Model output contains NaN or inf values.")
 
@@ -331,37 +330,12 @@ class GaussianDiffusion:
         assert (
             model_mean.shape == model_log_variance.shape == pred_xstart.shape == x.shape
         )
-        # Discriminate by model type (checking .module for DDP), not isinstance(..., th.Tensor) -- VDT returns actions here, UNet returns attn weights.
-        action_dim = getattr(
-            model, 'action_dim', getattr(getattr(model, 'module', None), 'action_dim', 0)
-        )
-        model_generates_actions = getattr(
-            model, 'generate_actions', getattr(getattr(model, 'module', None), 'generate_actions', False)
-        )
-        is_action_model = action_dim > 0 and model_generates_actions
-
-        pred_actstart = None
-        attn = None
-        if is_action_model:
-            if model_out_act is not None:
-                if self.model_mean_type == ModelMeanType.START_X:
-                    pred_actstart = model_out_act
-                elif self.model_mean_type == ModelMeanType.EPSILON:
-                    act_t = model_kwargs.get('actions', None)
-                    if act_t is not None:
-                        pred_actstart = self._predict_xstart_from_eps(x_t=act_t, t=t, eps=model_out_act)
-                    else:
-                        pred_actstart = model_out_act
-        else:
-            attn = model_out_act
-
         return {
             "mean": model_mean,
             "variance": model_variance,
             "log_variance": model_log_variance,
             "pred_xstart": pred_xstart,
-            "pred_actstart": pred_actstart,
-            "attn": attn,
+            "attn": attn_weights,
         }
 
     def do_edm_x0_prediction_scaling(self, t, xt, output):
@@ -802,11 +776,6 @@ class GaussianDiffusion:
             device = next(model.parameters()).device
         assert isinstance(shape, (tuple, list))
 
-        B, T = shape[0], shape[1]
-        action_dim = getattr(model, 'action_dim', getattr(getattr(model, 'module', None), 'action_dim', 0))
-        generate_actions = getattr(model, 'generate_actions', getattr(getattr(model, 'module', None), 'generate_actions', False))
-        sample_actions = (action_dim > 0 and generate_actions)
-
         # select timesteps - for EDM sampler we do this here instead of respacing
         step_indices = np.arange(num_steps)
         sigmas_to_step_at = (
@@ -821,65 +790,33 @@ class GaussianDiffusion:
                 timesteps.append(nearest_timestep)
         sigmas_snapped = [self.timestep2sigma(t) for t in timesteps] + [0]  # Add zero because we need a value for final s_next
 
-        def get_denoised_estimate(xt, at, t):
+        def get_denoised_estimate(xt, t):
             # NOTE: Translate between VE and VP reverse diffusion by scaling the noise level (refer to the EDM paper)
             scaled_x = xt * self.sqrt_alphas_cumprod[t]
-            cur_kwargs = dict(model_kwargs) if model_kwargs is not None else {}
-            if at is not None:
-                scaled_a = at * self.sqrt_alphas_cumprod[t]
-                cur_kwargs["actions"] = scaled_a.to(th.float32)
-
-            t_tensor = th.tensor([t] * shape[0], device=device)
+            t = th.tensor([t] * shape[0], device=device)
             out = self.p_mean_variance(
-                model, scaled_x.to(th.float32), t_tensor.to(th.int32).view(-1).to(device),
-                clip_denoised=clip_denoised, denoised_fn=denoised_fn, model_kwargs=cur_kwargs,
+                model, scaled_x.to(th.float32), th.tensor(t).to(th.int32).view(-1).to(device),
+                clip_denoised=clip_denoised, denoised_fn=denoised_fn, model_kwargs=model_kwargs,
             )
-            obs_indicator = cur_kwargs["obs_mask"] if "obs_mask" in cur_kwargs else 0
+            obs_indicator = model_kwargs["obs_mask"] if model_kwargs is not None and "obs_mask" in model_kwargs else 0
             latent_indicator = 1 - obs_indicator
-            denoised_x = out["pred_xstart"]
-            if "x0" in cur_kwargs:
-                denoised_x = latent_indicator * denoised_x + obs_indicator * cur_kwargs["x0"]
+            denoised = out["pred_xstart"]
+            denoised = latent_indicator * denoised + obs_indicator * model_kwargs["x0"] 
+            return denoised.to(th.float64), latent_indicator
 
-            denoised_a = None
-            if "pred_actstart" in out and out["pred_actstart"] is not None:
-                obs_act_indicator = cur_kwargs.get("obs_action_mask", None)
-                if obs_act_indicator is None and "obs_mask" in cur_kwargs:
-                    om = cur_kwargs["obs_mask"]
-                    obs_act_indicator = frame_mask_to_action_mask(om) if isinstance(om, th.Tensor) else om
-                if obs_act_indicator is None:
-                    obs_act_indicator = 0
-                latent_act_indicator = 1 - obs_act_indicator
-                denoised_a = out["pred_actstart"]
-                if "actions0" in cur_kwargs:
-                    denoised_a = latent_act_indicator * denoised_a + obs_act_indicator * cur_kwargs["actions0"]
-
-            return denoised_x.to(th.float64), (denoised_a.to(th.float64) if denoised_a is not None else None), latent_indicator
-
-        to_float64 = lambda x: th.tensor(x, dtype=th.float64) if not isinstance(x, th.Tensor) else x.to(th.float64)
-
-        if sample_actions:
-            action_shape = (B, T, action_dim)
-            if isinstance(noise, (tuple, list)):
-                noise_x, noise_a = noise
-                x_next = noise_x.to(th.float64)
-                a_next = noise_a.to(th.float64) if noise_a is not None else th.randn(*action_shape, device=device, dtype=th.float64)
-            else:
-                x_next = noise.to(th.float64) if noise is not None else th.randn(*shape, device=device, dtype=th.float64)
-                a_next = th.randn(*action_shape, device=device, dtype=th.float64)
-            x_next = x_next * sigmas_snapped[0]
-            a_next = a_next * sigmas_snapped[0]
+        # make unit variance noise
+        if noise is not None:
+            x_next = noise.to(th.float64)
         else:
-            if noise is not None:
-                x_next = noise.to(th.float64)
-            else:
-                x_next = th.randn(*shape, device=device, dtype=th.float64)
-            x_next = x_next * sigmas_snapped[0]
-            a_next = None
+            x_next = th.randn(*shape, device=device, dtype=th.float64)
+        # scale noise to match last step of VE process
+        x_next = x_next * sigmas_snapped[0]
 
+        to_float64 = lambda x: th.tensor(x, dtype=th.float64)
+        x_next = to_float64(x_next)
         history = []
         for i, (s_cur, s_next) in enumerate(zip(sigmas_snapped[:-1], sigmas_snapped[1:])):
             x_cur = x_next
-            a_cur = a_next
             t_cur = self.sigma2timestep(s_cur)
             assert s_cur == self.timestep2sigma(t_cur)
 
@@ -890,41 +827,31 @@ class GaussianDiffusion:
             s_hat = to_float64(self.timestep2sigma(t_hat))
             if t_hat == t_cur:
                 x_hat = x_cur
-                a_hat = a_cur
             else:
-                sigma_diff = (s_hat ** 2 - s_cur ** 2).sqrt() * S_noise
-                x_hat = x_cur + sigma_diff * th.randn_like(x_cur)
-                a_hat = (a_cur + sigma_diff * th.randn_like(a_cur)) if a_cur is not None else None
+                x_hat = x_cur + (s_hat ** 2 - s_cur ** 2).sqrt() * S_noise * th.randn_like(x_cur)
 
             # Euler step.
-            denoised_x, denoised_a, _ = get_denoised_estimate(x_hat, a_hat, t_hat)
-            d_cur_x = (x_hat - denoised_x) / s_hat
-            x_next = x_hat + (s_next - s_hat) * d_cur_x
-            if a_hat is not None and denoised_a is not None:
-                d_cur_a = (a_hat - denoised_a) / s_hat
-                a_next = a_hat + (s_next - s_hat) * d_cur_a
+            denoised, _ = get_denoised_estimate(x_hat, t_hat)
+            d_cur = (x_hat - denoised) / s_hat
+            x_next = x_hat + (s_next - s_hat) * d_cur
 
+            # x_samp = x_next[:,10:]
+            # print(f"timestep / mean / std / min / max: {s_cur:.4f} / {x_samp.mean():.4f} / {x_samp.std():.4f} / {x_samp.min():.4f} / {x_samp.max():.4f}")
             if visualize_reverse_diffusion:
                 if i % 10 == 0 or i == len(sigmas_snapped)-2:
-                    decoded = self.decode(denoised_x, chunk_size=decode_chunk_size) if return_decoded else denoised_x
+                    decoded = self.decode(denoised, chunk_size=decode_chunk_size) if return_decoded else denoised
                     history.append((t_hat, decoded))
 
             # Apply 2nd order correction.
             if s_next > 0:
                 t_next = self.sigma2timestep(s_next)
                 assert s_next == self.timestep2sigma(t_next)
-                denoised_next_x, denoised_next_a, _ = get_denoised_estimate(x_next, a_next, t_next)
-                d_prime_x = (x_next - denoised_next_x) / s_next
-                x_next = x_hat + (s_next - s_hat) * (0.5 * d_cur_x + 0.5 * d_prime_x)
-                if a_next is not None and denoised_next_a is not None:
-                    d_prime_a = (a_next - denoised_next_a) / s_next
-                    a_next = a_hat + (s_next - s_hat) * (0.5 * d_cur_a + 0.5 * d_prime_a)
+                denoised_next, _ = get_denoised_estimate(x_next, t_next)
+                d_prime = (x_next - denoised_next) / s_next
+                x_next = x_hat + (s_next - s_hat) * (0.5 * d_cur + 0.5 * d_prime)
 
-        samples_video = ((x_next, self.decode(x_next, chunk_size=decode_chunk_size))
-                         if return_decoded else x_next)
-        if sample_actions:
-            return (samples_video, a_next), history
-        return samples_video, history
+        return ((x_next, self.decode(x_next, chunk_size=decode_chunk_size))
+                if return_decoded else x_next), history
 
 
     def _vb_terms_bpd(
@@ -995,28 +922,7 @@ class GaussianDiffusion:
             if self.loss_type == LossType.RESCALED_KL:
                 terms["loss"] *= self.num_timesteps
         elif self.loss_type == LossType.MSE or self.loss_type == LossType.RESCALED_MSE:
-            actions_in = model_kwargs.get('actions', None)
-            is_action_gen = (
-                actions_in is not None
-                and (
-                    getattr(model, 'generate_actions', False)
-                    or getattr(getattr(model, 'module', None), 'generate_actions', False)
-                    or 'obs_action_mask' in model_kwargs
-                    or 'actions0' in model_kwargs
-                )
-            )
-
-            call_kwargs = dict(model_kwargs)
-            if is_action_gen:
-                noise_act = th.randn_like(actions_in)
-                act_t = self.q_sample(actions_in, t, noise=noise_act)
-                call_kwargs['actions'] = act_t
-                call_kwargs['actions0'] = actions_in
-                if 'obs_action_mask' not in call_kwargs and 'obs_mask' in call_kwargs:
-                    om = call_kwargs['obs_mask']
-                    call_kwargs['obs_action_mask'] = frame_mask_to_action_mask(om) if isinstance(om, th.Tensor) else om
-
-            model_output, model_out_act = model(x_t, timesteps=self._scale_timesteps(t), **call_kwargs)
+            model_output, _ = model(x_t, timesteps=self._scale_timesteps(t), **model_kwargs)
 
             if self.model_var_type in [
                 ModelVarType.LEARNED,
@@ -1050,34 +956,10 @@ class GaussianDiffusion:
             assert model_output.shape == target.shape == x_start.shape
             terms["mse"] = mean_flat((target - model_output) ** 2, mask=latent_mask)
             terms["eval-mse"] = mean_flat((target - model_output) ** 2, mask=eval_mask)
-            loss_video = terms["mse"] + terms.get("vb", 0)
-            terms["loss_video"] = loss_video
-
-            if model_out_act is not None and is_action_gen:
-                target_act = {
-                    ModelMeanType.PREVIOUS_X: self.q_posterior_mean_variance(
-                        x_start=actions_in, x_t=act_t, t=t
-                    )[0],
-                    ModelMeanType.START_X: actions_in,
-                    ModelMeanType.EPSILON: noise_act,
-                }[self.model_mean_type]
-                assert model_out_act.shape == target_act.shape == actions_in.shape
-                latent_action_mask = call_kwargs.get('latent_action_mask', None)
-                if latent_action_mask is None and latent_mask is not None:
-                    latent_action_mask = latent_mask.view(latent_mask.shape[0], latent_mask.shape[1], 1) if (isinstance(latent_mask, th.Tensor) and latent_mask.ndim == 5) else latent_mask
-                mse_action = mean_flat((target_act - model_out_act) ** 2, mask=latent_action_mask)
-                terms["loss_action"] = mse_action
-
-                action_weight = call_kwargs.get('action_loss_weight', getattr(self, 'action_loss_weight', 1.0))
-                # mean_flat is per-element, so equal-weighting over-weights action ~288x; scale by dim_ratio (DreamZero, arXiv:2602.15922) to restore parity.
-                dim_ratio = actions_in[0].numel() / x_start[0].numel()
-                terms["action_dim_ratio"] = th.full_like(loss_video, dim_ratio)
-                total_loss = loss_video + action_weight * dim_ratio * mse_action
-                terms["loss_total"] = total_loss
-                terms["loss"] = total_loss
+            if "vb" in terms:
+                terms["loss"] = terms["mse"] + terms["vb"]
             else:
-                terms["loss_total"] = loss_video
-                terms["loss"] = loss_video
+                terms["loss"] = terms["mse"]
         else:
             raise NotImplementedError(self.loss_type)
 

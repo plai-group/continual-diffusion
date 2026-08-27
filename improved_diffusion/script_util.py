@@ -193,9 +193,6 @@ def vdt_model_and_diffusion_defaults():
         use_edm_scaling=False,
         action_dim=0,
         action_dropout_prob=0.0,
-        generate_actions=False,
-        action_token_cond=False,
-        action_loss_weight=1.0,
     )
 
 
@@ -219,9 +216,6 @@ def create_vdt_model_and_diffusion(
     use_edm_scaling,
     action_dim=0,
     action_dropout_prob=0.0,
-    generate_actions=False,
-    action_token_cond=False,
-    action_loss_weight=1.0,
 ):
     diffusion = create_gaussian_diffusion(
         steps=diffusion_steps,
@@ -235,7 +229,6 @@ def create_vdt_model_and_diffusion(
         timestep_respacing=timestep_respacing,
         diffusion_space_kwargs=diffusion_space_kwargs,
     )
-    diffusion.action_loss_weight = action_loss_weight
     model = create_vdt_model(
         model_name=model_name,
         input_size=input_size,
@@ -245,8 +238,6 @@ def create_vdt_model_and_diffusion(
         learn_sigma=learn_sigma,
         action_dim=action_dim,
         action_dropout_prob=action_dropout_prob,
-        generate_actions=generate_actions,
-        action_token_cond=action_token_cond,
     )
     return model, diffusion
 

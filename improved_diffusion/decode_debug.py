@@ -170,23 +170,17 @@ def _to_uint8_frame(frame_chw):
 #  Public API
 # ------------------------------------------------------------------ #
 def render_overlay(gt_frames, pred_frames, session_db_path, start_frame_idx,
-                   out_path, n_observed=10, title=None, pred_actions=None):
+                   out_path, n_observed=10, title=None):
     """
     gt_frames, pred_frames: (T, 3, 24, 40) float arrays/tensors in [-1, 1]
     start_frame_idx: index of frame 0 of this window within the session (for action lookup)
     n_observed: first N frames are context; drawn with a red border
-    pred_actions: optional list of T action-bar dicts to draw on the PREDICTED
-        row, in the same shape get_frame_actions returns. Pass this when the
-        model generates its own actions; without it both rows are painted with
-        the recorded actions and the generated ones are never visible.
     Writes an mp4 to out_path at DECODE_VIDEO_FPS. Returns out_path.
     """
     gt_frames = np.asarray(gt_frames)
     pred_frames = np.asarray(pred_frames)
     T = gt_frames.shape[0]
     actions = get_frame_actions(session_db_path, start_frame_idx, T)
-    if pred_actions is None:
-        pred_actions = actions
 
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -208,7 +202,7 @@ def render_overlay(gt_frames, pred_frames, session_db_path, start_frame_idx,
         gt_content = _to_uint8_frame(gt_frames[t])
         pred_content = _to_uint8_frame(pred_frames[t])
         gt_overlay = _overlay_frame(gt_content, actions[t], border=True)
-        pred_overlay = _overlay_frame(pred_content, pred_actions[t], border=border)
+        pred_overlay = _overlay_frame(pred_content, actions[t], border=border)
         combined = cv2.vconcat([gt_overlay, pred_overlay])
         writer.append_data(combined)  # imageio expects RGB, which is what we have
 

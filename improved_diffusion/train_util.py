@@ -23,6 +23,7 @@ from .fp16_util import (
     unflatten_master_params,
     zero_grad,
 )
+from .action_masks import frame_mask_to_action_mask
 from .nn import update_ema
 from .resample import LossAwareSampler, UniformSampler
 from .rng_util import rng_decorator, RNG
@@ -170,6 +171,37 @@ class TrainLoop:
                     resume_checkpoint, map_location=dist_util.dev()
                 )['state_dict']
             )
+        elif getattr(self.args, 'init_from_checkpoint', ''):
+            self._warm_start(self.args.init_from_checkpoint)
+
+    def _warm_start(self, path):
+        """Initialise the trunk from a checkpoint of a DIFFERENT architecture.
+
+        Unlike a resume this keeps self.step at 0 and leaves the optimizer and
+        EMA fresh -- the point is to inherit trained weights, not to continue a
+        run. resume_checkpoint cannot do it: it is a strict load and it parses
+        the step out of the filename.
+        """
+        print(f"warm start from: {path}")
+        sd = dist_util.load_state_dict(path, map_location=dist_util.dev())['state_dict']
+        missing, unexpected = self.model.load_state_dict(sd, strict=False)
+        print(f"  reused {len(sd) - len(unexpected)}/{len(sd)} donor tensors; "
+              f"{len(missing)} missing, {len(unexpected)} unexpected")
+        if missing:
+            print(f"  missing:    {sorted(missing)}")
+        if unexpected:
+            print(f"  unexpected: {sorted(unexpected)}")
+
+        # The donor trunk never saw an extra sequence token; zeroing makes the new token a constant rather than full-scale noise in converged attention.
+        zeroed = []
+        for name, p in self.model.named_parameters():
+            if name in missing and ('action_x_embedder' in name
+                                    or 'action_pos_embed' in name):
+                with th.no_grad():
+                    p.zero_()
+                zeroed.append(name)
+        if zeroed:
+            print(f"  zero-initialised action-token path: {sorted(zeroed)}")
 
     def _load_ema_parameters(self, rate):
         ema_params = copy.deepcopy(self.master_params)
@@ -439,7 +471,15 @@ class TrainLoop:
             model_kwargs = {'frame_indices': frame_indices, 'obs_mask': obs_mask,
                              'latent_mask': latent_mask, 'x0': micro}
             if micro_actions is not None:
-                model_kwargs['actions'] = micro_actions.to(dist_util.dev(), dtype=th.float32)
+                micro_act_dev = micro_actions.to(dist_util.dev(), dtype=th.float32)
+                model_kwargs['actions'] = micro_act_dev
+                if getattr(self.model, 'generate_actions', False) or getattr(self.args, 'generate_actions', False):
+                    obs_act_mask = frame_mask_to_action_mask(obs_mask)
+                    latent_act_mask = frame_mask_to_action_mask(latent_mask)
+                    model_kwargs['obs_action_mask'] = obs_act_mask
+                    model_kwargs['latent_action_mask'] = latent_act_mask
+                    model_kwargs['actions0'] = micro_act_dev
+                    model_kwargs['action_loss_weight'] = getattr(self.args, 'action_loss_weight', 1.0)
 
             last_batch = (i + self.microbatch) >= batch1.shape[0]
             t, weights = self.schedule_sampler.sample(micro.shape[0], dist_util.dev())
@@ -629,6 +669,8 @@ class TrainLoop:
                 return_attn_weights=True,
                 return_decoded=False,
             )
+            if isinstance(samples, tuple):
+                samples, _ = samples
             # NOTE: Don't decode latent samples
             samples = (samples.cpu() * latent_mask + batch * obs_mask).float()
             _mark_as_observed(samples[:, :n_obs])

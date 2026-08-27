@@ -10,6 +10,7 @@ datasets/drive*
 datasets/egolife*
 datasets/kcam_selected
 logs*
+run-scripts/
 sample_slurm_scripts
 wandb
 checkpoints

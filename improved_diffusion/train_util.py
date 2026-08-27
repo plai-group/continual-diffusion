@@ -94,6 +94,7 @@ class TrainLoop:
         self.enc_dec_chunk_size = enc_dec_chunk_size
         self.vis_batch = None
         self.vis_actions = None
+        self.vis_mouse = None
         self.max_frames = max_frames
         self.gradient_clip_norm = float(clip_grad) if clip_grad is not None else None
 
@@ -370,22 +371,23 @@ class TrainLoop:
 
     def get_next_batch(self):
         batch = next(self.data)
-        if len(batch) == 3:
-            frames, absolute_index_map, actions = batch
+        if len(batch) == 4:
+            frames, absolute_index_map, actions, mouse = batch
         else:
             frames, absolute_index_map = batch
-            actions = None
+            actions, mouse = None, None
         if self.vis_batch is None or self.vis_batch.size(1) < self.max_frames:
             with RNG(0):  # Initialize datapoint to log here in case data is deterministic
                 self.vis_batch = frames
                 self.vis_actions = actions
-        return frames, absolute_index_map, actions
+                self.vis_mouse = mouse
+        return frames, absolute_index_map, actions, mouse
 
     def run_loop(self):
         last_sample_time = None
         while not self.lr_anneal_steps or self.step < self.lr_anneal_steps:
             try:
-                frames, absolute_index_map, actions = self.get_next_batch()
+                frames, absolute_index_map, actions, mouse = self.get_next_batch()
                 # print(f"rank: {dist.get_rank()}, indices: {absolute_index_map[:,0].tolist()}, device: {dist_util.dev()}")
             except RuntimeError as e:
                 print(e)
@@ -393,7 +395,7 @@ class TrainLoop:
                 break
 
             for _ in range(self.steps_per_experience):
-                self.run_step(frames, None, absolute_index_map, actions)
+                self.run_step(frames, None, absolute_index_map, actions, mouse)
                 if self.step % self.log_interval == 0:
                     logger.dumpkvs()
                 if self.step % self.save_interval == 0:
@@ -409,9 +411,9 @@ class TrainLoop:
                 self.step += 1
         self.save()
 
-    def run_step(self, batch1, batch2, absolute_index_map=None, actions=None):
+    def run_step(self, batch1, batch2, absolute_index_map=None, actions=None, mouse=None):
         t0 = time()
-        self.forward_backward(batch1, batch2, absolute_index_map, actions)
+        self.forward_backward(batch1, batch2, absolute_index_map, actions, mouse)
         if self.use_fp16:
             self.optimize_fp16()
         else:
@@ -419,7 +421,7 @@ class TrainLoop:
         self.log_step()
         logger.logkv("timing/step_time", time() - t0)
     
-    def forward_backward(self, batch1, batch2, absolute_index_map=None, actions=None):
+    def forward_backward(self, batch1, batch2, absolute_index_map=None, actions=None, mouse=None):
         zero_grad(self.master_params)
 
         batch_size = batch1.shape[0]
@@ -428,6 +430,7 @@ class TrainLoop:
             micro1 = batch1[i : i + self.microbatch]
             micro2 = batch2[i : i + self.microbatch] if batch2 is not None else None
             micro_actions = actions[i : i + self.microbatch] if actions is not None else None
+            micro_mouse = mouse[i : i + self.microbatch] if mouse is not None else None
             if self.masking_mode == "autoregressive":
                 micro, frame_indices, obs_mask, latent_mask = self.get_autoregressive_masks(micro1)
                 # frame_indices (local, into micro1's T dim) must be the identity
@@ -458,6 +461,9 @@ class TrainLoop:
                 # below -- otherwise actions silently mis-pair with frames.
                 gather_idx = frame_indices.unsqueeze(-1).expand(-1, -1, micro_actions.shape[-1])
                 micro_actions = th.gather(micro_actions, 1, gather_idx)
+            if micro_mouse is not None:
+                gather_idx = frame_indices.unsqueeze(-1).expand(-1, -1, micro_mouse.shape[-1])
+                micro_mouse = th.gather(micro_mouse, 1, gather_idx)
 
             if absolute_index_map is not None:
                 # Convert frame indices to indices in one long video frame for RPE attention to work with.
@@ -470,16 +476,27 @@ class TrainLoop:
 
             model_kwargs = {'frame_indices': frame_indices, 'obs_mask': obs_mask,
                              'latent_mask': latent_mask, 'x0': micro}
+            generates_actions = getattr(self.model, 'generate_actions', False) or getattr(self.args, 'generate_actions', False)
             if micro_actions is not None:
                 micro_act_dev = micro_actions.to(dist_util.dev(), dtype=th.float32)
                 model_kwargs['actions'] = micro_act_dev
-                if getattr(self.model, 'generate_actions', False) or getattr(self.args, 'generate_actions', False):
+                if generates_actions:
                     obs_act_mask = frame_mask_to_action_mask(obs_mask)
                     latent_act_mask = frame_mask_to_action_mask(latent_mask)
                     model_kwargs['obs_action_mask'] = obs_act_mask
                     model_kwargs['latent_action_mask'] = latent_act_mask
                     model_kwargs['actions0'] = micro_act_dev
-                    model_kwargs['action_loss_weight'] = getattr(self.args, 'action_loss_weight', 1.0)
+                    model_kwargs['keypress_loss_weight'] = getattr(self.args, 'keypress_loss_weight', 1.0)
+            if micro_mouse is not None:
+                micro_mouse_dev = micro_mouse.to(dist_util.dev(), dtype=th.float32)
+                model_kwargs['mouse'] = micro_mouse_dev
+                if generates_actions:
+                    obs_mouse_mask = frame_mask_to_action_mask(obs_mask)
+                    latent_mouse_mask = frame_mask_to_action_mask(latent_mask)
+                    model_kwargs['obs_mouse_mask'] = obs_mouse_mask
+                    model_kwargs['latent_mouse_mask'] = latent_mouse_mask
+                    model_kwargs['mouse0'] = micro_mouse_dev
+                    model_kwargs['mouse_loss_weight'] = getattr(self.args, 'mouse_loss_weight', 1.0)
 
             last_batch = (i + self.microbatch) >= batch1.shape[0]
             t, weights = self.schedule_sampler.sample(micro.shape[0], dist_util.dev())
@@ -659,6 +676,9 @@ class TrainLoop:
                 # going off-distribution on a null action it never trained on.
                 gather_idx = frame_indices.unsqueeze(-1).expand(-1, -1, self.vis_actions.shape[-1])
                 model_kwargs['actions'] = th.gather(self.vis_actions, 1, gather_idx).to(dist_util.dev(), dtype=th.float32)
+            if self.vis_mouse is not None:
+                gather_idx = frame_indices.unsqueeze(-1).expand(-1, -1, self.vis_mouse.shape[-1])
+                model_kwargs['mouse'] = th.gather(self.vis_mouse, 1, gather_idx).to(dist_util.dev(), dtype=th.float32)
             samples, _ = self.diffusion.heun_sample(
                 self.model,
                 batch.shape,

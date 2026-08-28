@@ -5,6 +5,7 @@ from pathlib import Path
 
 import h5py
 import numpy as np
+import torch as th
 
 from improved_diffusion.decode_debug import FRAME_DURATION_MS
 
@@ -17,6 +18,13 @@ _KEY_IDS = ["87", "65", "83", "68", "32", "340"]
 
 def _symlog(v):
     return np.sign(v) * np.log1p(np.abs(v))
+
+
+def quantize_keypress(x):
+    """Snap a continuous (..., 8) keypress prediction to the nearest of the 256 valid
+    multi-hot vectors. Every codebook entry is a corner of the unit hypercube, so
+    nearest-neighbour in L2 reduces to independent per-dim rounding (plaicraft-debug#77)."""
+    return (x > 0.5).float()
 
 
 def build_action_array(session_db_path, n_frames):

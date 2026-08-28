@@ -308,7 +308,7 @@ def _action_bars(keypress, mouse):
     return [_action_vec_to_bar(dk[t], dm[t]) for t in range(dk.shape[0])]
 
 
-def _action_metrics(p_key, g_key, p_mouse, g_mouse, sl):
+def _action_metrics(p_key, g_key, p_mouse, g_mouse, sl, quantize=False):
     """Action metrics over one frame window, plus the all-zeros baseline.
 
     Keypress and mouse are computed independently -- either side may be None
@@ -322,7 +322,8 @@ def _action_metrics(p_key, g_key, p_mouse, g_mouse, sl):
     """
     out = {}
     if p_key is not None and g_key is not None:
-        p_k, g_k = (p_key[sl] > 0.5).float(), (g_key[sl] > 0.5).float()
+        quantize_fn = debug_actions.quantize_keypress if quantize else lambda x: (x > 0.5).float()
+        p_k, g_k = quantize_fn(p_key[sl]), quantize_fn(g_key[sl])
         out["key_acc"] = float((p_k == g_k).float().mean().item())
         out["key_acc_trivial"] = float((g_k == 0).float().mean().item())
     if p_mouse is not None and g_mouse is not None:
@@ -425,6 +426,7 @@ def run_debug_validation(model, diffusion, valset, device, out_dir,
                           or getattr(_m, "action_x_embedder", None) is not None
                           or getattr(_m, "mouse_x_embedder", None) is not None
                           or generates_actions or generates_mouse)
+    quantize_actions = getattr(diffusion, "action_quantization", "none") == "codebook"
     sampling_model = _CFGWrapper(model, cfg_scale) if cfg_scale != 1.0 else model
 
     T, n_obs = valset.T, valset.n_observed
@@ -514,7 +516,7 @@ def run_debug_validation(model, diffusion, valset, device, out_dir,
                 for scope, sl in (("next", slice(first_gen, first_gen + 1)),
                                   ("roll", slice(first_gen, None))):
                     rec.update({f"{scope}/{k}": v
-                                for k, v in _action_metrics(p_key, g_key, p_mouse, g_mouse, sl).items()})
+                                for k, v in _action_metrics(p_key, g_key, p_mouse, g_mouse, sl, quantize_actions).items()})
             per_row.append(rec)
 
             slug = valset.slug(row)

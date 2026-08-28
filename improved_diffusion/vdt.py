@@ -306,6 +306,8 @@ class VDT(nn.Module):
         action_dropout_prob=0.0,
         generate_actions=False,
         action_token_cond=False,
+        generate_mouse=False,
+        mouse_token_cond=False,
     ):
         super().__init__()
         self.learn_sigma = learn_sigma
@@ -319,6 +321,9 @@ class VDT(nn.Module):
         self.generate_actions = generate_actions
         # Token conditioning WITHOUT generation: the action rides in the sequence like a patch, but is never noised and carries no loss.
         self.action_token_cond = bool(action_token_cond) and not generate_actions
+        # Mouse's mode is fully independent of keypress's (its own generate/token-cond pair).
+        self.generate_mouse = bool(generate_mouse)
+        self.mouse_token_cond = bool(mouse_token_cond) and not self.generate_mouse
 
         self.x_embedder = PatchEmbed(input_size, patch_size, in_channels, hidden_size, bias=True)
         self.t_embedder = TimestepEmbedder(hidden_size)
@@ -343,10 +348,10 @@ class VDT(nn.Module):
             self.action_embedder = None
 
         # Mouse has no legacy fold-into-c conditioning mode: token-based only, mirroring keypress's token branch.
-        if mouse_dim > 0 and (generate_actions or self.action_token_cond):
+        if mouse_dim > 0 and (self.generate_mouse or self.mouse_token_cond):
             self.mouse_x_embedder = nn.Linear(mouse_dim, hidden_size, bias=True)
             self.mouse_pos_embed = nn.Parameter(torch.zeros(1, 1, hidden_size))
-            self.mouse_head = ActionHead(hidden_size, mouse_dim, num_frames) if generate_actions else None
+            self.mouse_head = ActionHead(hidden_size, mouse_dim, num_frames) if self.generate_mouse else None
         else:
             self.mouse_x_embedder = None
             self.mouse_pos_embed = None
@@ -531,9 +536,9 @@ class VDT(nn.Module):
             mouse_tokens_out = tokens[:, mouse_offset:mouse_offset + 1, :]  # (B*T, 1, D)
             mouse_out = self.mouse_head(mouse_tokens_out, c).view(B, T, self.mouse_dim)
 
-        if act_out is not None and mouse_out is not None:
-            return x_out, (act_out, mouse_out)
-        return x_out, (act_out if act_out is not None else mouse_out)
+        # Fixed (act_out, mouse_out) pair; a 3rd generative modality would need to
+        # revisit this pair (and UNetVideoModel's matching return slot in unet.py).
+        return x_out, (act_out, mouse_out)
 
     def forward_with_cfg(self, x, t, y, cfg_scale):
         """

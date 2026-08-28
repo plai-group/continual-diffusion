@@ -63,15 +63,12 @@ def betas_for_alpha_bar(num_diffusion_timesteps, alpha_bar, max_beta=0.999):
     return np.array(betas)
 
 
-def _split_action_mouse_out(model_out_act, is_action_model, is_mouse_model):
-    """model_out_act (vdt.py forward's 2nd return value) is None, a lone tensor, or (act_out, mouse_out)."""
-    if is_action_model and is_mouse_model:
-        return model_out_act if model_out_act is not None else (None, None)
-    if is_action_model:
-        return model_out_act, None
-    if is_mouse_model:
-        return None, model_out_act
-    return None, None
+def _unpack_action_mouse_out(second_out, is_action_model, is_mouse_model):
+    """second_out is vdt.py forward's 2nd return value (a fixed (act_out, mouse_out) pair) when either modality is active; otherwise it's UNet's attn output and is left untouched."""
+    if not is_action_model and not is_mouse_model:
+        return None, None
+    act_out, mouse_out = second_out if second_out is not None else (None, None)
+    return (act_out if is_action_model else None), (mouse_out if is_mouse_model else None)
 
 
 class ModelMeanType(enum.Enum):
@@ -278,7 +275,7 @@ class GaussianDiffusion:
 
         B, C = x.shape[:2]
         assert t.shape == (B,)
-        model_output, model_out_act = model(x, self._scale_timesteps(t), return_attn_weights=return_attn_weights, **model_kwargs)
+        model_output, second_out = model(x, self._scale_timesteps(t), return_attn_weights=return_attn_weights, **model_kwargs)
         if th.isinf(model_output.mean()):
             raise ValueError("Model output contains NaN or inf values.")
 
@@ -352,9 +349,12 @@ class GaussianDiffusion:
         model_generates_actions = getattr(
             model, 'generate_actions', getattr(getattr(model, 'module', None), 'generate_actions', False)
         )
+        model_generates_mouse = getattr(
+            model, 'generate_mouse', getattr(getattr(model, 'module', None), 'generate_mouse', False)
+        )
         is_action_model = action_dim > 0 and model_generates_actions
-        is_mouse_model = mouse_dim > 0 and model_generates_actions
-        act_out, mouse_out = _split_action_mouse_out(model_out_act, is_action_model, is_mouse_model)
+        is_mouse_model = mouse_dim > 0 and model_generates_mouse
+        act_out, mouse_out = _unpack_action_mouse_out(second_out, is_action_model, is_mouse_model)
 
         pred_actstart = None
         pred_mousestart = None
@@ -374,7 +374,7 @@ class GaussianDiffusion:
                 pred_mousestart = (self._predict_xstart_from_eps(x_t=mouse_t, t=t, eps=mouse_out)
                                     if mouse_t is not None else mouse_out)
         if not is_action_model and not is_mouse_model:
-            attn = model_out_act
+            attn = second_out
 
         return {
             "mean": model_mean,
@@ -828,8 +828,9 @@ class GaussianDiffusion:
         action_dim = getattr(model, 'action_dim', getattr(getattr(model, 'module', None), 'action_dim', 0))
         mouse_dim = getattr(model, 'mouse_dim', getattr(getattr(model, 'module', None), 'mouse_dim', 0))
         generate_actions = getattr(model, 'generate_actions', getattr(getattr(model, 'module', None), 'generate_actions', False))
+        generate_mouse = getattr(model, 'generate_mouse', getattr(getattr(model, 'module', None), 'generate_mouse', False))
         sample_actions = (action_dim > 0 and generate_actions)
-        sample_mouse = (mouse_dim > 0 and generate_actions)
+        sample_mouse = (mouse_dim > 0 and generate_mouse)
 
         # select timesteps - for EDM sampler we do this here instead of respacing
         step_indices = np.arange(num_steps)
@@ -1054,11 +1055,15 @@ class GaussianDiffusion:
                 getattr(model, 'generate_actions', False)
                 or getattr(getattr(model, 'module', None), 'generate_actions', False)
             )
+            generates_mouse = (
+                getattr(model, 'generate_mouse', False)
+                or getattr(getattr(model, 'module', None), 'generate_mouse', False)
+            )
             is_action_gen = actions_in is not None and (
                 generates_actions or 'obs_action_mask' in model_kwargs or 'actions0' in model_kwargs
             )
             is_mouse_gen = mouse_in is not None and (
-                generates_actions or 'obs_mouse_mask' in model_kwargs or 'mouse0' in model_kwargs
+                generates_mouse or 'obs_mouse_mask' in model_kwargs or 'mouse0' in model_kwargs
             )
 
             call_kwargs = dict(model_kwargs)
@@ -1079,8 +1084,8 @@ class GaussianDiffusion:
                     om = call_kwargs['obs_mask']
                     call_kwargs['obs_mouse_mask'] = frame_mask_to_action_mask(om) if isinstance(om, th.Tensor) else om
 
-            model_output, model_out_act = model(x_t, timesteps=self._scale_timesteps(t), **call_kwargs)
-            act_out, mouse_out = _split_action_mouse_out(model_out_act, is_action_gen, is_mouse_gen)
+            model_output, second_out = model(x_t, timesteps=self._scale_timesteps(t), **call_kwargs)
+            act_out, mouse_out = _unpack_action_mouse_out(second_out, is_action_gen, is_mouse_gen)
 
             if self.model_var_type in [
                 ModelVarType.LEARNED,
@@ -1118,12 +1123,6 @@ class GaussianDiffusion:
             terms["loss_video"] = loss_video
             total_loss = loss_video
 
-            def _latent_submask(key):
-                m = call_kwargs.get(key, None)
-                if m is None and latent_mask is not None:
-                    m = latent_mask.view(latent_mask.shape[0], latent_mask.shape[1], 1) if (isinstance(latent_mask, th.Tensor) and latent_mask.ndim == 5) else latent_mask
-                return m
-
             if act_out is not None and is_action_gen:
                 target_act = {
                     ModelMeanType.PREVIOUS_X: self.q_posterior_mean_variance(
@@ -1133,7 +1132,10 @@ class GaussianDiffusion:
                     ModelMeanType.EPSILON: noise_act,
                 }[self.model_mean_type]
                 assert act_out.shape == target_act.shape == actions_in.shape
-                mse_action = mean_flat((target_act - act_out) ** 2, mask=_latent_submask('latent_action_mask'))
+                action_mask = call_kwargs.get('latent_action_mask', None)
+                if action_mask is None and latent_mask is not None:
+                    action_mask = latent_mask.view(latent_mask.shape[0], latent_mask.shape[1], 1) if (isinstance(latent_mask, th.Tensor) and latent_mask.ndim == 5) else latent_mask
+                mse_action = mean_flat((target_act - act_out) ** 2, mask=action_mask)
                 terms["loss_action"] = mse_action
 
                 keypress_weight = call_kwargs.get('keypress_loss_weight', getattr(self, 'keypress_loss_weight', 1.0))
@@ -1151,7 +1153,10 @@ class GaussianDiffusion:
                     ModelMeanType.EPSILON: noise_mouse,
                 }[self.model_mean_type]
                 assert mouse_out.shape == target_mouse.shape == mouse_in.shape
-                mse_mouse = mean_flat((target_mouse - mouse_out) ** 2, mask=_latent_submask('latent_mouse_mask'))
+                mouse_mask = call_kwargs.get('latent_mouse_mask', None)
+                if mouse_mask is None and latent_mask is not None:
+                    mouse_mask = latent_mask.view(latent_mask.shape[0], latent_mask.shape[1], 1) if (isinstance(latent_mask, th.Tensor) and latent_mask.ndim == 5) else latent_mask
+                mse_mouse = mean_flat((target_mouse - mouse_out) ** 2, mask=mouse_mask)
                 terms["loss_mouse"] = mse_mouse
 
                 mouse_weight = call_kwargs.get('mouse_loss_weight', getattr(self, 'mouse_loss_weight', 1.0))

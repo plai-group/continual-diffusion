@@ -41,10 +41,10 @@ def test_generation_wins_when_both_flags_are_set():
 
 def test_token_cond_returns_no_action_output():
     m = _model(action_token_cond=True)
-    v, a = m(torch.randn(B, T, C, H, W), timesteps=torch.tensor([50, 150]),
-             actions=torch.randn(B, T, ACTION_DIM))
+    v, (a, mouse) = m(torch.randn(B, T, C, H, W), timesteps=torch.tensor([50, 150]),
+                       actions=torch.randn(B, T, ACTION_DIM))
     assert v.shape == (B, T, C, H, W)
-    assert a is None
+    assert a is None and mouse is None
 
 
 def test_the_action_token_actually_reaches_the_video_output():

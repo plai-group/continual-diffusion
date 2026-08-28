@@ -23,10 +23,10 @@ def test_vdt_shapes_and_grads():
     )
     x = torch.randn(B, T, C, H, W)
     t = torch.tensor([50, 150])
-    v_out, a_out = vdt_uncond(x, timesteps=t)
+    v_out, (a_out, m_out) = vdt_uncond(x, timesteps=t)
     assert v_out.shape == (B, T, C, H, W), f"Expected {(B, T, C, H, W)}, got {v_out.shape}"
-    assert a_out is None, f"Expected None for unconditional action out, got {a_out}"
-    print("  [PASS] Unconditional VDT returns (video, None)")
+    assert a_out is None and m_out is None, f"Expected (None, None) for unconditional out, got {(a_out, m_out)}"
+    print("  [PASS] Unconditional VDT returns (video, (None, None))")
 
     # Test 1b: Action conditioning mode (generate_actions=False)
     vdt_cond = VDT_S_2(
@@ -34,12 +34,12 @@ def test_vdt_shapes_and_grads():
         learn_sigma=False, action_dim=action_dim, generate_actions=False,
     )
     actions = torch.randn(B, T, action_dim)
-    v_out_c, a_out_c = vdt_cond(x, timesteps=t, actions=actions)
+    v_out_c, (a_out_c, m_out_c) = vdt_cond(x, timesteps=t, actions=actions)
     assert v_out_c.shape == (B, T, C, H, W)
-    assert a_out_c is None
+    assert a_out_c is None and m_out_c is None
     assert vdt_cond.action_embedder is not None
     assert vdt_cond.action_x_embedder is None
-    print("  [PASS] Action-conditioned VDT (legacy) returns (video, None)")
+    print("  [PASS] Action-conditioned VDT (legacy) returns (video, (None, None))")
 
     # Test 1c: Action generation mode (generate_actions=True)
     vdt_gen = VDT_S_2(
@@ -51,16 +51,17 @@ def test_vdt_shapes_and_grads():
     assert vdt_gen.action_pos_embed.shape == (1, 1, 384)
     assert vdt_gen.action_head is not None
 
-    v_out_g, a_out_g = vdt_gen(x, timesteps=t, actions=actions)
+    v_out_g, (a_out_g, m_out_g) = vdt_gen(x, timesteps=t, actions=actions)
     assert v_out_g.shape == (B, T, C, H, W), f"Expected {(B, T, C, H, W)}, got {v_out_g.shape}"
     assert a_out_g.shape == (B, T, action_dim), f"Expected {(B, T, action_dim)}, got {a_out_g.shape}"
-    print("  [PASS] Action-generation VDT returns ((B,T,C,H,W), (B,T,action_dim))")
+    assert m_out_g is None, "mouse_dim=0 must keep the mouse slot None"
+    print("  [PASS] Action-generation VDT returns ((B,T,C,H,W), ((B,T,action_dim), None))")
 
     # Test 1d: With obs_action_mask and actions0
     actions0 = torch.randn(B, T, action_dim)
     obs_action_mask = torch.zeros(B, T, 1)
     obs_action_mask[:, :4] = 1.0
-    v_out_m, a_out_m = vdt_gen(
+    v_out_m, (a_out_m, _) = vdt_gen(
         x, timesteps=t, actions=actions, actions0=actions0, obs_action_mask=obs_action_mask
     )
     assert v_out_m.shape == (B, T, C, H, W)
@@ -81,16 +82,18 @@ def test_vdt_shapes_and_grads():
         m = ctor(input_size=32, patch_size=4, in_channels=C, num_frames=T, learn_sigma=False,
                  action_dim=action_dim, generate_actions=True)
         assert m.action_pos_embed.shape == (1, 1, hidden)
-        vo, ao = m(x, timesteps=t, actions=actions)
+        vo, (ao, mo) = m(x, timesteps=t, actions=actions)
         assert vo.shape == (B, T, C, H, W)
         assert ao.shape == (B, T, action_dim)
+        assert mo is None
         print(f"  [PASS] {name} created and forward pass verified (hidden_size={hidden})")
 
     # Test 1g: Mouse token alongside keypress -- issue #71's split. Order patch -> keypress -> mouse.
     mouse_dim = 2
     vdt_both = VDT_S_2(
         input_size=32, patch_size=4, in_channels=C, num_frames=T,
-        learn_sigma=False, action_dim=8, mouse_dim=mouse_dim, generate_actions=True,
+        learn_sigma=False, action_dim=8, mouse_dim=mouse_dim,
+        generate_actions=True, generate_mouse=True,
     )
     assert vdt_both.mouse_x_embedder is not None
     assert vdt_both.mouse_pos_embed is not None
@@ -112,15 +115,33 @@ def test_vdt_shapes_and_grads():
     assert vdt_both.mouse_head.linear.weight.grad is not None
     print("  [PASS] Mouse sub-modules received gradients during backward pass")
 
-    # Test 1h: Mouse-only (action_dim=0) still returns a lone tensor, not a tuple.
+    # Test 1h: Mouse-only (action_dim=0, generate_mouse=True) -- keypress slot stays None.
     vdt_mouse_only = VDT_S_2(
         input_size=32, patch_size=4, in_channels=C, num_frames=T,
-        learn_sigma=False, action_dim=0, mouse_dim=mouse_dim, generate_actions=True,
+        learn_sigma=False, action_dim=0, mouse_dim=mouse_dim, generate_mouse=True,
     )
-    v_out_m, out_m = vdt_mouse_only(x, timesteps=t, mouse=mouse)
+    v_out_m, (a_out_only, m_out_only) = vdt_mouse_only(x, timesteps=t, mouse=mouse)
     assert v_out_m.shape == (B, T, C, H, W)
-    assert out_m.shape == (B, T, mouse_dim), "mouse-only must NOT be wrapped in a tuple"
+    assert a_out_only is None, "no keypress token was built -- act_out must be None"
+    assert m_out_only.shape == (B, T, mouse_dim)
     print("  [PASS] Mouse-only VDT returns (video, mouse) -- no keypress token built")
+
+    # Test 1i: keypress and mouse modes are fully independent, not mirrored (issue #71 review fix).
+    vdt_keypress_cond_mouse_gen = VDT_S_2(
+        input_size=32, patch_size=4, in_channels=C, num_frames=T, learn_sigma=False,
+        action_dim=8, mouse_dim=mouse_dim, action_token_cond=True, generate_mouse=True,
+    )
+    assert vdt_keypress_cond_mouse_gen.mouse_head is not None
+    assert vdt_keypress_cond_mouse_gen.action_head is None
+    print("  [PASS] action_token_cond=True + generate_mouse=True -> mouse_head only")
+
+    vdt_keypress_gen_mouse_cond = VDT_S_2(
+        input_size=32, patch_size=4, in_channels=C, num_frames=T, learn_sigma=False,
+        action_dim=8, mouse_dim=mouse_dim, generate_actions=True, mouse_token_cond=True,
+    )
+    assert vdt_keypress_gen_mouse_cond.action_head is not None
+    assert vdt_keypress_gen_mouse_cond.mouse_head is None
+    print("  [PASS] generate_actions=True + mouse_token_cond=True -> action_head only")
 
 
 def test_gaussian_diffusion_training_losses():
@@ -213,7 +234,7 @@ def test_mouse_training_losses():
         noise_schedule="linear", timestep_respacing="", use_kl=False,
         predict_xstart=False, rescale_timesteps=True, rescale_learned_sigmas=True,
         use_checkpoint=False, use_edm_scaling=False,
-        action_dim=keypress_dim, mouse_dim=mouse_dim, generate_actions=True,
+        action_dim=keypress_dim, mouse_dim=mouse_dim, generate_actions=True, generate_mouse=True,
         keypress_loss_weight=1.0, mouse_loss_weight=2.0,
     )
 
@@ -339,7 +360,7 @@ def test_heun_sample_with_mouse():
         noise_schedule="linear", timestep_respacing="", use_kl=False,
         predict_xstart=False, rescale_timesteps=True, rescale_learned_sigmas=True,
         use_checkpoint=False, use_edm_scaling=False,
-        action_dim=keypress_dim, mouse_dim=mouse_dim, generate_actions=True,
+        action_dim=keypress_dim, mouse_dim=mouse_dim, generate_actions=True, generate_mouse=True,
     )
 
     x0 = torch.randn(B, T, C, H, W)
@@ -415,6 +436,15 @@ def test_cli_and_defaults():
     assert args2.generate_actions is False
     assert not hasattr(args2, "action_generation")
     print("  [PASS] generate_actions defaults to False and has no alias")
+
+    # generate_mouse/mouse_token_cond are their own plain bool flags, independent of generate_actions.
+    args3 = parser.parse_args(["--generate_actions", "True", "--generate_mouse", "False"])
+    assert args3.generate_actions is True
+    assert args3.generate_mouse is False
+    args4 = parser.parse_args([])
+    assert args4.generate_mouse is False
+    assert args4.mouse_token_cond is False
+    print("  [PASS] generate_mouse/mouse_token_cond default to False and parse independently of generate_actions")
 
 
 if __name__ == "__main__":

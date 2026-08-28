@@ -196,6 +196,8 @@ def vdt_model_and_diffusion_defaults():
         action_dropout_prob=0.0,
         generate_actions=False,
         action_token_cond=False,
+        generate_mouse=False,
+        mouse_token_cond=False,
         keypress_loss_weight=1.0,
         mouse_loss_weight=1.0,
     )
@@ -224,6 +226,8 @@ def create_vdt_model_and_diffusion(
     action_dropout_prob=0.0,
     generate_actions=False,
     action_token_cond=False,
+    generate_mouse=False,
+    mouse_token_cond=False,
     keypress_loss_weight=1.0,
     mouse_loss_weight=1.0,
 ):
@@ -253,6 +257,8 @@ def create_vdt_model_and_diffusion(
         action_dropout_prob=action_dropout_prob,
         generate_actions=generate_actions,
         action_token_cond=action_token_cond,
+        generate_mouse=generate_mouse,
+        mouse_token_cond=mouse_token_cond,
     )
     return model, diffusion
 

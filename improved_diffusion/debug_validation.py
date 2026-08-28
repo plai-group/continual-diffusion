@@ -25,7 +25,7 @@ import torch.nn as nn
 
 from . import debug_actions
 from .action_masks import frame_mask_to_action_mask
-from .gaussian_diffusion import _split_action_mouse_out
+from .gaussian_diffusion import _unpack_action_mouse_out
 from .logger import logger
 from .rng_util import RNG
 from .decode_debug import (
@@ -413,7 +413,7 @@ def run_debug_validation(model, diffusion, valset, device, out_dir,
     # Generation mode has no action_embedder (the action is a denoised token), so gating on it hid the action path.
     generates_actions = (bool(getattr(_m, "generate_actions", False))
                          and getattr(_m, "action_dim", 0) > 0)
-    generates_mouse = (bool(getattr(_m, "generate_actions", False))
+    generates_mouse = (bool(getattr(_m, "generate_mouse", False))
                        and getattr(_m, "mouse_dim", 0) > 0)
     # Token-cond mode has no action_embedder and no generation head, but actions are still its conditioning signal.
     action_conditioned = (getattr(_m, "action_embedder", None) is not None
@@ -481,7 +481,7 @@ def run_debug_validation(model, diffusion, valset, device, out_dir,
         samples_act, samples_mouse = None, None
         if isinstance(samples, tuple):
             samples_video, second = samples
-            samples_act, samples_mouse = _split_action_mouse_out(second, generates_actions, generates_mouse)
+            samples_act, samples_mouse = _unpack_action_mouse_out(second, generates_actions, generates_mouse)
             samples = samples_video
         samples = samples.to(device)
         # Keep the observed half exactly as given; only the generated half is model output.
@@ -582,7 +582,7 @@ def run_debug_validation(model, diffusion, valset, device, out_dir,
                         key_out, mouse_out = None, None
                         if isinstance(s, tuple):
                             s, second = s
-                            key_out, mouse_out = _split_action_mouse_out(second, generates_actions, generates_mouse)
+                            key_out, mouse_out = _unpack_action_mouse_out(second, generates_actions, generates_mouse)
                         s = s.to(device)
                         video = (s * latent_mask_j + x0_j * obs_mask_j)[0]
                         return (video, key_out[0] if key_out is not None else None,

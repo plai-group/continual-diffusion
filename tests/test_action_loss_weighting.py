@@ -41,6 +41,7 @@ def _build(action_dim, mouse_dim=0, keypress_loss_weight=1.0, mouse_loss_weight=
         mouse_dim=mouse_dim,
         action_dropout_prob=0.0,
         generate_actions=True,
+        generate_mouse=mouse_dim > 0,
         keypress_loss_weight=keypress_loss_weight,
         mouse_loss_weight=mouse_loss_weight,
     )

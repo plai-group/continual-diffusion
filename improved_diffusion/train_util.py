@@ -477,6 +477,7 @@ class TrainLoop:
             model_kwargs = {'frame_indices': frame_indices, 'obs_mask': obs_mask,
                              'latent_mask': latent_mask, 'x0': micro}
             generates_actions = getattr(self.model, 'generate_actions', False) or getattr(self.args, 'generate_actions', False)
+            generates_mouse = getattr(self.model, 'generate_mouse', False) or getattr(self.args, 'generate_mouse', False)
             if micro_actions is not None:
                 micro_act_dev = micro_actions.to(dist_util.dev(), dtype=th.float32)
                 model_kwargs['actions'] = micro_act_dev
@@ -490,7 +491,7 @@ class TrainLoop:
             if micro_mouse is not None:
                 micro_mouse_dev = micro_mouse.to(dist_util.dev(), dtype=th.float32)
                 model_kwargs['mouse'] = micro_mouse_dev
-                if generates_actions:
+                if generates_mouse:
                     obs_mouse_mask = frame_mask_to_action_mask(obs_mask)
                     latent_mouse_mask = frame_mask_to_action_mask(latent_mask)
                     model_kwargs['obs_mouse_mask'] = obs_mouse_mask

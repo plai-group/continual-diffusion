@@ -83,12 +83,12 @@ def _n_frames_from_hdf5(session_dir):
         return f["frames"].shape[0]
 
 
-def _load_cached(cache_path, n_frames):
+def _load_cached(cache_path, n_frames, expected_dim):
     if cache_path.exists():
         arr = np.load(cache_path, mmap_mode="r")
-        if arr.shape[0] == n_frames:
+        if arr.shape[0] == n_frames and arr.shape[1] == expected_dim:
             return arr
-    return None  # missing, or stale (frame count mismatch)
+    return None  # missing, or stale (frame count or dim mismatch)
 
 
 def load_or_build(session_dir):
@@ -99,8 +99,8 @@ def load_or_build(session_dir):
     keypress_path = session_dir / "actions_keypress.npy"
     mouse_path = session_dir / "actions_mouse.npy"
 
-    keypress = _load_cached(keypress_path, n_frames)
-    mouse = _load_cached(mouse_path, n_frames)
+    keypress = _load_cached(keypress_path, n_frames, KEYPRESS_DIM)
+    mouse = _load_cached(mouse_path, n_frames, MOUSE_DIM)
     if keypress is not None and mouse is not None:
         return keypress, mouse
 

@@ -323,10 +323,13 @@ def test_heun_sample():
     )
 
     assert isinstance(samples, tuple), f"Expected tuple from heun_sample with action generation, got {type(samples)}"
-    samples_video, samples_action = samples
+    samples_video, second = samples
+    assert isinstance(second, tuple), "action-only still returns a fixed (action, mouse) pair"
+    samples_action, samples_mouse = second
 
     assert samples_video.shape == (B, T, C, H, W), f"Expected video shape {(B, T, C, H, W)}, got {samples_video.shape}"
     assert samples_action.shape == (B, T, action_dim), f"Expected action shape {(B, T, action_dim)}, got {samples_action.shape}"
+    assert samples_mouse is None, "no mouse token was generated -- mouse slot must be None"
     print("  [PASS] Joint Heun sample returned video shape", samples_video.shape, "and action shape", samples_action.shape)
 
     # Test joint sampling with custom initial noise tuple
@@ -340,10 +343,27 @@ def test_heun_sample():
         num_steps=5,
         return_decoded=False,
     )
-    sv_c, sa_c = samples_custom
+    sv_c, (sa_c, sm_c) = samples_custom
     assert sv_c.shape == (B, T, C, H, W)
     assert sa_c.shape == (B, T, action_dim)
+    assert sm_c is None
     print("  [PASS] Joint Heun sample with tuple noise (noise_v, noise_a) succeeded")
+
+    # Test neither modality active: return type stays a bare tensor, not a pair.
+    model_novideo, diffusion_novideo = create_vdt_model_and_diffusion(
+        model_name="VDT-S", patch_size=4, input_size=(32, 32), in_channels=C,
+        num_frames=T, learn_sigma=False, sigma_small=False, diffusion_steps=100,
+        diffusion_space_kwargs=dict(diffusion_space="pixel", pre_encoded=False),
+        noise_schedule="linear", timestep_respacing="", use_kl=False,
+        predict_xstart=False, rescale_timesteps=True, rescale_learned_sigmas=True,
+        use_checkpoint=False, use_edm_scaling=False, action_dim=0,
+    )
+    samples_none, _ = diffusion_novideo.heun_sample(
+        model_novideo, (B, T, C, H, W), num_steps=5, return_decoded=False,
+    )
+    assert not isinstance(samples_none, tuple), "neither modality active -- must return bare video tensor"
+    assert samples_none.shape == (B, T, C, H, W)
+    print("  [PASS] Neither modality active -> bare video tensor returned")
 
 
 def test_heun_sample_with_mouse():
@@ -400,6 +420,31 @@ def test_heun_sample_with_mouse():
     assert sa_c.shape == (B, T, keypress_dim)
     assert sm_c.shape == (B, T, mouse_dim)
     print("  [PASS] Joint Heun sample with (noise_v, noise_a, noise_m) tuple succeeded")
+
+    # Mouse-only: sample_actions False, sample_mouse True -- still returns a fixed pair.
+    model_mo, diffusion_mo = create_vdt_model_and_diffusion(
+        model_name="VDT-S", patch_size=4, input_size=(32, 32), in_channels=C,
+        num_frames=T, learn_sigma=False, sigma_small=False, diffusion_steps=100,
+        diffusion_space_kwargs=dict(diffusion_space="pixel", pre_encoded=False),
+        noise_schedule="linear", timestep_respacing="", use_kl=False,
+        predict_xstart=False, rescale_timesteps=True, rescale_learned_sigmas=True,
+        use_checkpoint=False, use_edm_scaling=False,
+        action_dim=0, mouse_dim=mouse_dim, generate_mouse=True,
+    )
+    mouse_kwargs = {
+        "x0": x0, "mouse0": mouse0, "obs_mask": obs_mask, "latent_mask": latent_mask,
+    }
+    samples_mo, _ = diffusion_mo.heun_sample(
+        model_mo, (B, T, C, H, W), model_kwargs=mouse_kwargs, num_steps=5, return_decoded=False,
+    )
+    assert isinstance(samples_mo, tuple)
+    sv_mo, second_mo = samples_mo
+    assert isinstance(second_mo, tuple), "mouse-only still returns a fixed (action, mouse) pair"
+    sa_mo, sm_mo = second_mo
+    assert sv_mo.shape == (B, T, C, H, W)
+    assert sa_mo is None, "no keypress token was generated -- action slot must be None"
+    assert sm_mo.shape == (B, T, mouse_dim)
+    print("  [PASS] Mouse-only Heun sample returns (video, (None, mouse))")
 
 
 def test_cli_and_defaults():

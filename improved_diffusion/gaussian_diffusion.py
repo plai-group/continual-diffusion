@@ -972,12 +972,8 @@ class GaussianDiffusion:
 
         samples_video = ((x_next, self.decode(x_next, chunk_size=decode_chunk_size))
                          if return_decoded else x_next)
-        if sample_actions and sample_mouse:
+        if sample_actions or sample_mouse:
             return (samples_video, (a_next, m_next)), history
-        if sample_actions:
-            return (samples_video, a_next), history
-        if sample_mouse:
-            return (samples_video, m_next), history
         return samples_video, history
 
 

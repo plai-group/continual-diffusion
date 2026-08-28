@@ -311,22 +311,27 @@ def _action_bars(keypress, mouse):
 def _action_metrics(p_key, g_key, p_mouse, g_mouse, sl):
     """Action metrics over one frame window, plus the all-zeros baseline.
 
+    Keypress and mouse are computed independently -- either side may be None
+    (that modality wasn't generated) and simply contributes no keys.
+
     Keys are pressed 2-33% of the time in this corpus, so the do-nothing
     predictor already scores ~0.93 key_acc and its mouse_mse is ~3.4. Without
     the *_trivial series a dead action head and a learning one look alike on
     the dashboard. They are measured from the GT rows in this batch rather
     than hard-coded, so they track whatever data the run actually saw.
     """
-    p_k, g_k = (p_key[sl] > 0.5).float(), (g_key[sl] > 0.5).float()
-    p_m, g_m = p_mouse[sl], g_mouse[sl]
-    return {
-        "key_acc": float((p_k == g_k).float().mean().item()),
-        "mouse_l1": float((p_m - g_m).abs().mean().item()),
-        "mouse_mse": float(((p_m - g_m) ** 2).mean().item()),
-        "key_acc_trivial": float((g_k == 0).float().mean().item()),
-        "mouse_l1_trivial": float(g_m.abs().mean().item()),
-        "mouse_mse_trivial": float((g_m ** 2).mean().item()),
-    }
+    out = {}
+    if p_key is not None and g_key is not None:
+        p_k, g_k = (p_key[sl] > 0.5).float(), (g_key[sl] > 0.5).float()
+        out["key_acc"] = float((p_k == g_k).float().mean().item())
+        out["key_acc_trivial"] = float((g_k == 0).float().mean().item())
+    if p_mouse is not None and g_mouse is not None:
+        p_m, g_m = p_mouse[sl], g_mouse[sl]
+        out["mouse_l1"] = float((p_m - g_m).abs().mean().item())
+        out["mouse_mse"] = float(((p_m - g_m) ** 2).mean().item())
+        out["mouse_l1_trivial"] = float(g_m.abs().mean().item())
+        out["mouse_mse_trivial"] = float((g_m ** 2).mean().item())
+    return out
 
 
 def _label_panel(panel, text):
@@ -499,10 +504,11 @@ def run_debug_validation(model, diffusion, valset, device, out_dir,
             rec = {"row": row["num"], "prompt": row["prompt"], "type": row["test_type"]}
             rec.update({f"next/{k}": v for k, v in m_next.items()})
             rec.update({f"roll/{k}": v for k, v in m_roll.items()})
-            if (samples_act is not None and samples_mouse is not None
-                    and keypress_chunk is not None and mouse_chunk is not None):
-                p_key, g_key = samples_act[j].to(device), keypress_chunk[j].to(device)
-                p_mouse, g_mouse = samples_mouse[j].to(device), mouse_chunk[j].to(device)
+            p_key = samples_act[j].to(device) if samples_act is not None and keypress_chunk is not None else None
+            g_key = keypress_chunk[j].to(device) if p_key is not None else None
+            p_mouse = samples_mouse[j].to(device) if samples_mouse is not None and mouse_chunk is not None else None
+            g_mouse = mouse_chunk[j].to(device) if p_mouse is not None else None
+            if p_key is not None or p_mouse is not None:
                 # Row n_obs is pinned GT (the action mask lags by one row), so the first genuinely generated action is row n_obs + 1.
                 first_gen = n_obs + 1
                 for scope, sl in (("next", slice(first_gen, first_gen + 1)),

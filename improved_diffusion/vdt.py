@@ -353,6 +353,7 @@ class VDT(nn.Module):
             self.mouse_pos_embed = nn.Parameter(torch.zeros(1, 1, hidden_size))
             self.mouse_head = ActionHead(hidden_size, mouse_dim, num_frames) if self.generate_mouse else None
         else:
+            assert mouse_dim == 0, "mouse_dim > 0 requires generate_mouse or mouse_token_cond"
             self.mouse_x_embedder = None
             self.mouse_pos_embed = None
             self.mouse_head = None

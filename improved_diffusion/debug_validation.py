@@ -25,6 +25,7 @@ import torch.nn as nn
 
 from . import debug_actions
 from .action_masks import frame_mask_to_action_mask
+from .gaussian_diffusion import _unpack_action_mouse_out
 from .logger import logger
 from .rng_util import RNG
 from .decode_debug import (
@@ -115,18 +116,22 @@ class DebugValidationSet:
         return th.stack([self.load_window(r) for r in self.rows])
 
     def load_action_window(self, row):
-        """(T, 10) float32: same window as load_window, causally-shifted actions."""
-        arr = debug_actions.load_or_build(row["session_dir"])
+        """((T, 8), (T, 2)) float32: same window as load_window, causally-shifted keypress/mouse."""
+        keypress, mouse = debug_actions.load_or_build(row["session_dir"])
         ws, we = row["window_start"], row["window_start"] + self.T
-        if we > arr.shape[0]:
+        if we > keypress.shape[0]:
             raise ValueError(
-                f"row {row['num']}: action array has {arr.shape[0]} frames, "
+                f"row {row['num']}: action array has {keypress.shape[0]} frames, "
                 f"need window {ws}..{we}"
             )
-        return th.from_numpy(np.asarray(arr[ws:we], dtype=np.float32))
+        return (th.from_numpy(np.asarray(keypress[ws:we], dtype=np.float32)),
+                th.from_numpy(np.asarray(mouse[ws:we], dtype=np.float32)))
 
     def load_all_actions(self):
-        return th.stack([self.load_action_window(r) for r in self.rows])
+        windows = [self.load_action_window(r) for r in self.rows]
+        keypress = th.stack([k for k, _ in windows])
+        mouse = th.stack([m for _, m in windows])
+        return keypress, mouse
 
 
 def _to01(x):
@@ -206,29 +211,27 @@ class _CFGWrapper(nn.Module):
         return eps_uncond + self.w * (eps_cond - eps_uncond), None
 
 
-def _invert_actions(actions):
+def _invert_actions(keypress, mouse):
     """The OPPOSITE action on every axis.
 
         w <-> s          (dims 0, 2)  forward / back
         a <-> d          (dims 1, 3)  strafe left / right
         space <-> shift  (dims 4, 5)  up / down
         left <-> right   (dims 6, 7)  mouse buttons
-        dx, dy negated   (dims 8, 9)  look direction
+        dx, dy negated   (mouse dims 0, 1)  look direction
 
     A full inversion rather than a partial one: if the model is listening,
     every axis pushes the frame the other way, which makes the true-vs-swap
     divergence as large as this world allows.
     """
-    swapped = actions.clone()
+    swapped_k = keypress.clone()
     for i, j in ((0, 2), (1, 3), (4, 5), (6, 7)):
-        swapped[..., i] = actions[..., j]
-        swapped[..., j] = actions[..., i]
-    swapped[..., 8] = -actions[..., 8]
-    swapped[..., 9] = -actions[..., 9]
-    return swapped
+        swapped_k[..., i] = keypress[..., j]
+        swapped_k[..., j] = keypress[..., i]
+    return swapped_k, -mouse
 
 
-def _swap_actions(actions, where):
+def _swap_actions(keypress, mouse, where):
     """Invert the actions on the rows `where` selects; leave the rest alone.
 
     `where` is a (B, T, 1) 0/1 mask selecting rows n_obs..T-1: the actions that
@@ -241,35 +244,38 @@ def _swap_actions(actions, where):
     frames under it. For a conditioned-only model there is nothing to generate
     and the whole swapped future is imposed directly.
     """
-    return th.where(where.bool(), _invert_actions(actions), actions)
+    inv_k, inv_m = _invert_actions(keypress, mouse)
+    return th.where(where.bool(), inv_k, keypress), th.where(where.bool(), inv_m, mouse)
 
 
-def _zero_actions(actions, where):
+def _zero_actions(keypress, mouse, where):
     """Zero the actions on the rows `where` selects; leave the rest alone."""
-    return th.where(where.bool(), th.zeros_like(actions), actions)
+    return (th.where(where.bool(), th.zeros_like(keypress), keypress),
+            th.where(where.bool(), th.zeros_like(mouse), mouse))
 
 
-#: order of the 6 key dims in the 10-d action vector; names must match the
+#: order of the 6 key dims in the 8-d keypress vector; names must match the
 #: labels decode_debug draws, i.e. the values of its KEY_ID_TO_NAME.
 _ACTION_KEY_NAMES = ["w", "a", "s", "d", "space", "Shift_L"]
 _ACTION_CLICK_NAMES = ["left", "right"]
 
 
-def _action_vec_to_bar(vec):
-    """One 10-d action vector -> the dict decode_debug._overlay_frame draws.
+def _action_vec_to_bar(key_vec, mouse_vec):
+    """One 8-d keypress vector + one 2-d mouse vector -> the dict decode_debug._overlay_frame draws.
 
     Lets each row of the swap overlay show the actions it was ACTUALLY generated
     with. Reading the bar from the session DB instead would paint the true
     actions onto the swap and zero rows too, which hides the very thing the
     overlay exists to show.
     """
-    vec = np.asarray(vec, dtype=np.float32)
+    key_vec = np.asarray(key_vec, dtype=np.float32)
+    mouse_vec = np.asarray(mouse_vec, dtype=np.float32)
     unsymlog = lambda v: float(np.sign(v) * np.expm1(abs(v)))
     return {
-        "keys": [n for i, n in enumerate(_ACTION_KEY_NAMES) if vec[i] > 0.5],
-        "clicks": [n for i, n in enumerate(_ACTION_CLICK_NAMES) if vec[6 + i] > 0.5],
-        "mouseDX": unsymlog(vec[8]),
-        "mouseDY": unsymlog(vec[9]),
+        "keys": [n for i, n in enumerate(_ACTION_KEY_NAMES) if key_vec[i] > 0.5],
+        "clicks": [n for i, n in enumerate(_ACTION_CLICK_NAMES) if key_vec[6 + i] > 0.5],
+        "mouseDX": unsymlog(mouse_vec[0]),
+        "mouseDY": unsymlog(mouse_vec[1]),
     }
 
 
@@ -296,14 +302,17 @@ def _to_display_actions(a):
     return out
 
 
-def _action_bars(a):
-    """(T, 10) causal action array -> the T bar dicts render_overlay draws."""
-    d = _to_display_actions(a)
-    return [_action_vec_to_bar(d[t]) for t in range(d.shape[0])]
+def _action_bars(keypress, mouse):
+    """(T, 8) + (T, 2) causal action arrays -> the T bar dicts render_overlay draws."""
+    dk, dm = _to_display_actions(keypress), _to_display_actions(mouse)
+    return [_action_vec_to_bar(dk[t], dm[t]) for t in range(dk.shape[0])]
 
 
-def _action_metrics(p_act, g_act, sl):
+def _action_metrics(p_key, g_key, p_mouse, g_mouse, sl):
     """Action metrics over one frame window, plus the all-zeros baseline.
+
+    Keypress and mouse are computed independently -- either side may be None
+    (that modality wasn't generated) and simply contributes no keys.
 
     Keys are pressed 2-33% of the time in this corpus, so the do-nothing
     predictor already scores ~0.93 key_acc and its mouse_mse is ~3.4. Without
@@ -311,16 +320,18 @@ def _action_metrics(p_act, g_act, sl):
     the dashboard. They are measured from the GT rows in this batch rather
     than hard-coded, so they track whatever data the run actually saw.
     """
-    p_k, g_k = (p_act[sl, :8] > 0.5).float(), (g_act[sl, :8] > 0.5).float()
-    p_m, g_m = p_act[sl, 8:10], g_act[sl, 8:10]
-    return {
-        "key_acc": float((p_k == g_k).float().mean().item()),
-        "mouse_l1": float((p_m - g_m).abs().mean().item()),
-        "mouse_mse": float(((p_m - g_m) ** 2).mean().item()),
-        "key_acc_trivial": float((g_k == 0).float().mean().item()),
-        "mouse_l1_trivial": float(g_m.abs().mean().item()),
-        "mouse_mse_trivial": float((g_m ** 2).mean().item()),
-    }
+    out = {}
+    if p_key is not None and g_key is not None:
+        p_k, g_k = (p_key[sl] > 0.5).float(), (g_key[sl] > 0.5).float()
+        out["key_acc"] = float((p_k == g_k).float().mean().item())
+        out["key_acc_trivial"] = float((g_k == 0).float().mean().item())
+    if p_mouse is not None and g_mouse is not None:
+        p_m, g_m = p_mouse[sl], g_mouse[sl]
+        out["mouse_l1"] = float((p_m - g_m).abs().mean().item())
+        out["mouse_mse"] = float(((p_m - g_m) ** 2).mean().item())
+        out["mouse_l1_trivial"] = float(g_m.abs().mean().item())
+        out["mouse_mse_trivial"] = float((g_m ** 2).mean().item())
+    return out
 
 
 def _label_panel(panel, text):
@@ -358,7 +369,8 @@ def _render_triple_overlay(frames_gt, frames_true, frames_swap, frames_zero,
     frames_zero = np.asarray(frames_zero)
     T = frames_true.shape[0]
 
-    acts = [_to_display_actions(a) for a in
+    # actions_* are each a (keypress, mouse) pair.
+    acts = [(_to_display_actions(k), _to_display_actions(m)) for k, m in
             (actions_gt, actions_true, actions_swap, actions_zero)]
     labels = ["GT", true_label, "SWAP", "ZERO"]
 
@@ -377,9 +389,9 @@ def _render_triple_overlay(frames_gt, frames_true, frames_swap, frames_zero,
         panels = [
             _label_panel(
                 _overlay_frame(_to_uint8_frame(frames[t]),
-                               _action_vec_to_bar(act[t]), border=border),
+                               _action_vec_to_bar(dk[t], dm[t]), border=border),
                 lab)
-            for frames, act, lab in zip(
+            for frames, (dk, dm), lab in zip(
                 (frames_gt, frames_true, frames_swap, frames_zero), acts, labels)
         ]
         writer.append_data(cv2.vconcat([cv2.hconcat(panels[:2]),
@@ -406,23 +418,30 @@ def run_debug_validation(model, diffusion, valset, device, out_dir,
     # Generation mode has no action_embedder (the action is a denoised token), so gating on it hid the action path.
     generates_actions = (bool(getattr(_m, "generate_actions", False))
                          and getattr(_m, "action_dim", 0) > 0)
+    generates_mouse = (bool(getattr(_m, "generate_mouse", False))
+                       and getattr(_m, "mouse_dim", 0) > 0)
     # Token-cond mode has no action_embedder and no generation head, but actions are still its conditioning signal.
     action_conditioned = (getattr(_m, "action_embedder", None) is not None
                           or getattr(_m, "action_x_embedder", None) is not None
-                          or generates_actions)
+                          or getattr(_m, "mouse_x_embedder", None) is not None
+                          or generates_actions or generates_mouse)
     sampling_model = _CFGWrapper(model, cfg_scale) if cfg_scale != 1.0 else model
 
     T, n_obs = valset.T, valset.n_observed
     x0_all = valset.load_all()  # (N, T, 3, H, W)
     n_rows = x0_all.shape[0]
-    actions_all = valset.load_all_actions() if (actions and action_conditioned) else None
+    if actions and action_conditioned:
+        keypress_all, mouse_all = valset.load_all_actions()
+    else:
+        keypress_all, mouse_all = None, None
 
     per_row, agg, swap_rows = [], {}, []
     for lo in range(0, n_rows, chunk_size):
         hi = min(lo + chunk_size, n_rows)
         x0 = x0_all[lo:hi].to(device)
         b = x0.shape[0]
-        act_chunk = actions_all[lo:hi].to(device) if actions_all is not None else None
+        keypress_chunk = keypress_all[lo:hi].to(device) if keypress_all is not None else None
+        mouse_chunk = mouse_all[lo:hi].to(device) if mouse_all is not None else None
 
         obs_mask = th.zeros(b, T, 1, 1, 1, device=device)
         obs_mask[:, :n_obs] = 1.0
@@ -435,15 +454,23 @@ def run_debug_validation(model, diffusion, valset, device, out_dir,
             "obs_mask": obs_mask,
             "latent_mask": latent_mask,
         }
-        if act_chunk is not None:
-            model_kwargs["actions"] = act_chunk
+        # Teacher forcing pins the observed prefix's actions to GT (mask lags the frame mask by one row, see action_masks); False pins nothing, i.e. free rollout.
+        if keypress_chunk is not None:
+            model_kwargs["actions"] = keypress_chunk
             if generates_actions:
-                # Teacher forcing pins the observed prefix's actions to GT (mask lags the frame mask by one row, see action_masks); False pins nothing, i.e. free rollout.
                 obs_act_mask = frame_mask_to_action_mask(obs_mask)
                 if not teacher_force_actions:
                     obs_act_mask = th.zeros_like(obs_act_mask)
-                model_kwargs["actions0"] = act_chunk
+                model_kwargs["actions0"] = keypress_chunk
                 model_kwargs["obs_action_mask"] = obs_act_mask
+        if mouse_chunk is not None:
+            model_kwargs["mouse"] = mouse_chunk
+            if generates_mouse:
+                obs_mouse_mask = frame_mask_to_action_mask(obs_mask)
+                if not teacher_force_actions:
+                    obs_mouse_mask = th.zeros_like(obs_mouse_mask)
+                model_kwargs["mouse0"] = mouse_chunk
+                model_kwargs["obs_mouse_mask"] = obs_mouse_mask
 
         # Match the schedule's true max sigma; see the note in train_util.log_samples.
         sched_sigma_max = float(diffusion.timestep2sigma(diffusion.num_timesteps - 1))
@@ -456,9 +483,10 @@ def run_debug_validation(model, diffusion, valset, device, out_dir,
             latent_mask=latent_mask.cpu(),
             return_decoded=False,
         )
-        samples_act = None
+        samples_act, samples_mouse = None, None
         if isinstance(samples, tuple):
-            samples_video, samples_act = samples
+            samples_video, second = samples
+            samples_act, samples_mouse = _unpack_action_mouse_out(second, generates_actions, generates_mouse)
             samples = samples_video
         samples = samples.to(device)
         # Keep the observed half exactly as given; only the generated half is model output.
@@ -476,15 +504,17 @@ def run_debug_validation(model, diffusion, valset, device, out_dir,
             rec = {"row": row["num"], "prompt": row["prompt"], "type": row["test_type"]}
             rec.update({f"next/{k}": v for k, v in m_next.items()})
             rec.update({f"roll/{k}": v for k, v in m_roll.items()})
-            if samples_act is not None and act_chunk is not None:
-                p_act = samples_act[j].to(device)
-                g_act = act_chunk[j].to(device)
+            p_key = samples_act[j].to(device) if samples_act is not None and keypress_chunk is not None else None
+            g_key = keypress_chunk[j].to(device) if p_key is not None else None
+            p_mouse = samples_mouse[j].to(device) if samples_mouse is not None and mouse_chunk is not None else None
+            g_mouse = mouse_chunk[j].to(device) if p_mouse is not None else None
+            if p_key is not None or p_mouse is not None:
                 # Row n_obs is pinned GT (the action mask lags by one row), so the first genuinely generated action is row n_obs + 1.
                 first_gen = n_obs + 1
                 for scope, sl in (("next", slice(first_gen, first_gen + 1)),
                                   ("roll", slice(first_gen, None))):
                     rec.update({f"{scope}/{k}": v
-                                for k, v in _action_metrics(p_act, g_act, sl).items()})
+                                for k, v in _action_metrics(p_key, g_key, p_mouse, g_mouse, sl).items()})
             per_row.append(rec)
 
             slug = valset.slug(row)
@@ -498,12 +528,14 @@ def run_debug_validation(model, diffusion, valset, device, out_dir,
             if log_videos:
                 mp4 = out_dir / f"step{step}_{slug}.mp4"
                 try:
+                    # Top row keeps the recorded actions; this row shows what the model produced, falling back to recorded for any un-generated modality.
+                    pred_bar_key = samples_act[j] if samples_act is not None else keypress_chunk[j] if keypress_chunk is not None else None
+                    pred_bar_mouse = samples_mouse[j] if samples_mouse is not None else mouse_chunk[j] if mouse_chunk is not None else None
                     render_overlay(
                         gt_frames=gt.cpu().numpy(),
                         pred_frames=pred.cpu().numpy(),
-                        # Top row keeps the recorded actions; this row shows what the model produced.
-                        pred_actions=(_action_bars(samples_act[j])
-                                      if samples_act is not None else None),
+                        pred_actions=(_action_bars(pred_bar_key, pred_bar_mouse)
+                                      if pred_bar_key is not None and pred_bar_mouse is not None else None),
                         session_db_path=str(row["session_db"]),
                         start_frame_idx=row["window_start"],
                         out_path=str(mp4),
@@ -517,9 +549,10 @@ def run_debug_validation(model, diffusion, valset, device, out_dir,
                     print(f"[debug_validation] overlay failed for row {row['num']}: {e!r}")
 
             # The swap test (acceptance criterion): true/swapped/zero actions on the same context.
-            if swap_test and action_conditioned and act_chunk is not None:
+            if swap_test and action_conditioned and keypress_chunk is not None and mouse_chunk is not None:
                 try:
-                    act_true_j = act_chunk[j:j + 1]
+                    key_true_j = keypress_chunk[j:j + 1]
+                    mouse_true_j = mouse_chunk[j:j + 1]
                     x0_j = x0[j:j + 1]
                     obs_mask_j = obs_mask[j:j + 1]
                     latent_mask_j = latent_mask[j:j + 1]
@@ -527,14 +560,14 @@ def run_debug_validation(model, diffusion, valset, device, out_dir,
                     # Rewrite only the actions driving the generated frames: rows n_obs..T-1, the frame-mask complement, not the action-mask complement (which lags one row) -- leave the history true.
                     intervene_on = 1.0 - obs_mask_j.reshape(
                         obs_mask_j.shape[0], obs_mask_j.shape[1], 1)
-                    act_swap_j = _swap_actions(act_true_j, intervene_on)
-                    act_zero_j = _zero_actions(act_true_j, intervene_on)
+                    key_swap_j, mouse_swap_j = _swap_actions(key_true_j, mouse_true_j, intervene_on)
+                    key_zero_j, mouse_zero_j = _zero_actions(key_true_j, mouse_true_j, intervene_on)
                     # Same starting noise for all three passes, so only the actions tensor differs.
                     shared_noise = th.randn(*x0_j.shape, device=device)
                     # heun_sample's churn draws from the global RNG each step; reseed per pass too.
                     swap_seed = 20250813 + int(row["num"])
 
-                    def _sample_with_actions(act):
+                    def _sample_with_actions(key, mouse):
                         with RNG(swap_seed):
                             s, _ = diffusion.heun_sample(
                                 sampling_model, x0_j.shape, noise=shared_noise,
@@ -543,24 +576,27 @@ def run_debug_validation(model, diffusion, valset, device, out_dir,
                                 model_kwargs={
                                     "frame_indices": None, "x0": x0_j,
                                     "obs_mask": obs_mask_j, "latent_mask": latent_mask_j,
-                                    "actions": act,
+                                    "actions": key, "mouse": mouse,
                                     # Pin the history only; future action tokens are denoised jointly with the video.
-                                    **({"actions0": act,
-                                        "obs_action_mask": obs_act_mask_j}
+                                    **({"actions0": key, "obs_action_mask": obs_act_mask_j}
                                        if generates_actions else {}),
+                                    **({"mouse0": mouse, "obs_mouse_mask": obs_act_mask_j}
+                                       if generates_mouse else {}),
                                 },
                                 latent_mask=latent_mask_j.cpu(), return_decoded=False,
                             )
-                        act_out = None
+                        key_out, mouse_out = None, None
                         if isinstance(s, tuple):
-                            s, act_out = s
+                            s, second = s
+                            key_out, mouse_out = _unpack_action_mouse_out(second, generates_actions, generates_mouse)
                         s = s.to(device)
                         video = (s * latent_mask_j + x0_j * obs_mask_j)[0]
-                        return video, (act_out[0] if act_out is not None else None)
+                        return (video, key_out[0] if key_out is not None else None,
+                                mouse_out[0] if mouse_out is not None else None)
 
-                    true_full, true_act = _sample_with_actions(act_true_j)
-                    swap_full, swap_act = _sample_with_actions(act_swap_j)
-                    zero_full, zero_act = _sample_with_actions(act_zero_j)
+                    true_full, true_key, true_mouse = _sample_with_actions(key_true_j, mouse_true_j)
+                    swap_full, swap_key, swap_mouse = _sample_with_actions(key_swap_j, mouse_swap_j)
+                    zero_full, zero_key, zero_mouse = _sample_with_actions(key_zero_j, mouse_zero_j)
 
                     true01 = _to01(true_full[n_obs:])
                     swap01 = _to01(swap_full[n_obs:])
@@ -582,14 +618,14 @@ def run_debug_validation(model, diffusion, valset, device, out_dir,
                             frames_true=true_full.cpu().numpy(),
                             frames_swap=swap_full.cpu().numpy(),
                             frames_zero=zero_full.cpu().numpy(),
-                            actions_gt=act_true_j[0].cpu().numpy(),
-                            actions_true=(true_act if true_act is not None
-                                          else act_true_j[0].cpu().numpy()),
-                            actions_swap=(swap_act if swap_act is not None
-                                          else act_swap_j[0].cpu().numpy()),
-                            actions_zero=(zero_act if zero_act is not None
-                                          else act_zero_j[0].cpu().numpy()),
-                            true_label=("GEN" if true_act is not None else "TRUE"),
+                            actions_gt=(key_true_j[0].cpu().numpy(), mouse_true_j[0].cpu().numpy()),
+                            actions_true=((true_key if true_key is not None else key_true_j[0]).cpu().numpy(),
+                                          (true_mouse if true_mouse is not None else mouse_true_j[0]).cpu().numpy()),
+                            actions_swap=((swap_key if swap_key is not None else key_swap_j[0]).cpu().numpy(),
+                                          (swap_mouse if swap_mouse is not None else mouse_swap_j[0]).cpu().numpy()),
+                            actions_zero=((zero_key if zero_key is not None else key_zero_j[0]).cpu().numpy(),
+                                          (zero_mouse if zero_mouse is not None else mouse_zero_j[0]).cpu().numpy()),
+                            true_label=("GEN" if (true_key is not None or true_mouse is not None) else "TRUE"),
                             n_observed=n_obs, out_path=str(mp4_swap),
                             title=row["prompt"],
                         )

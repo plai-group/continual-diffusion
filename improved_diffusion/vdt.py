@@ -302,9 +302,12 @@ class VDT(nn.Module):
         mode='video',
         num_frames=16,
         action_dim=0,
+        mouse_dim=0,
         action_dropout_prob=0.0,
         generate_actions=False,
         action_token_cond=False,
+        generate_mouse=False,
+        mouse_token_cond=False,
     ):
         super().__init__()
         self.learn_sigma = learn_sigma
@@ -312,10 +315,15 @@ class VDT(nn.Module):
         self.out_channels = in_channels * 2 if learn_sigma else in_channels
         self.patch_size = patch_size
         self.num_heads = num_heads
+        # action_dim is the KEYPRESS token's dim by convention; mouse_dim is its sibling for the 2-d mouse token.
         self.action_dim = action_dim
+        self.mouse_dim = mouse_dim
         self.generate_actions = generate_actions
         # Token conditioning WITHOUT generation: the action rides in the sequence like a patch, but is never noised and carries no loss.
         self.action_token_cond = bool(action_token_cond) and not generate_actions
+        # Mouse's mode is fully independent of keypress's (its own generate/token-cond pair).
+        self.generate_mouse = bool(generate_mouse)
+        self.mouse_token_cond = bool(mouse_token_cond) and not self.generate_mouse
 
         self.x_embedder = PatchEmbed(input_size, patch_size, in_channels, hidden_size, bias=True)
         self.t_embedder = TimestepEmbedder(hidden_size)
@@ -338,6 +346,17 @@ class VDT(nn.Module):
             self.action_pos_embed = None
             self.action_head = None
             self.action_embedder = None
+
+        # Mouse has no legacy fold-into-c conditioning mode: token-based only, mirroring keypress's token branch.
+        if mouse_dim > 0 and (self.generate_mouse or self.mouse_token_cond):
+            self.mouse_x_embedder = nn.Linear(mouse_dim, hidden_size, bias=True)
+            self.mouse_pos_embed = nn.Parameter(torch.zeros(1, 1, hidden_size))
+            self.mouse_head = ActionHead(hidden_size, mouse_dim, num_frames) if self.generate_mouse else None
+        else:
+            assert mouse_dim == 0, "mouse_dim > 0 requires generate_mouse or mouse_token_cond"
+            self.mouse_x_embedder = None
+            self.mouse_pos_embed = None
+            self.mouse_head = None
 
         num_patches = self.x_embedder.num_patches
         # Will use fixed sin-cos embedding:
@@ -387,6 +406,13 @@ class VDT(nn.Module):
         if self.action_pos_embed is not None:
             nn.init.normal_(self.action_pos_embed, std=0.02)
 
+        if self.mouse_x_embedder is not None:
+            nn.init.xavier_uniform_(self.mouse_x_embedder.weight)
+            nn.init.constant_(self.mouse_x_embedder.bias, 0)
+
+        if self.mouse_pos_embed is not None:
+            nn.init.normal_(self.mouse_pos_embed, std=0.02)
+
         # Initialize label embedding table:
         nn.init.normal_(self.y_embedder.embedding_table.weight, std=0.02)
 
@@ -411,6 +437,12 @@ class VDT(nn.Module):
             nn.init.constant_(self.action_head.linear.weight, 0)
             nn.init.constant_(self.action_head.linear.bias, 0)
 
+        if self.mouse_head is not None:
+            nn.init.constant_(self.mouse_head.adaLN_modulation[-1].weight, 0)
+            nn.init.constant_(self.mouse_head.adaLN_modulation[-1].bias, 0)
+            nn.init.constant_(self.mouse_head.linear.weight, 0)
+            nn.init.constant_(self.mouse_head.linear.bias, 0)
+
     def unpatchify(self, x):
         """
         x: (N, T, patch_size**2 * C)
@@ -430,7 +462,8 @@ class VDT(nn.Module):
     def forward(self, x, timesteps=None, *, x0=None, frame_indices=None,
                 obs_mask=None, latent_mask=None, return_attn_weights=False,
                 actions=None, actions0=None, obs_action_mask=None, latent_action_mask=None,
-                force_action_drop=None, **kwargs):
+                force_action_drop=None,
+                mouse=None, mouse0=None, obs_mouse_mask=None, latent_mouse_mask=None, **kwargs):
         """
         Forward pass of VDT.
         x: (B, T, C, H, W) tensor of spatial inputs (images or latent representations of images)
@@ -448,14 +481,22 @@ class VDT(nn.Module):
         # True whenever the action rides in the sequence, denoised or not; token-cond passes no obs_action_mask/actions0, so `actions` falls through clean.
         use_action_tokens = (self.action_dim > 0 and self.action_x_embedder is not None
                              and actions is not None)
+        use_mouse_tokens = (self.mouse_dim > 0 and self.mouse_x_embedder is not None
+                            and mouse is not None)
+        tokens = [patch_tokens]
         if use_action_tokens:
             if obs_action_mask is not None and actions0 is not None:
                 actions = actions * (1 - obs_action_mask) + actions0 * obs_action_mask
             action_tokens = self.action_x_embedder(actions)  # (B, T, D)
             action_tokens = rearrange(action_tokens, 'b t d -> (b t) 1 d') + self.action_pos_embed  # (B*T, 1, D)
-            tokens = torch.cat([patch_tokens, action_tokens], dim=1)  # (B*T, N+1, D)
-        else:
-            tokens = patch_tokens
+            tokens.append(action_tokens)
+        if use_mouse_tokens:
+            if obs_mouse_mask is not None and mouse0 is not None:
+                mouse = mouse * (1 - obs_mouse_mask) + mouse0 * obs_mouse_mask
+            mouse_tokens = self.mouse_x_embedder(mouse)  # (B, T, D)
+            mouse_tokens = rearrange(mouse_tokens, 'b t d -> (b t) 1 d') + self.mouse_pos_embed  # (B*T, 1, D)
+            tokens.append(mouse_tokens)
+        tokens = torch.cat(tokens, dim=1) if len(tokens) > 1 else tokens[0]  # (B*T, N[+1][+1], D)
 
         if self.mode == 'video':
             # Temporal embed across T frames: (B*(N+1), T, D)
@@ -486,13 +527,19 @@ class VDT(nn.Module):
         x_out = self.unpatchify(x_out)            # (B*T, out_channels, H, W)
         x_out = x_out.view(B, T, x_out.shape[-3], x_out.shape[-2], x_out.shape[-1])
 
+        # Token order is patch -> keypress -> mouse (vdt.py forward, per issue-71).
+        act_out, mouse_out = None, None
         if use_action_tokens and self.action_head is not None:
-            action_tokens_out = tokens[:, N:, :]  # (B*T, 1, D)
-            act_out = self.action_head(action_tokens_out, c)  # (B*T, 1, action_dim)
-            act_out = act_out.view(B, T, self.action_dim)
-            return x_out, act_out
+            action_tokens_out = tokens[:, N:N + 1, :]  # (B*T, 1, D)
+            act_out = self.action_head(action_tokens_out, c).view(B, T, self.action_dim)
+        if use_mouse_tokens and self.mouse_head is not None:
+            mouse_offset = N + (1 if use_action_tokens else 0)
+            mouse_tokens_out = tokens[:, mouse_offset:mouse_offset + 1, :]  # (B*T, 1, D)
+            mouse_out = self.mouse_head(mouse_tokens_out, c).view(B, T, self.mouse_dim)
 
-        return x_out, None
+        # Fixed (act_out, mouse_out) pair; a 3rd generative modality would need to
+        # revisit this pair (and UNetVideoModel's matching return slot in unet.py).
+        return x_out, (act_out, mouse_out)
 
     def forward_with_cfg(self, x, t, y, cfg_scale):
         """

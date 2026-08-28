@@ -202,7 +202,6 @@ def create_argparser():
         debug_validation_per_task=False,
         cfg_scale=1.0,  # sampling-time only; not a model kwarg. 1.0 = no guidance.
         generate_actions=False,
-        action_loss_weight=1.0,
         # Warm start from a different architecture: step counter stays 0, optimizer/EMA stay fresh (--resume_checkpoint loads strict and reads the step from the filename).
         init_from_checkpoint="",
     )

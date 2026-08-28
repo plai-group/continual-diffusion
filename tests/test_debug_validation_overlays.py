@@ -16,11 +16,11 @@ def _frames():
 
 
 def _actions(seed):
+    """(keypress, mouse): (T, 8) and (T, 2) float32."""
     rng = np.random.RandomState(seed)
-    a = np.zeros((T, 10), dtype=np.float32)
-    a[:, :8] = (rng.rand(T, 8) > 0.5).astype(np.float32)
-    a[:, 8:] = rng.randn(T, 2)
-    return a
+    keypress = (rng.rand(T, 8) > 0.5).astype(np.float32)
+    mouse = rng.randn(T, 2).astype(np.float32)
+    return keypress, mouse
 
 
 class _BarRecorder:
@@ -35,7 +35,8 @@ class _BarRecorder:
 
 
 def test_display_shift():
-    a = np.arange(T * 10, dtype=np.float32).reshape(T, 10)
+    # _to_display_actions is dim-agnostic: it just shifts the causal cache back one frame.
+    a = np.arange(T * 8, dtype=np.float32).reshape(T, 8)
     out = dv._to_display_actions(a)
     assert np.allclose(out[:-1], a[1:]), "causal cache must shift back by one frame"
     assert np.allclose(out[-1], 0), "last frame has no successor, so its bar is blank"
@@ -45,11 +46,11 @@ def test_display_shift():
 def test_action_bars_from_tensor():
     import torch
 
-    a = _actions(0)
-    bars = dv._action_bars(torch.from_numpy(a))
+    keypress, mouse = _actions(0)
+    bars = dv._action_bars(torch.from_numpy(keypress), torch.from_numpy(mouse))
     assert len(bars) == T
     assert set(bars[0]) == {"keys", "clicks", "mouseDX", "mouseDY"}
-    print("  [PASS] _action_bars accepts a tensor and returns one bar per frame")
+    print("  [PASS] _action_bars accepts (keypress, mouse) tensors and returns one bar per frame")
 
 
 def test_swap_overlay_draws_gt_and_generated_separately(monkeypatched=None):
@@ -77,8 +78,8 @@ def test_swap_overlay_draws_gt_and_generated_separately(monkeypatched=None):
     assert len(rec.bars) == 4 * T, f"expected {4*T} panel draws, got {len(rec.bars)}"
     gt_bars = rec.bars[0::4]
     gen_bars = rec.bars[1::4]
-    expect_gt = dv._action_bars(act_gt)
-    expect_gen = dv._action_bars(act_gen)
+    expect_gt = dv._action_bars(*act_gt)
+    expect_gen = dv._action_bars(*act_gen)
     assert gt_bars == expect_gt, "GT panel must draw the recorded actions"
     assert gen_bars == expect_gen, "GEN panel must draw the GENERATED actions"
     assert gt_bars != gen_bars, "GT and GEN panels drew identical bars -- regression"
@@ -91,9 +92,9 @@ def test_val_overlay_pred_row_uses_generated_actions():
     orig_get = dd.get_frame_actions
     orig_writer = dd_get_writer()
     dd._overlay_frame = rec
-    dd.get_frame_actions = lambda *a, **k: dv._action_bars(_actions(11))
+    dd.get_frame_actions = lambda *a, **k: dv._action_bars(*_actions(11))
     try:
-        pred_bars = dv._action_bars(_actions(12))
+        pred_bars = dv._action_bars(*_actions(12))
         dd.render_overlay(
             gt_frames=_frames(), pred_frames=_frames(),
             session_db_path="unused", start_frame_idx=0,
@@ -116,7 +117,7 @@ def test_val_overlay_defaults_to_recorded_actions():
     orig_overlay, orig_get = dd._overlay_frame, dd.get_frame_actions
     orig_writer = dd_get_writer()
     dd._overlay_frame = rec
-    dd.get_frame_actions = lambda *a, **k: dv._action_bars(_actions(11))
+    dd.get_frame_actions = lambda *a, **k: dv._action_bars(*_actions(11))
     try:
         dd.render_overlay(
             gt_frames=_frames(), pred_frames=_frames(),

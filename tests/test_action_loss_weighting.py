@@ -94,10 +94,9 @@ def test_action_loss_weight_multiplies_dim_ratio_on_top():
         terms = _losses(model, diffusion, action_dim=10, keypress_loss_weight=w)
         ratio = terms["action_dim_ratio"]
         expected_total = terms["loss_video"] + w * ratio * terms["loss_action"]
-        assert torch.allclose(terms["loss_total"], expected_total, atol=1e-5)
-        assert torch.allclose(terms["loss"], terms["loss_total"], atol=1e-5)
+        assert torch.allclose(terms["loss"], expected_total, atol=1e-5)
         if w == 0.0:
-            assert torch.equal(terms["loss_total"], terms["loss_video"])
+            assert torch.equal(terms["loss"], terms["loss_video"])
 
 
 def test_video_loss_unaffected_by_action_weight():
@@ -139,7 +138,7 @@ def test_mouse_loss_weight_is_independent_of_keypress_weight():
     terms_high = _losses(model, diffusion, action_dim=8, mouse_dim=2, keypress_loss_weight=1.0, mouse_loss_weight=5.0)
 
     assert torch.allclose(terms_low["loss_action"], terms_high["loss_action"], atol=1e-6)
-    assert torch.equal(terms_low["loss_total"], terms_low["loss_video"] + terms_low["action_dim_ratio"] * terms_low["loss_action"])
+    assert torch.equal(terms_low["loss"], terms_low["loss_video"] + terms_low["action_dim_ratio"] * terms_low["loss_action"])
     ratio_m = terms_high["mouse_dim_ratio"]
     expected_high = terms_high["loss_video"] + terms_high["action_dim_ratio"] * terms_high["loss_action"] + 5.0 * ratio_m * terms_high["loss_mouse"]
-    assert torch.allclose(terms_high["loss_total"], expected_high, atol=1e-5)
+    assert torch.allclose(terms_high["loss"], expected_high, atol=1e-5)

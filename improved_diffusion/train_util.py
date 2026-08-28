@@ -478,24 +478,23 @@ class TrainLoop:
                              'latent_mask': latent_mask, 'x0': micro}
             generates_actions = getattr(self.model, 'generate_actions', False) or getattr(self.args, 'generate_actions', False)
             generates_mouse = getattr(self.model, 'generate_mouse', False) or getattr(self.args, 'generate_mouse', False)
+            # Keypress and mouse currently always share one frame mask; compute once, reuse for both.
+            act_mask = frame_mask_to_action_mask(obs_mask) if (generates_actions or generates_mouse) else None
+            latent_act_mask_shared = frame_mask_to_action_mask(latent_mask) if (generates_actions or generates_mouse) else None
             if micro_actions is not None:
                 micro_act_dev = micro_actions.to(dist_util.dev(), dtype=th.float32)
                 model_kwargs['actions'] = micro_act_dev
                 if generates_actions:
-                    obs_act_mask = frame_mask_to_action_mask(obs_mask)
-                    latent_act_mask = frame_mask_to_action_mask(latent_mask)
-                    model_kwargs['obs_action_mask'] = obs_act_mask
-                    model_kwargs['latent_action_mask'] = latent_act_mask
+                    model_kwargs['obs_action_mask'] = act_mask
+                    model_kwargs['latent_action_mask'] = latent_act_mask_shared
                     model_kwargs['actions0'] = micro_act_dev
                     model_kwargs['keypress_loss_weight'] = getattr(self.args, 'keypress_loss_weight', 1.0)
             if micro_mouse is not None:
                 micro_mouse_dev = micro_mouse.to(dist_util.dev(), dtype=th.float32)
                 model_kwargs['mouse'] = micro_mouse_dev
                 if generates_mouse:
-                    obs_mouse_mask = frame_mask_to_action_mask(obs_mask)
-                    latent_mouse_mask = frame_mask_to_action_mask(latent_mask)
-                    model_kwargs['obs_mouse_mask'] = obs_mouse_mask
-                    model_kwargs['latent_mouse_mask'] = latent_mouse_mask
+                    model_kwargs['obs_mouse_mask'] = act_mask
+                    model_kwargs['latent_mouse_mask'] = latent_act_mask_shared
                     model_kwargs['mouse0'] = micro_mouse_dev
                     model_kwargs['mouse_loss_weight'] = getattr(self.args, 'mouse_loss_weight', 1.0)
 

@@ -868,14 +868,17 @@ class GaussianDiffusion:
             if "x0" in cur_kwargs:
                 denoised_x = latent_indicator * denoised_x + obs_indicator * cur_kwargs["x0"]
 
+            # Keypress and mouse currently always share one frame mask; compute the fallback once, reuse for both.
+            shared_obs_act_indicator = None
+            if "obs_mask" in cur_kwargs:
+                om = cur_kwargs["obs_mask"]
+                shared_obs_act_indicator = frame_mask_to_action_mask(om) if isinstance(om, th.Tensor) else om
+
             denoised_a = None
             if "pred_actstart" in out and out["pred_actstart"] is not None:
                 obs_act_indicator = cur_kwargs.get("obs_action_mask", None)
-                if obs_act_indicator is None and "obs_mask" in cur_kwargs:
-                    om = cur_kwargs["obs_mask"]
-                    obs_act_indicator = frame_mask_to_action_mask(om) if isinstance(om, th.Tensor) else om
                 if obs_act_indicator is None:
-                    obs_act_indicator = 0
+                    obs_act_indicator = shared_obs_act_indicator if shared_obs_act_indicator is not None else 0
                 latent_act_indicator = 1 - obs_act_indicator
                 denoised_a = out["pred_actstart"]
                 if "actions0" in cur_kwargs:
@@ -884,11 +887,8 @@ class GaussianDiffusion:
             denoised_m = None
             if "pred_mousestart" in out and out["pred_mousestart"] is not None:
                 obs_mouse_indicator = cur_kwargs.get("obs_mouse_mask", None)
-                if obs_mouse_indicator is None and "obs_mask" in cur_kwargs:
-                    om = cur_kwargs["obs_mask"]
-                    obs_mouse_indicator = frame_mask_to_action_mask(om) if isinstance(om, th.Tensor) else om
                 if obs_mouse_indicator is None:
-                    obs_mouse_indicator = 0
+                    obs_mouse_indicator = shared_obs_act_indicator if shared_obs_act_indicator is not None else 0
                 latent_mouse_indicator = 1 - obs_mouse_indicator
                 denoised_m = out["pred_mousestart"]
                 if "mouse0" in cur_kwargs:
@@ -1063,22 +1063,25 @@ class GaussianDiffusion:
             )
 
             call_kwargs = dict(model_kwargs)
+            # Keypress and mouse currently always share one frame mask; compute the fallback once, reuse for both.
+            shared_act_mask = None
+            if ('obs_action_mask' not in call_kwargs or 'obs_mouse_mask' not in call_kwargs) and 'obs_mask' in call_kwargs:
+                om = call_kwargs['obs_mask']
+                shared_act_mask = frame_mask_to_action_mask(om) if isinstance(om, th.Tensor) else om
             if is_action_gen:
                 noise_act = th.randn_like(actions_in)
                 act_t = self.q_sample(actions_in, t, noise=noise_act)
                 call_kwargs['actions'] = act_t
                 call_kwargs['actions0'] = actions_in
-                if 'obs_action_mask' not in call_kwargs and 'obs_mask' in call_kwargs:
-                    om = call_kwargs['obs_mask']
-                    call_kwargs['obs_action_mask'] = frame_mask_to_action_mask(om) if isinstance(om, th.Tensor) else om
+                if 'obs_action_mask' not in call_kwargs:
+                    call_kwargs['obs_action_mask'] = shared_act_mask
             if is_mouse_gen:
                 noise_mouse = th.randn_like(mouse_in)
                 mouse_t = self.q_sample(mouse_in, t, noise=noise_mouse)
                 call_kwargs['mouse'] = mouse_t
                 call_kwargs['mouse0'] = mouse_in
-                if 'obs_mouse_mask' not in call_kwargs and 'obs_mask' in call_kwargs:
-                    om = call_kwargs['obs_mask']
-                    call_kwargs['obs_mouse_mask'] = frame_mask_to_action_mask(om) if isinstance(om, th.Tensor) else om
+                if 'obs_mouse_mask' not in call_kwargs:
+                    call_kwargs['obs_mouse_mask'] = shared_act_mask
 
             model_output, second_out = model(x_t, timesteps=self._scale_timesteps(t), **call_kwargs)
             act_out, mouse_out = _unpack_action_mouse_out(second_out, is_action_gen, is_mouse_gen)
@@ -1160,7 +1163,6 @@ class GaussianDiffusion:
                 terms["mouse_dim_ratio"] = th.full_like(loss_video, dim_ratio_mouse)
                 total_loss = total_loss + mouse_weight * dim_ratio_mouse * mse_mouse
 
-            terms["loss_total"] = total_loss
             terms["loss"] = total_loss
         else:
             raise NotImplementedError(self.loss_type)

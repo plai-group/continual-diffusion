@@ -192,7 +192,7 @@ def test_gaussian_diffusion_training_losses():
 
     terms = diffusion.training_losses(model, x, t, model_kwargs=model_kwargs, latent_mask=latent_mask)
 
-    required_keys = ["loss", "loss_video", "loss_action", "loss_total", "mse", "eval-mse",
+    required_keys = ["loss", "loss_video", "loss_action", "mse", "eval-mse",
                      "action_dim_ratio"]
     # loss_vid / loss_act were aliases of loss_video / loss_action; one name each.
     for k in ("loss_vid", "loss_act"):
@@ -200,16 +200,15 @@ def test_gaussian_diffusion_training_losses():
     for k in required_keys:
         assert k in terms, f"Missing key '{k}' in diffusion terms: {list(terms.keys())}"
 
-    # loss_total == loss_video + weight * (D_a/D_v) * loss_action; the ratio keeps the two mean_flat terms comparable per element.
+    # loss == loss_video + weight * (D_a/D_v) * loss_action; the ratio keeps the two mean_flat terms comparable per element.
     ratio = actions[0].numel() / x[0].numel()
     assert torch.allclose(terms["action_dim_ratio"], torch.full_like(terms["loss_video"], ratio))
     expected_total = terms["loss_video"] + 1.5 * ratio * terms["loss_action"]
-    assert torch.allclose(terms["loss_total"], expected_total, atol=1e-5), "Loss total formula mismatch"
-    assert torch.allclose(terms["loss"], terms["loss_total"], atol=1e-5), "Loss mismatch"
+    assert torch.allclose(terms["loss"], expected_total, atol=1e-5), "Loss total formula mismatch"
     print(f"  [PASS] training_losses computed all terms:")
     print(f"         loss_video={terms['loss_video'].mean().item():.4f}, "
           f"loss_action={terms['loss_action'].mean().item():.4f}, "
-          f"loss_total={terms['loss_total'].mean().item():.4f}")
+          f"loss={terms['loss'].mean().item():.4f}")
 
     # Test backward pass from training_losses
     loss = terms["loss"].mean()
@@ -253,15 +252,14 @@ def test_mouse_training_losses():
     }
     terms = diffusion.training_losses(model, x, t, model_kwargs=model_kwargs, latent_mask=latent_mask)
 
-    for k in ("loss_action", "loss_mouse", "action_dim_ratio", "mouse_dim_ratio", "loss_video", "loss_total"):
+    for k in ("loss_action", "loss_mouse", "action_dim_ratio", "mouse_dim_ratio", "loss_video"):
         assert k in terms, f"Missing key '{k}' in diffusion terms: {list(terms.keys())}"
 
     ratio_a = actions[0].numel() / x[0].numel()
     ratio_m = mouse[0].numel() / x[0].numel()
     expected_total = terms["loss_video"] + 1.0 * ratio_a * terms["loss_action"] + 2.0 * ratio_m * terms["loss_mouse"]
-    assert torch.allclose(terms["loss_total"], expected_total, atol=1e-5), "keypress+mouse loss_total formula mismatch"
-    assert torch.allclose(terms["loss"], terms["loss_total"], atol=1e-5)
-    print("  [PASS] loss_total combines keypress and mouse terms with their own weight * dim_ratio")
+    assert torch.allclose(terms["loss"], expected_total, atol=1e-5), "keypress+mouse loss formula mismatch"
+    print("  [PASS] loss combines keypress and mouse terms with their own weight * dim_ratio")
 
     loss = terms["loss"].mean()
     loss.backward()

@@ -18,8 +18,9 @@ helper here takes and returns a (keypress, mouse) pair.
 """
 import torch
 
+from improved_diffusion import debug_actions
 from improved_diffusion.action_masks import frame_mask_to_action_mask
-from improved_diffusion.debug_validation import _invert_actions, _swap_actions, _zero_actions
+from improved_diffusion.debug_validation import _action_metrics, _invert_actions, _swap_actions, _zero_actions
 
 
 T, n_obs = 20, 10
@@ -108,3 +109,17 @@ def test_interventions_do_not_mutate_their_input():
     _invert_actions(k, m)
     assert torch.equal(k, before_k)
     assert torch.equal(m, before_m)
+
+
+def test_action_metrics_decodes_80dim_latents_before_scoring():
+    """issue #74: p_key/g_key now arrive as 80-dim encoded latents; _action_metrics
+    must decode them back to raw 8-dim before the >0.5 threshold logic runs."""
+    raw_k, _ = _actions(seed=5)
+    p_latent = debug_actions.encode_keypress_live(raw_k[0])  # (T, 80)
+    g_latent = debug_actions.encode_keypress_live(raw_k[0])  # identical input -> identical latent
+    p_mouse = torch.randn(T, 2)
+    g_mouse = p_mouse.clone()
+
+    out = _action_metrics(p_latent, g_latent, p_mouse, g_mouse, slice(0, T))
+    # Same underlying raw keypress on both sides -> the decoded/thresholded comparison must agree exactly.
+    assert out["key_acc"] == 1.0

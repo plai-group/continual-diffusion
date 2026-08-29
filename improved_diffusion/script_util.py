@@ -198,7 +198,9 @@ def vdt_model_and_diffusion_defaults():
         action_token_cond=False,
         generate_mouse=False,
         mouse_token_cond=False,
-        keypress_loss_weight=1.0,
+        # 0.1, not 1.0: issue #74's encoded keypress raised action_dim 8->80, so dim_ratio auto-scales
+        # the keypress term ~10x; divide the old effective weight by that to hold its relative influence steady.
+        keypress_loss_weight=0.1,
         mouse_loss_weight=1.0,
         action_quantization="none",  # "none" | "codebook"; see plaicraft-debug#77
     )
@@ -229,7 +231,7 @@ def create_vdt_model_and_diffusion(
     action_token_cond=False,
     generate_mouse=False,
     mouse_token_cond=False,
-    keypress_loss_weight=1.0,
+    keypress_loss_weight=0.1,  # see vdt_model_and_diffusion_defaults for why 0.1
     mouse_loss_weight=1.0,
     action_quantization="none",
 ):

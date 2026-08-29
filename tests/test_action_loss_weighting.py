@@ -120,8 +120,8 @@ def test_video_loss_unaffected_by_action_weight():
 
 
 def test_mouse_dim_ratio_matches_element_count_fraction():
-    model, diffusion = _build(action_dim=8, mouse_dim=2)
-    terms = _losses(model, diffusion, action_dim=8, mouse_dim=2)
+    model, diffusion = _build(action_dim=80, mouse_dim=2)
+    terms = _losses(model, diffusion, action_dim=80, mouse_dim=2)
 
     expected_ratio = (T * 2) / (T * C * H * W)
     assert terms["mouse_dim_ratio"].shape == (B,)
@@ -131,11 +131,11 @@ def test_mouse_dim_ratio_matches_element_count_fraction():
 
 def test_mouse_loss_weight_is_independent_of_keypress_weight():
     # Changing mouse_loss_weight must not move loss_action, and vice versa -- the two terms are independent by design.
-    model, diffusion = _build(action_dim=8, mouse_dim=2)
+    model, diffusion = _build(action_dim=80, mouse_dim=2)
     torch.manual_seed(0)
-    terms_low = _losses(model, diffusion, action_dim=8, mouse_dim=2, keypress_loss_weight=1.0, mouse_loss_weight=0.0)
+    terms_low = _losses(model, diffusion, action_dim=80, mouse_dim=2, keypress_loss_weight=1.0, mouse_loss_weight=0.0)
     torch.manual_seed(0)
-    terms_high = _losses(model, diffusion, action_dim=8, mouse_dim=2, keypress_loss_weight=1.0, mouse_loss_weight=5.0)
+    terms_high = _losses(model, diffusion, action_dim=80, mouse_dim=2, keypress_loss_weight=1.0, mouse_loss_weight=5.0)
 
     assert torch.allclose(terms_low["loss_action"], terms_high["loss_action"], atol=1e-6)
     assert torch.equal(terms_low["loss"], terms_low["loss_video"] + terms_low["action_dim_ratio"] * terms_low["loss_action"])

@@ -89,22 +89,24 @@ def test_vdt_shapes_and_grads():
         print(f"  [PASS] {name} created and forward pass verified (hidden_size={hidden})")
 
     # Test 1g: Mouse token alongside keypress -- issue #71's split. Order patch -> keypress -> mouse.
+    # action_dim=80 mirrors production (issue #74's encoded-keypress latent), not the 8-d raw vector.
     mouse_dim = 2
+    keypress_dim = 80
     vdt_both = VDT_S_2(
         input_size=32, patch_size=4, in_channels=C, num_frames=T,
-        learn_sigma=False, action_dim=8, mouse_dim=mouse_dim,
+        learn_sigma=False, action_dim=keypress_dim, mouse_dim=mouse_dim,
         generate_actions=True, generate_mouse=True,
     )
     assert vdt_both.mouse_x_embedder is not None
     assert vdt_both.mouse_pos_embed is not None
     assert vdt_both.mouse_head is not None
-    keypress = torch.randn(B, T, 8)
+    keypress = torch.randn(B, T, keypress_dim)
     mouse = torch.randn(B, T, mouse_dim)
     v_out_km, act_out_km = vdt_both(x, timesteps=t, actions=keypress, mouse=mouse)
     assert v_out_km.shape == (B, T, C, H, W)
     assert isinstance(act_out_km, tuple), "both tokens active -> (act_out, mouse_out) tuple"
     a_out_km, m_out_km = act_out_km
-    assert a_out_km.shape == (B, T, 8)
+    assert a_out_km.shape == (B, T, keypress_dim)
     assert m_out_km.shape == (B, T, mouse_dim)
     print("  [PASS] Keypress+mouse VDT returns (video, (keypress, mouse))")
 
@@ -129,7 +131,7 @@ def test_vdt_shapes_and_grads():
     # Test 1i: keypress and mouse modes are fully independent, not mirrored (issue #71 review fix).
     vdt_keypress_cond_mouse_gen = VDT_S_2(
         input_size=32, patch_size=4, in_channels=C, num_frames=T, learn_sigma=False,
-        action_dim=8, mouse_dim=mouse_dim, action_token_cond=True, generate_mouse=True,
+        action_dim=keypress_dim, mouse_dim=mouse_dim, action_token_cond=True, generate_mouse=True,
     )
     assert vdt_keypress_cond_mouse_gen.mouse_head is not None
     assert vdt_keypress_cond_mouse_gen.action_head is None
@@ -137,7 +139,7 @@ def test_vdt_shapes_and_grads():
 
     vdt_keypress_gen_mouse_cond = VDT_S_2(
         input_size=32, patch_size=4, in_channels=C, num_frames=T, learn_sigma=False,
-        action_dim=8, mouse_dim=mouse_dim, generate_actions=True, mouse_token_cond=True,
+        action_dim=keypress_dim, mouse_dim=mouse_dim, generate_actions=True, mouse_token_cond=True,
     )
     assert vdt_keypress_gen_mouse_cond.action_head is not None
     assert vdt_keypress_gen_mouse_cond.mouse_head is None
@@ -224,7 +226,7 @@ def test_mouse_training_losses():
     print("2b. Testing mouse token's independent loss term")
     print("=" * 60)
     B, T, C, H, W = 2, 8, 3, 32, 32
-    keypress_dim, mouse_dim = 8, 2
+    keypress_dim, mouse_dim = 80, 2
 
     model, diffusion = create_vdt_model_and_diffusion(
         model_name="VDT-S", patch_size=4, input_size=(32, 32), in_channels=C,
@@ -369,7 +371,7 @@ def test_heun_sample_with_mouse():
     print("3b. Testing Joint Heun Sampling (Video + Keypress + Mouse)")
     print("=" * 60)
     B, T, C, H, W = 2, 8, 3, 32, 32
-    keypress_dim, mouse_dim = 8, 2
+    keypress_dim, mouse_dim = 80, 2
 
     model, diffusion = create_vdt_model_and_diffusion(
         model_name="VDT-S", patch_size=4, input_size=(32, 32), in_channels=C,
@@ -464,13 +466,13 @@ def test_cli_and_defaults():
         "--generate_actions", "True",
         "--keypress_loss_weight", "2.5",
         "--mouse_loss_weight", "0.5",
-        "--action_dim", "8",
+        "--action_dim", "80",
         "--mouse_dim", "2",
     ])
     assert args.generate_actions is True
     assert args.keypress_loss_weight == 2.5
     assert args.mouse_loss_weight == 0.5
-    assert args.action_dim == 8
+    assert args.action_dim == 80
     assert args.mouse_dim == 2
     print("  [PASS] Argument parser correctly parsed --generate_actions/--keypress_loss_weight/--mouse_loss_weight")
 

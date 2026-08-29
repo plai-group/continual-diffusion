@@ -116,7 +116,7 @@ class DebugValidationSet:
         return th.stack([self.load_window(r) for r in self.rows])
 
     def load_action_window(self, row):
-        """((T, 8), (T, 2)) float32: same window as load_window, causally-shifted keypress/mouse."""
+        """((T, 80), (T, 2)) float32: same window as load_window, causally-shifted encoded-keypress/mouse."""
         keypress, mouse = debug_actions.load_or_build(row["session_dir"])
         ws, we = row["window_start"], row["window_start"] + self.T
         if we > keypress.shape[0]:
@@ -322,6 +322,8 @@ def _action_metrics(p_key, g_key, p_mouse, g_mouse, sl, quantize=False):
     """
     out = {}
     if p_key is not None and g_key is not None:
+        # p_key/g_key arrive as 80-dim encoded latents (issue #74); decode before quantizing.
+        p_key, g_key = debug_actions.decode_keypress_latent(p_key), debug_actions.decode_keypress_latent(g_key)
         quantize_fn = debug_actions.quantize_keypress if quantize else lambda x: (x > 0.5).float()
         p_k, g_k = quantize_fn(p_key[sl]), quantize_fn(g_key[sl])
         out["key_acc"] = float((p_k == g_k).float().mean().item())
@@ -536,7 +538,7 @@ def run_debug_validation(model, diffusion, valset, device, out_dir,
                     render_overlay(
                         gt_frames=gt.cpu().numpy(),
                         pred_frames=pred.cpu().numpy(),
-                        pred_actions=(_action_bars(pred_bar_key, pred_bar_mouse)
+                        pred_actions=(_action_bars(debug_actions.decode_keypress_latent(pred_bar_key), pred_bar_mouse)
                                       if pred_bar_key is not None and pred_bar_mouse is not None else None),
                         session_db_path=str(row["session_db"]),
                         start_frame_idx=row["window_start"],
@@ -562,8 +564,12 @@ def run_debug_validation(model, diffusion, valset, device, out_dir,
                     # Rewrite only the actions driving the generated frames: rows n_obs..T-1, the frame-mask complement, not the action-mask complement (which lags one row) -- leave the history true.
                     intervene_on = 1.0 - obs_mask_j.reshape(
                         obs_mask_j.shape[0], obs_mask_j.shape[1], 1)
-                    key_swap_j, mouse_swap_j = _swap_actions(key_true_j, mouse_true_j, intervene_on)
-                    key_zero_j, mouse_zero_j = _zero_actions(key_true_j, mouse_true_j, intervene_on)
+                    # keypress_chunk is the 80-dim encoded latent; invert/zero need the raw 8-dim semantics, then re-encode for sampling.
+                    key_true_raw_j = debug_actions.decode_keypress_latent(key_true_j)
+                    key_swap_raw_j, mouse_swap_j = _swap_actions(key_true_raw_j, mouse_true_j, intervene_on)
+                    key_zero_raw_j, mouse_zero_j = _zero_actions(key_true_raw_j, mouse_true_j, intervene_on)
+                    key_swap_j = debug_actions.encode_keypress_live(key_swap_raw_j)
+                    key_zero_j = debug_actions.encode_keypress_live(key_zero_raw_j)
                     # Same starting noise for all three passes, so only the actions tensor differs.
                     shared_noise = th.randn(*x0_j.shape, device=device)
                     # heun_sample's churn draws from the global RNG each step; reseed per pass too.
@@ -614,18 +620,22 @@ def run_debug_validation(model, diffusion, valset, device, out_dir,
 
                     if log_videos:
                         mp4_swap = out_dir / f"step{step}_{slug}_swap.mp4"
+                        # Generated action outputs are also 80-dim latents; decode all three passes down to raw for the overlay bars.
+                        true_key_raw = debug_actions.decode_keypress_latent(true_key) if true_key is not None else key_true_raw_j[0]
+                        swap_key_raw = debug_actions.decode_keypress_latent(swap_key) if swap_key is not None else key_swap_raw_j[0]
+                        zero_key_raw = debug_actions.decode_keypress_latent(zero_key) if zero_key is not None else key_zero_raw_j[0]
                         _render_triple_overlay(
                             frames_gt=gt.cpu().numpy(),
                             # All three passes share the GT frame context and true action history, differing only from row n_obs on.
                             frames_true=true_full.cpu().numpy(),
                             frames_swap=swap_full.cpu().numpy(),
                             frames_zero=zero_full.cpu().numpy(),
-                            actions_gt=(key_true_j[0].cpu().numpy(), mouse_true_j[0].cpu().numpy()),
-                            actions_true=((true_key if true_key is not None else key_true_j[0]).cpu().numpy(),
+                            actions_gt=(key_true_raw_j[0].cpu().numpy(), mouse_true_j[0].cpu().numpy()),
+                            actions_true=(true_key_raw.cpu().numpy(),
                                           (true_mouse if true_mouse is not None else mouse_true_j[0]).cpu().numpy()),
-                            actions_swap=((swap_key if swap_key is not None else key_swap_j[0]).cpu().numpy(),
+                            actions_swap=(swap_key_raw.cpu().numpy(),
                                           (swap_mouse if swap_mouse is not None else mouse_swap_j[0]).cpu().numpy()),
-                            actions_zero=((zero_key if zero_key is not None else key_zero_j[0]).cpu().numpy(),
+                            actions_zero=(zero_key_raw.cpu().numpy(),
                                           (zero_mouse if zero_mouse is not None else mouse_zero_j[0]).cpu().numpy()),
                             true_label=("GEN" if (true_key is not None or true_mouse is not None) else "TRUE"),
                             n_observed=n_obs, out_path=str(mp4_swap),

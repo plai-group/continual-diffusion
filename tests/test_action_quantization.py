@@ -38,10 +38,12 @@ def test_quantize_keypress_boundary_at_exactly_half():
 
 
 def _keys(seed=0):
+    # _action_metrics decodes p_key/g_key as 80-dim encoded latents (#74), so build raw
+    # 8-dim keypress and run it through the real encoder rather than faking latent-shaped noise.
     g = torch.Generator().manual_seed(seed)
-    p_key = torch.rand(1, 4, 8, generator=g)
-    g_key = (torch.rand(1, 4, 8, generator=g) > 0.5).float()
-    return p_key, g_key
+    p_raw = torch.rand(1, 4, 8, generator=g)
+    g_raw = (torch.rand(1, 4, 8, generator=g) > 0.5).float()
+    return debug_actions.encode_keypress_live(p_raw), debug_actions.encode_keypress_live(g_raw)
 
 
 def test_action_metrics_dispatches_to_quantize_keypress_when_enabled():

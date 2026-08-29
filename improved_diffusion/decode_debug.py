@@ -127,12 +127,16 @@ def _draw_mouse_clicks(bar, pressed_clicks, frame_w):
 
 
 def _draw_mouse_arrow(content, dx, dy):
+    # An untrained/early action-generating model can output symlog values large enough
+    # that unsymlog's expm1 overflows to +-inf (or nan); sanitize before the int() casts
+    # below, or cv2 never gets drawn -- OverflowError: cannot convert float infinity to integer.
+    dx, dy = np.nan_to_num([dx, dy], nan=0.0, posinf=1e6, neginf=-1e6)
     if dx == 0 and dy == 0:
         return
     c_h, c_w = content.shape[:2]
     cx, cy = c_w // 2, c_h // 2
-    dx_scaled = int(dx * (c_w / 1920) * 2)
-    dy_scaled = int(dy * (c_h / 1080) * 2)
+    dx_scaled = int(np.clip(dx * (c_w / 1920) * 2, -c_w, c_w))
+    dy_scaled = int(np.clip(dy * (c_h / 1080) * 2, -c_h, c_h))
     nx = int(np.clip(cx + dx_scaled, 0, c_w - 1))
     ny = int(np.clip(cy + dy_scaled, 0, c_h - 1))
     cv2.arrowedLine(content, (cx, cy), (nx, ny),

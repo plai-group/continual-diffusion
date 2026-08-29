@@ -198,7 +198,7 @@ def vdt_model_and_diffusion_defaults():
         action_token_cond=False,
         generate_mouse=False,
         mouse_token_cond=False,
-        keypress_loss_weight=1.0,
+        keypress_loss_weight=1.0 * 8 / 80,  # holds weight*dim_ratio parity across #74's action_dim 8->80 change
         mouse_loss_weight=1.0,
         action_quantization="none",  # "none" | "codebook"; see plaicraft-debug#77
     )
@@ -229,7 +229,7 @@ def create_vdt_model_and_diffusion(
     action_token_cond=False,
     generate_mouse=False,
     mouse_token_cond=False,
-    keypress_loss_weight=1.0,
+    keypress_loss_weight=1.0 * 8 / 80,  # see vdt_model_and_diffusion_defaults for why
     mouse_loss_weight=1.0,
     action_quantization="none",
 ):

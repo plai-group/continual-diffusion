@@ -13,7 +13,7 @@ import math
 
 import torch
 
-from improved_diffusion.script_util import create_vdt_model_and_diffusion
+from improved_diffusion.script_util import create_vdt_model_and_diffusion, vdt_model_and_diffusion_defaults
 
 B, T, C, H, W = 2, 8, 3, 32, 32
 
@@ -142,3 +142,11 @@ def test_mouse_loss_weight_is_independent_of_keypress_weight():
     ratio_m = terms_high["mouse_dim_ratio"]
     expected_high = terms_high["loss_video"] + terms_high["action_dim_ratio"] * terms_high["loss_action"] + 5.0 * ratio_m * terms_high["loss_mouse"]
     assert torch.allclose(terms_high["loss"], expected_high, atol=1e-5)
+
+
+def test_keypress_loss_weight_default_holds_parity_across_the_74_dim_change():
+    # dim_ratio scales linearly with action_dim, so weight*action_dim is the invariant
+    # #74's encoder change (8-dim raw -> 80-dim latent) must hold constant.
+    old_action_dim, old_weight = 8, 1.0
+    new_weight = vdt_model_and_diffusion_defaults()["keypress_loss_weight"]
+    assert math.isclose(new_weight * 80, old_weight * old_action_dim, rel_tol=1e-9)

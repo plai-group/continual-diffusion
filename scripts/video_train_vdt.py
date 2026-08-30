@@ -35,9 +35,11 @@ def init_wandb(config, id):
     wandb_dir = os.environ.get("MY_WANDB_DIR", "none")
     if wandb_dir == "none":
         wandb_dir = None
+    # Without resume=, wandb restarts the history file-stream at row 0 and the backend drops every colliding row, so a resumed run logs nothing.
     wandb.init(entity=os.environ['WANDB_ENTITY'],
                project=os.environ['WANDB_PROJECT'],
-               config=config, dir=wandb_dir, id=id)
+               config=config, dir=wandb_dir, id=id,
+               resume="allow" if id else None)
     print(f"Wandb run id: {wandb.run.id}")
     num_nodes = 1
     if "SLURM_JOB_NODELIST" in os.environ:
@@ -115,6 +117,18 @@ def main():
         frame_range=(0, args.upper_frame_range),
     )
 
+    # Issue-58: fixed prompt set from the plaicraft-debug validation recording.
+    debug_validation = None
+    if args.debug_validation_db:
+        from improved_diffusion.debug_validation import DebugValidationSet
+        valset = DebugValidationSet(
+            args.debug_validation_db, args.debug_validation_root,
+            T=args.T, n_observed=args.T // 2,
+        )
+        out_dir = args.debug_validation_out or os.path.join("results", "debug_validation")
+        print(f"debug validation: {len(valset.rows)} rows -> {out_dir}")
+        debug_validation = (valset, out_dir, args.debug_validation_per_task)
+
     print("training...")
     TrainLoop(
         model=model,
@@ -141,6 +155,7 @@ def main():
         masking_mode=args.masking_mode,
         clip_grad=args.clip_grad,
         optimizer=args.optimizer,
+        debug_validation=debug_validation,
         args=args,
     ).run_loop()
 
@@ -180,6 +195,15 @@ def create_argparser():
         optimizer="adam",
         data_seed=0,
         upper_frame_range=None,
+        # Issue-58 plaicraft-debug validation set (empty db path disables it).
+        debug_validation_db="",
+        debug_validation_root="",
+        debug_validation_out="",
+        debug_validation_per_task=False,
+        cfg_scale=1.0,  # sampling-time only; not a model kwarg. 1.0 = no guidance.
+        generate_actions=False,
+        # Warm start from a different architecture: step counter stays 0, optimizer/EMA stay fresh (--resume_checkpoint loads strict and reads the step from the filename).
+        init_from_checkpoint="",
     )
     defaults.update(model_and_diffusion_defaults(model_type='vdt'))
     parser = argparse.ArgumentParser()

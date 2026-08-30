@@ -191,6 +191,16 @@ def vdt_model_and_diffusion_defaults():
         rescale_learned_sigmas=True,
         use_checkpoint=False,
         use_edm_scaling=False,
+        action_dim=0,
+        mouse_dim=0,
+        action_dropout_prob=0.0,
+        generate_actions=False,
+        action_token_cond=False,
+        generate_mouse=False,
+        mouse_token_cond=False,
+        keypress_loss_weight=1.0,
+        mouse_loss_weight=1.0,
+        action_quantization="none",  # "none" | "codebook"; see plaicraft-debug#77
     )
 
 
@@ -212,6 +222,16 @@ def create_vdt_model_and_diffusion(
     rescale_learned_sigmas,
     use_checkpoint,
     use_edm_scaling,
+    action_dim=0,
+    mouse_dim=0,
+    action_dropout_prob=0.0,
+    generate_actions=False,
+    action_token_cond=False,
+    generate_mouse=False,
+    mouse_token_cond=False,
+    keypress_loss_weight=1.0,
+    mouse_loss_weight=1.0,
+    action_quantization="none",
 ):
     diffusion = create_gaussian_diffusion(
         steps=diffusion_steps,
@@ -225,6 +245,9 @@ def create_vdt_model_and_diffusion(
         timestep_respacing=timestep_respacing,
         diffusion_space_kwargs=diffusion_space_kwargs,
     )
+    diffusion.keypress_loss_weight = keypress_loss_weight
+    diffusion.mouse_loss_weight = mouse_loss_weight
+    diffusion.action_quantization = action_quantization
     model = create_vdt_model(
         model_name=model_name,
         input_size=input_size,
@@ -232,6 +255,13 @@ def create_vdt_model_and_diffusion(
         in_channels=in_channels,
         num_frames=num_frames,
         learn_sigma=learn_sigma,
+        action_dim=action_dim,
+        mouse_dim=mouse_dim,
+        action_dropout_prob=action_dropout_prob,
+        generate_actions=generate_actions,
+        action_token_cond=action_token_cond,
+        generate_mouse=generate_mouse,
+        mouse_token_cond=mouse_token_cond,
     )
     return model, diffusion
 

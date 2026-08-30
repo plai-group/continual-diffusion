@@ -9,7 +9,8 @@ datasets/car
 datasets/drive*
 datasets/egolife*
 datasets/kcam_selected
-
+logs*
+run-scripts/
 sample_slurm_scripts
 wandb
 checkpoints
@@ -183,3 +184,6 @@ cython_debug/
 #  option (not recommended) you can uncomment the following to ignore the entire idea folder.
 #.idea/
 
+
+# per-issue run scripts (personal, local-path)
+run-scripts/

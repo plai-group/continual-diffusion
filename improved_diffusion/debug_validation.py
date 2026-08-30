@@ -565,7 +565,11 @@ def run_debug_validation(model, diffusion, valset, device, out_dir,
                     intervene_on = 1.0 - obs_mask_j.reshape(
                         obs_mask_j.shape[0], obs_mask_j.shape[1], 1)
                     # keypress_chunk is the 80-dim encoded latent; invert/zero need the raw 8-dim semantics, then re-encode for sampling.
-                    key_true_raw_j = debug_actions.decode_keypress_latent(key_true_j)
+                    # decode_keypress_latent's output is the decoder's unbounded logit-scale reconstruction
+                    # (not 0/1) -- encode_keypress_live's frozen encoder was trained on clean 0.0/1.0 bits, so
+                    # feeding it un-thresholded logits (e.g. swapping a ~+10 into another dim) is out of
+                    # distribution and corrupts the re-encoded latent. Threshold back to 0/1 before swap/zero.
+                    key_true_raw_j = (debug_actions.decode_keypress_latent(key_true_j) > 0.5).float()
                     key_swap_raw_j, mouse_swap_j = _swap_actions(key_true_raw_j, mouse_true_j, intervene_on)
                     key_zero_raw_j, mouse_zero_j = _zero_actions(key_true_raw_j, mouse_true_j, intervene_on)
                     key_swap_j = debug_actions.encode_keypress_live(key_swap_raw_j)

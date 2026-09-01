@@ -1,5 +1,6 @@
 # Per-frame action arrays for plaicraft-debug sessions, cached to <session_dir>/{actions_keypress,encoded_keypress,actions_mouse}.npy.
 import os
+import pickle
 import sqlite3
 from pathlib import Path
 
@@ -231,20 +232,49 @@ def load_or_build_raw(session_dir):
     return keypress, mouse
 
 
-def load_or_build(session_dir):
-    """The offline-encoded (n_frames, 80) keypress + (n_frames, 2) mouse arrays training reads directly.
+def _read_encoded_from_db(session_dir, n_frames):
+    """Read the (n_frames, 80) encoded keypress array plaicraft-debug's generate_sessions.py
+    already wrote into the session's key_press_encodings table, instead of re-deriving it.
 
-    Cached to <session_dir>/encoded_keypress.npy (built from the raw 100Hz cache via the
-    frozen encoder) -- no live encoder call is needed on this path.
+    Table row i is the encoding of window [i, i+1) (same pre-shift convention as
+    build_action_array's internal K); apply the same causal shift here so row i of the
+    returned array holds the action from window [i-1, i) -- the action that CAUSED frame i.
+    """
+    session_dir = Path(session_dir)
+    db_path = session_dir / f"{session_dir.name}.db"
+    con = sqlite3.connect(str(db_path))
+    cur = con.cursor()
+    cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='key_press_encodings'")
+    if cur.fetchone() is None:
+        con.close()
+        raise RuntimeError(f"{db_path} has no key_press_encodings table -- session predates plaicraft-debug#74's encoder pass")
+    cur.execute("SELECT encoding FROM key_press_encodings ORDER BY start_timestamp")
+    rows = cur.fetchall()
+    con.close()
+    if len(rows) != n_frames:
+        raise RuntimeError(f"key_press_encodings has {len(rows)} rows, expected {n_frames} frames, in {db_path}")
+
+    table = np.stack([pickle.loads(blob).reshape(ENCODED_KEYPRESS_DIM) for (blob,) in rows]).astype(np.float32)
+    encoded = np.zeros_like(table)
+    encoded[1:] = table[:-1]
+    return encoded
+
+
+def load_or_build(session_dir):
+    """The encoded (n_frames, 80) keypress + (n_frames, 2) mouse arrays training reads directly.
+
+    Cached to <session_dir>/encoded_keypress.npy, sourced from the session's own
+    key_press_encodings table (already run through the frozen encoder at corpus-generation
+    time) -- no live encoder call is needed on this path.
     """
     session_dir = Path(session_dir)
     n_frames = _n_frames_from_hdf5(session_dir)
-    keypress_100hz, mouse = _ensure_raw_cache(session_dir, n_frames)
+    _, mouse = _ensure_raw_cache(session_dir, n_frames)
 
     encoded_path = session_dir / "encoded_keypress.npy"
     encoded = _load_cached(encoded_path, n_frames, ENCODED_KEYPRESS_DIM)
     if encoded is None:
-        encoded = _encode_offline(np.asarray(keypress_100hz))
+        encoded = _read_encoded_from_db(session_dir, n_frames)
         _atomic_save(encoded_path, encoded)
         encoded = np.load(encoded_path, mmap_mode="r")
 

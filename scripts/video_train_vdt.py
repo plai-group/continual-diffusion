@@ -98,6 +98,10 @@ def main():
         f"keypress_mode={args.keypress_mode!r} expects action_dim={expected_action_dim} "
         f"(or 0 to disable keypress tokens), got action_dim={args.action_dim}"
     )
+    # weight*action_dim = KEYPRESS_DIM is the invariant (see script_util.py); derive it from
+    # whichever mode is actually running instead of requiring a manual override for raw mode.
+    if "--keypress_loss_weight" not in sys.argv:
+        args.keypress_loss_weight = KEYPRESS_DIM / expected_action_dim
 
     dist_util.setup_dist()
     resume = bool(args.resume_id)

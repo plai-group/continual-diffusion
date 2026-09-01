@@ -198,7 +198,7 @@ def vdt_model_and_diffusion_defaults():
         action_token_cond=False,
         generate_mouse=False,
         mouse_token_cond=False,
-        keypress_loss_weight=1.0 * 8 / 80,  # holds weight*dim_ratio parity across #74's action_dim 8->80 change; raw keypress_mode (action_dim=8) wants 1.0 instead
+        keypress_loss_weight=1.0 * 8 / 80,  # weight*action_dim=8 is the invariant; video_train_vdt.py derives this from keypress_mode, this is just the encoded-mode (action_dim=80) value for direct API callers
         mouse_loss_weight=1.0,
         action_quantization="none",  # "none" | "codebook"; see plaicraft-debug#77
     )

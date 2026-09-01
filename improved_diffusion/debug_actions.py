@@ -8,18 +8,22 @@ import numpy as np
 import torch
 
 from improved_diffusion.decode_debug import FRAME_DURATION_MS
+from improved_diffusion.keypress_autoencoder.constants import id_to_index
 from improved_diffusion.keypress_autoencoder.model import KeyPressAutoencoder
 
 KEYPRESS_DIM = 8
 MOUSE_DIM = 2
 SUBFRAME_HZ = 10  # PLAICraft encoder's native 100ms-window / 10ms-bin resolution
-RAW_INPUT_DIM = 79  # encoder's trained input width; our 8 keys are zero-padded up to this
+RAW_INPUT_DIM = 79  # encoder's trained input width; our 8 keys occupy fixed positions within this
 ENCODED_KEYPRESS_DIM = 80  # flattened 16 x 5 encoder output
 
 _CHECKPOINT_PATH = Path(__file__).parent / "keypress_autoencoder" / "keyencoder_16_5_best_checkpoint.pt"
 
 # Fixed key order for dims 0-5: [w, a, s, d, space, shift]
 _KEY_IDS = ["87", "65", "83", "68", "32", "340"]
+
+# Real encoder-input channel for each of the 8 compact dims [w,a,s,d,space,shift,left,right].
+_RAW_POSITIONS = [id_to_index[k] for k in _KEY_IDS] + [id_to_index["left"], id_to_index["right"]]
 
 _keypress_ae = None
 
@@ -38,11 +42,16 @@ def _get_keypress_autoencoder(device):
 
 
 def _encode_windows(windows, device):
-    """(N, 10, 8) raw keypress windows -> (N, 80) encoded latents, via the frozen encoder."""
+    """(N, 10, 8) raw keypress windows -> (N, 80) encoded latents, via the frozen encoder.
+
+    Scatters the compact 8 dims into their real trained channel positions (_RAW_POSITIONS)
+    within the encoder's 79-wide input; all other channels stay zero (never pressed here).
+    """
     ae = _get_keypress_autoencoder(device)
-    x = torch.nn.functional.pad(windows, (0, RAW_INPUT_DIM - KEYPRESS_DIM)).transpose(1, 2)
+    x = torch.zeros(*windows.shape[:-1], RAW_INPUT_DIM, dtype=windows.dtype, device=windows.device)
+    x[..., _RAW_POSITIONS] = windows
     with torch.no_grad():
-        z = ae.encoder(x)  # (N, 16, 5)
+        z = ae.encoder(x.transpose(1, 2))  # (N, 16, 5)
     return z.reshape(z.shape[0], ENCODED_KEYPRESS_DIM)
 
 
@@ -67,13 +76,14 @@ def decode_keypress_latent(latent):
     real pressed/not-pressed reconstructions separate cleanly (e.g. ~+10 vs ~-15), so 0.5 still works.
     Downsamples the decoder's 10 reconstructed sub-frame bins back to one row per frame by
     averaging them (the encoder input was a constant tile, so the bins should agree).
+    Gathers the 8 compact dims back from their real trained channel positions (_RAW_POSITIONS).
     """
     orig_shape = latent.shape[:-1]
     ae = _get_keypress_autoencoder(latent.device)
     z = latent.reshape(-1, 16, 5).float()
     with torch.no_grad():
         x_recon = ae.decoder(z)  # (N, 79, 10)
-    raw = x_recon[:, :KEYPRESS_DIM, :].mean(dim=2)
+    raw = x_recon[:, _RAW_POSITIONS, :].mean(dim=2)
     return raw.reshape(*orig_shape, KEYPRESS_DIM)
 
 

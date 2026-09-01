@@ -8,6 +8,7 @@ import torch
 from torch.utils.data import Dataset
 
 from improved_diffusion.debug_actions import load_or_build as load_or_build_actions
+from improved_diffusion.debug_actions import load_or_build_raw as load_or_build_raw_actions
 
 
 class ContinuousDebugDataset(Dataset):
@@ -26,11 +27,13 @@ class ContinuousDebugDataset(Dataset):
 
     N_TEST_SESSIONS = 20
 
-    def __init__(self, dataset_path, window_length=20, frame_range=(0, None)):
+    def __init__(self, dataset_path, window_length=20, frame_range=(0, None), keypress_mode="encoded"):
+        assert keypress_mode in ("encoded", "raw"), f"keypress_mode must be 'encoded' or 'raw', got {keypress_mode!r}"
         self.dataset_path = Path(dataset_path)
         self.window_length = self.T = window_length
         self.is_test = False
         self.original_frame_range = frame_range
+        self.keypress_mode = keypress_mode
 
         self._h5_handles = {}
         self._keypress_arrays = {}
@@ -151,7 +154,8 @@ class ContinuousDebugDataset(Dataset):
             self._handle_pid = pid
         session_dir = str(session_dir)
         if session_dir not in self._keypress_arrays:
-            keypress, mouse = load_or_build_actions(session_dir)
+            loader = load_or_build_raw_actions if self.keypress_mode == "raw" else load_or_build_actions
+            keypress, mouse = loader(session_dir)
             self._keypress_arrays[session_dir] = keypress
             self._mouse_arrays[session_dir] = mouse
         return self._keypress_arrays[session_dir], self._mouse_arrays[session_dir]

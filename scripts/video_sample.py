@@ -213,7 +213,8 @@ def main_outer(args):
                              eval_dataset_config=args.eval_dataset_config,
                              spacing_kwargs=dict(n_data=args.num_sampled_videos),
                              frame_range=(args.lower_frame_range, args.upper_frame_range),
-                             custom_clip_path=args.custom_clip_path)
+                             custom_clip_path=args.custom_clip_path,
+                             keypress_mode=getattr(model_args, "keypress_mode", "encoded"))
     dataset = get_eval_dataset(**eval_dataset_args)
 
     (args.eval_dir / samples_prefix).mkdir(parents=True, exist_ok=True)

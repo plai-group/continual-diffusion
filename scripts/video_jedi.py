@@ -139,7 +139,8 @@ if __name__ == "__main__":
 
     # Load the dataset (to get observations from)
     eval_dataset_args = dict(dataset_name=model_args.dataset, T=T, train=eval_on_train, spacing_kwargs=dict(n_data=args.num_videos),
-                             eval_dataset_config=eval_dataset_config, frame_range=(lower_frame_range, upper_frame_range))
+                             eval_dataset_config=eval_dataset_config, frame_range=(lower_frame_range, upper_frame_range),
+                             keypress_mode=getattr(model_args, "keypress_mode", "encoded"))
     test_dataset_full = get_eval_dataset(**eval_dataset_args)
     sample_dataset = SampleDataset(samples_path=(Path(args.eval_dir) / "samples"), sample_idx=args.sample_idx, length=args.num_videos)
 

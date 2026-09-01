@@ -120,7 +120,8 @@ def main(args):
     # Load the dataset (to get observations from)
     eval_dataset_args = dict(dataset_name=model_args.dataset, T=args.T, train=args.eval_on_train,
                              eval_dataset_config=args.eval_dataset_config, spacing_kwargs=dict(n_data=args.num_sampled_videos),
-                             frame_range=(args.lower_frame_range, args.upper_frame_range))
+                             frame_range=(args.lower_frame_range, args.upper_frame_range),
+                             keypress_mode=getattr(model_args, "keypress_mode", "encoded"))
     dataset = get_eval_dataset(**eval_dataset_args)
     dataset = th.utils.data.Subset(dataset=dataset, indices=args.indices)
     dataloader = th.utils.data.DataLoader(dataset, batch_size=args.batch_size, shuffle=False, drop_last=False)

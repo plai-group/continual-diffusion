@@ -59,7 +59,8 @@ if __name__ == "__main__":
         eval_dataset_args = dict(dataset_name=model_args.dataset, T=T, spacing_kwargs=dict(n_data=args.num_sampled_videos),
                                  train=eval_on_train, eval_dataset_config=eval_dataset_config,
                                  frame_range=(parsed["lower_frame_range"], parsed["upper_frame_range"]),
-                                 custom_clip_path=args.custom_clip_path)
+                                 custom_clip_path=args.custom_clip_path,
+                                 keypress_mode=getattr(model_args, "keypress_mode", "encoded"))
         dataset = get_eval_dataset(**eval_dataset_args)
 
     out_dir = (Path(args.out_dir) if args.out_dir is not None else Path(args.eval_dir)) / videos_prefix

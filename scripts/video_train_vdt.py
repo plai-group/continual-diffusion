@@ -10,6 +10,7 @@ import torch
 import torch.distributed as dist
 
 from improved_diffusion import dist_util
+from improved_diffusion.debug_actions import ENCODED_KEYPRESS_DIM, KEYPRESS_DIM
 from improved_diffusion.video_datasets import load_data, default_T_dict, default_full_image_size_dict
 from improved_diffusion.resample import create_named_schedule_sampler
 from improved_diffusion.script_util import (
@@ -92,6 +93,12 @@ def main():
     }
     args.model_type = 'vdt'
 
+    expected_action_dim = {"encoded": ENCODED_KEYPRESS_DIM, "raw": KEYPRESS_DIM}[args.keypress_mode]
+    assert args.action_dim in (0, expected_action_dim), (
+        f"keypress_mode={args.keypress_mode!r} expects action_dim={expected_action_dim} "
+        f"(or 0 to disable keypress tokens), got action_dim={args.action_dim}"
+    )
+
     dist_util.setup_dist()
     resume = bool(args.resume_id)
     init_wandb(config=args, id=args.resume_id if resume else None)
@@ -115,6 +122,7 @@ def main():
         n_sequential=args.n_sample_stm,
         save_every=args.save_interval,
         frame_range=(0, args.upper_frame_range),
+        keypress_mode=args.keypress_mode,
     )
 
     # Issue-58: fixed prompt set from the plaicraft-debug validation recording.
@@ -208,6 +216,7 @@ def create_argparser():
     defaults.update(model_and_diffusion_defaults(model_type='vdt'))
     parser = argparse.ArgumentParser()
     add_dict_to_argparser(parser, defaults)
+    parser.add_argument("--keypress_mode", default="encoded", choices=["encoded", "raw"])
     return parser
 
 

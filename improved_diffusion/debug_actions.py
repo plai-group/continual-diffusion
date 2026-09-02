@@ -98,7 +98,7 @@ def keypress_cross_entropy(decoded, y_true):
     no matter the model, so including it would just dilute the mean by how press-dense the
     sample is. The (1-y)*log(1-q) term is dropped -- the head is MSE-trained against a mostly-
     zero target and biased toward zeros, the all-pressed case that term guards against is
-    unreachable, and key_jaccard already catches false presses. No epsilon/clamp: logsigmoid is
+    unreachable, and key_jaccard_distance already catches false presses. No epsilon/clamp: logsigmoid is
     exact and finite for any finite logit."""
     per_frame = -(y_true * F.logsigmoid(decoded)).sum(dim=-1)
     pressed = y_true.sum(dim=-1) > 0

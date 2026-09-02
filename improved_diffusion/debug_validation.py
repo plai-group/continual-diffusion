@@ -457,13 +457,16 @@ def _action_metrics(p_key, g_key, p_mouse, g_mouse, sl, quantize=False):
     Keypress and mouse are computed independently -- either side may be None
     (that modality wasn't generated) and simply contributes no keys.
 
-    Keys are pressed 2-33% of the time in this corpus, so a plain accuracy
-    would sit near 0.93 for a dead action head. key_jaccard drops the
-    true-negative majority (unheld keys, correctly predicted unheld) and
-    scores 1 - IoU over which keys were actually held; 0.0 when neither side
-    holds any key. mouse_mse's do-nothing baseline is ~3.4; *_trivial is
-    measured from the GT rows in this batch rather than hard-coded, so it
-    tracks whatever data the run actually saw.
+    Keys are pressed 2-33% of the time in this corpus, so the do-nothing
+    predictor already scores ~0.93 key_acc and its mouse_mse is ~3.4. Without
+    the *_trivial series a dead action head and a learning one look alike on
+    the dashboard. They are measured from the GT rows in this batch rather
+    than hard-coded, so they track whatever data the run actually saw.
+
+    key_jaccard_distance is key_acc's complement for a rare-positive label: it drops the
+    true-negative majority (unheld keys, correctly predicted unheld) that lets
+    key_acc float near 1.0 for a dead head, and instead scores 1 - IoU over
+    which keys were actually held; 0.0 when neither side holds any key.
     """
     out = {}
     if p_key is not None and g_key is not None:
@@ -474,7 +477,7 @@ def _action_metrics(p_key, g_key, p_mouse, g_mouse, sl, quantize=False):
         tp = int(((g_k == 1) & (p_k == 1)).sum().item())
         fp = int(((g_k == 0) & (p_k == 1)).sum().item())
         fn = int(((g_k == 1) & (p_k == 0)).sum().item())
-        out["key_jaccard"] = float(1 - tp / (tp + fp + fn)) if tp + fp + fn > 0 else 0.0
+        out["key_jaccard_distance"] = float(1 - tp / (tp + fp + fn)) if tp + fp + fn > 0 else 0.0
     if p_mouse is not None and g_mouse is not None:
         p_m, g_m = p_mouse[sl], g_mouse[sl]
         out["mouse_l1"] = float((p_m - g_m).abs().mean().item())
@@ -807,8 +810,8 @@ def run_debug_validation(model, diffusion, valset, device, out_dir,
             vals = [r[f"{scope}/{k}"] for r in per_row if f"{scope}/{k}" in r]
             if vals:
                 agg[f"{prefix}/{k}"] = float(np.mean(vals))
-    ACT_METRIC_KEYS = ("key_jaccard", "mouse_l1", "mouse_mse",
-                       "mouse_l1_trivial", "mouse_mse_trivial")
+    ACT_METRIC_KEYS = ("key_acc", "key_jaccard_distance", "mouse_l1", "mouse_mse",
+                       "key_acc_trivial", "mouse_l1_trivial", "mouse_mse_trivial")
     for scope, prefix in (("next", "val/action"), ("roll", "val/action_roll")):
         for k in ACT_METRIC_KEYS:
             vals = [r[f"{scope}/{k}"] for r in per_row if f"{scope}/{k}" in r]

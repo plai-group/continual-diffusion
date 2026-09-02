@@ -7,6 +7,7 @@ from pathlib import Path
 import h5py
 import numpy as np
 import torch
+import torch.nn.functional as F
 
 from improved_diffusion.decode_debug import FRAME_DURATION_MS
 from improved_diffusion.keypress_autoencoder.constants import id_to_index
@@ -86,6 +87,21 @@ def decode_keypress_latent(latent):
         x_recon = ae.decoder(z)  # (N, 79, 10)
     raw = x_recon[:, _RAW_POSITIONS, :].mean(dim=2)
     return raw.reshape(*orig_shape, KEYPRESS_DIM)
+
+
+def keypress_cross_entropy(decoded, y_true):
+    """Issue #76: Bernoulli CE of the raw decoder output (as logits) against the true multi-hot,
+    summed over the 8 key dims -> nats/frame. No epsilon/clamp: BCE-with-logits is finite for any
+    finite logit, unlike -log(sigmoid(decoded)) computed via an intermediate probability."""
+    return F.binary_cross_entropy_with_logits(decoded, y_true, reduction="none").sum(dim=-1)
+
+
+def keypress_ce_baserate(y_true):
+    """CE of the per-key base-rate predictor measured from y_true, mirroring _action_metrics'
+    *_trivial convention. Closed-form Bernoulli entropy per dim, summed; xlogy makes a dim that
+    is never (or always) pressed contribute exactly 0, with no arbitrary epsilon."""
+    p = y_true.reshape(-1, y_true.shape[-1]).mean(dim=0)
+    return -(torch.special.xlogy(p, p) + torch.special.xlogy(1 - p, 1 - p)).sum()
 
 
 def _encode_offline(raw_keypress_100hz, chunk=4096):

@@ -134,6 +134,79 @@ class DebugValidationSet:
         return keypress, mouse
 
 
+class DebugCorpusWindowSet:
+    """Issue #76: fixed sample of non-overlapping windows from the held-out corpus split.
+
+    Duck-typed to the surface run_debug_validation consumes (rows, T, n_observed, load_all,
+    load_all_actions, slug), but layout has no player_email level:
+    <root>/<session_id>/encoded_video_hdf5/<session_id>_encoded_video.hdf5.
+    Holdout rule (last N_TEST_SESSIONS sessions by sorted id) is ContinuousDebugDataset's,
+    imported rather than re-implemented.
+    """
+
+    def __init__(self, root, T=20, n_observed=10, n_windows=1000, seed=0):
+        self.root = Path(root)
+        self.T = T
+        self.n_observed = n_observed
+        self.rows = self._sample_rows(n_windows, seed)
+
+    def _held_out_sessions(self):
+        """The exact held-out hdf5 paths ContinuousDebugDataset.set_test() would use --
+        via its own _discover_sessions, not a re-derived glob/sort/split."""
+        from .debug_dataset import ContinuousDebugDataset
+        stub = ContinuousDebugDataset.__new__(ContinuousDebugDataset)
+        stub.dataset_path, stub.is_test = self.root, True
+        return stub._discover_sessions()
+
+    def _sample_rows(self, n_windows, seed):
+        import h5py
+
+        candidates = []
+        for hdf5_path in self._held_out_sessions():
+            session_dir = hdf5_path.parent.parent
+            with h5py.File(hdf5_path, "r") as f:
+                n_frames = f["frames"].shape[0]
+            n_win = n_frames // self.T  # non-overlapping: stride == T
+            candidates += [dict(session_id=session_dir.name, session_dir=session_dir,
+                                 window_start=w * self.T) for w in range(n_win)]
+        rng = np.random.RandomState(seed)
+        idx = np.sort(rng.choice(len(candidates), size=min(n_windows, len(candidates)), replace=False))
+        return [candidates[i] for i in idx]
+
+    def slug(self, row):
+        return f"{row['session_id']}_{row['window_start']:06d}"
+
+    def load_window(self, row):
+        import h5py
+
+        hdf5_path = row["session_dir"] / "encoded_video_hdf5" / f"{row['session_id']}_encoded_video.hdf5"
+        with h5py.File(hdf5_path, "r") as f:
+            frames = f["frames"][row["window_start"]: row["window_start"] + self.T]
+        return th.from_numpy(np.asarray(frames, dtype=np.float32))
+
+    def load_all(self):
+        return th.stack([self.load_window(r) for r in self.rows])
+
+    def load_action_window(self, row):
+        keypress, mouse = debug_actions.load_or_build(row["session_dir"])
+        ws, we = row["window_start"], row["window_start"] + self.T
+        return (th.from_numpy(np.asarray(keypress[ws:we], dtype=np.float32)),
+                th.from_numpy(np.asarray(mouse[ws:we], dtype=np.float32)))
+
+    def load_all_actions(self):
+        windows = [self.load_action_window(r) for r in self.rows]
+        return th.stack([k for k, _ in windows]), th.stack([m for _, m in windows])
+
+    def load_all_keypress_raw(self):
+        """(N, T, 8) ground-truth multi-hot keypress -- not a round trip through the encoder."""
+        out = []
+        for r in self.rows:
+            keypress, _ = debug_actions.load_or_build_raw(r["session_dir"])
+            ws, we = r["window_start"], r["window_start"] + self.T
+            out.append(th.from_numpy(np.asarray(keypress[ws:we], dtype=np.float32)))
+        return th.stack(out)
+
+
 def _to01(x):
     return ((x + 1.0) / 2.0).clamp(0.0, 1.0)
 

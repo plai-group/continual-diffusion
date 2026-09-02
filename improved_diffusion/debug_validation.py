@@ -462,6 +462,11 @@ def _action_metrics(p_key, g_key, p_mouse, g_mouse, sl, quantize=False):
     the *_trivial series a dead action head and a learning one look alike on
     the dashboard. They are measured from the GT rows in this batch rather
     than hard-coded, so they track whatever data the run actually saw.
+
+    key_jaccard is key_acc's complement for a rare-positive label: it drops the
+    true-negative majority (unheld keys, correctly predicted unheld) that lets
+    key_acc float near 1.0 for a dead head, and instead scores 1 - IoU over
+    which keys were actually held.
     """
     out = {}
     if p_key is not None and g_key is not None:
@@ -471,6 +476,10 @@ def _action_metrics(p_key, g_key, p_mouse, g_mouse, sl, quantize=False):
         p_k, g_k = quantize_fn(p_key[sl]), quantize_fn(g_key[sl])
         out["key_acc"] = float((p_k == g_k).float().mean().item())
         out["key_acc_trivial"] = float((g_k == 0).float().mean().item())
+        tp = int(((g_k == 1) & (p_k == 1)).sum().item())
+        fp = int(((g_k == 0) & (p_k == 1)).sum().item())
+        fn = int(((g_k == 1) & (p_k == 0)).sum().item())
+        out["key_jaccard"] = float(1 - tp / (tp + fp + fn)) if tp + fp + fn > 0 else 1.0
     if p_mouse is not None and g_mouse is not None:
         p_m, g_m = p_mouse[sl], g_mouse[sl]
         out["mouse_l1"] = float((p_m - g_m).abs().mean().item())
@@ -803,7 +812,7 @@ def run_debug_validation(model, diffusion, valset, device, out_dir,
             vals = [r[f"{scope}/{k}"] for r in per_row if f"{scope}/{k}" in r]
             if vals:
                 agg[f"{prefix}/{k}"] = float(np.mean(vals))
-    ACT_METRIC_KEYS = ("key_acc", "mouse_l1", "mouse_mse",
+    ACT_METRIC_KEYS = ("key_acc", "key_jaccard", "mouse_l1", "mouse_mse",
                        "key_acc_trivial", "mouse_l1_trivial", "mouse_mse_trivial")
     for scope, prefix in (("next", "val/action"), ("roll", "val/action_roll")):
         for k in ACT_METRIC_KEYS:

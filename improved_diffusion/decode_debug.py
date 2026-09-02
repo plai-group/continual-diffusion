@@ -28,9 +28,9 @@ DECODE_KEY_FONT_THICKNESS = 2
 DECODE_MOUSE_LINE_COLOR = (0, 255, 255)
 DECODE_MOUSE_LINE_THICKNESS = 3
 DECODE_MOUSE_ARROW_TIP_LEN = 0.2
-DECODE_VIDEO_FPS = 10
+DECODE_VIDEO_FPS = 12.5  # plaicraft-debug#80: the corpus's session.fps, not the old 10
 
-FRAME_DURATION_MS = 1000.0 / DECODE_VIDEO_FPS  # 100 ms per video frame
+FRAME_DURATION_MS = 1000.0 / DECODE_VIDEO_FPS  # 80 ms per video frame
 
 # GLFW key_id (as stored, stringified) -> label drawn on the key box.
 KEY_ID_TO_NAME = {

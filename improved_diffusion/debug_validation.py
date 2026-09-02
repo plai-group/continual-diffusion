@@ -10,7 +10,7 @@ The model is *not* action-conditioned.  The action-driven part of each task
 (the jump, the strafe) is information VDT was never shown, so per-task scores
 measure world reconstruction, not action following, and are not comparable to
 action-conditioned baselines.  Frame 10 -- the first generated frame, only
-100ms past the last observed one -- is the cleanest read, because 100ms of
+80ms past the last observed one -- is the cleanest read, because 80ms of
 unknown action moves the camera very little.
 """
 
@@ -36,8 +36,12 @@ from .decode_debug import (
     DECODE_VIDEO_FPS,
 )
 
-VIDEO_FPS = 10
-MS_PER_FRAME = 1000 // VIDEO_FPS
+VIDEO_FPS = 12.5  # plaicraft-debug#80: the corpus's session.fps
+MS_PER_FRAME = 1000.0 / VIDEO_FPS
+
+# 12.5Hz action grid (plaicraft-debug#80): a tick's raw action is broadcast across
+# its 8 sub-bins when encoding an intervention live through the km tokenizer.
+SUBBINS_PER_TICK = debug_actions.SUBBINS_PER_TICK
 
 # LPIPS runs a VGG backbone with five 2x downsamples; a 24x40 frame collapses to
 # nothing by the last stage. Upsample (nearest, to avoid inventing detail that
@@ -74,7 +78,7 @@ class DebugValidationSet:
             session_id = r["Session_ID"]
             session_dir = self.data_root / r["player_email"] / session_id
             r_start_ms = int(r["R_start (ms)"])
-            start_frame = r_start_ms // MS_PER_FRAME  # first generated frame
+            start_frame = int(r_start_ms // MS_PER_FRAME)  # first generated frame
 
             ctx_start = start_frame - self.n_observed
             if ctx_start < 0:
@@ -137,6 +141,22 @@ class DebugValidationSet:
         mouse = th.stack([m for _, m in windows])
         return keypress, mouse
 
+    def load_action_window_raw(self, row):
+        """((T, 8), (T, 2)) float32, ALWAYS the tick-resolution raw keypress/mouse --
+        independent of action_encoding. Overlays and interventions read this, never the
+        model's native conditioning tensor, so a km_fsq run's swap/zero test still
+        operates on real keys and pixels (plaicraft-debug#80)."""
+        keypress, mouse = debug_actions.load_or_build_raw(row["session_dir"])
+        ws, we = row["window_start"], row["window_start"] + self.T
+        return (th.from_numpy(np.asarray(keypress[ws:we], dtype=np.float32)),
+                th.from_numpy(np.asarray(mouse[ws:we], dtype=np.float32)))
+
+    def load_all_actions_raw(self):
+        windows = [self.load_action_window_raw(r) for r in self.rows]
+        keypress = th.stack([k for k, _ in windows])
+        mouse = th.stack([m for _, m in windows])
+        return keypress, mouse
+
 
 def _to01(x):
     return ((x + 1.0) / 2.0).clamp(0.0, 1.0)
@@ -192,6 +212,66 @@ def _get_metrics(device):
     return _METRICS
 
 
+_KM_TOKENIZER = None
+
+
+def _get_km_tokenizer(device, checkpoint=None):
+    """Lazily load the frozen km tokenizer once, cached like _get_metrics -- validation is
+    the only place this module needs it, for decoding a km_fsq run's generated codes and
+    for encoding a swap/zero intervention live (plaicraft-debug#80)."""
+    global _KM_TOKENIZER
+    if _KM_TOKENIZER is None:
+        from .km_tokenizer.model import DEFAULT_CHECKPOINT, load_tokenizer
+
+        _KM_TOKENIZER = load_tokenizer(checkpoint_path=checkpoint or DEFAULT_CHECKPOINT, device=device)
+    return _KM_TOKENIZER
+
+
+def _symlog(v):
+    """Metric-time-only compression so mouse_l1/mouse_mse stay on their historical scale
+    even though the underlying targets are raw pixels for both raw and km_fsq (#80's B2)."""
+    return th.sign(v) * th.log1p(th.abs(v))
+
+
+def _decode_km_actions(tokenizer, codes):
+    """(B, T, 36) quantized km codes -> ((B, T, 8) keys bool, (B, T, 2) mouse raw pixels).
+    keys: sigmoid(key_logits) at _RAW_POSITIONS, mean over the tick's 8 sub-bins, thresholded.
+    mouse: mouse_pred summed over the tick's 8 sub-bins."""
+    from .km_tokenizer.keypress_scatter import _RAW_POSITIONS
+
+    B, T, _ = codes.shape
+    codes = codes.to(dtype=tokenizer.frame_pos.dtype)  # heun_sample's noise math can drift to float64
+    key_logits, _mouse_logits, mouse_pred = tokenizer.decode_codes(
+        codes.reshape(B, T, tokenizer.config.num_tokens, tokenizer.config.fsq_dim)
+    )
+    keys = (th.sigmoid(key_logits[..., _RAW_POSITIONS]).mean(dim=2) > 0.5).float()  # (B, T, 8)
+    mouse = mouse_pred.sum(dim=2)  # (B, T, 2), raw pixels
+    return keys, mouse
+
+
+def _encode_km_actions(tokenizer, keys_raw, mouse_raw):
+    """(B, T, 8) keys + (B, T, 2) mouse, tick-resolution raw -> (B, T, 36) km codes.
+
+    Broadcasts each tick's single action across its 8 sub-bins: keys repeat (matching how
+    debug's own tick-aligned intervals already look after 10ms binning, see debug_actions),
+    mouse splits evenly so the sub-bins sum back to the tick's pixel total. This is the ONLY
+    place an intervention touches the tokenizer -- it runs on raw arrays, never on a decoded
+    round trip (see the module-level note on why #74 decode-then-re-encode was a bug)."""
+    from .km_tokenizer.keypress_scatter import scatter_keypress
+
+    B, T, _ = keys_raw.shape
+    n = SUBBINS_PER_TICK
+    dtype = tokenizer.frame_pos.dtype
+    keys_raw, mouse_raw = keys_raw.to(dtype=dtype), mouse_raw.to(dtype=dtype)
+    keys_sub = keys_raw.unsqueeze(2).expand(B, T, n, 8).reshape(B, T * n, 8)
+    mouse_sub = (mouse_raw / n).unsqueeze(2).expand(B, T, n, 2).reshape(B, T * n, 2)
+    key_press = scatter_keypress(keys_sub)
+    with th.no_grad():
+        prequantized, _frame_mask, _block_mask = tokenizer._encode_prequantized(key_press, mouse_sub)
+        _token_ids, codes = tokenizer._quantize(prequantized)
+    return codes.reshape(B, T, debug_actions.KM_CODE_DIM)
+
+
 class _CFGWrapper(nn.Module):
     """Wraps an action-conditioned VDT model to sample with classifier-free
     guidance: runs the model twice (conditional + null-action unconditional
@@ -215,6 +295,13 @@ class _CFGWrapper(nn.Module):
         return eps_uncond + self.w * (eps_cond - eps_uncond), None
 
 
+# _invert_actions/_swap_actions/_zero_actions always operate on the RAW 8+2 tick-resolution
+# arrays (DebugValidationSet.load_all_actions_raw), never on a km_fsq run's native 36-dim
+# codes and never on a decode_codes() round trip. Issue-74's keypress autoencoder decoded
+# latents, intervened, then re-encoded -- feeding the encoder out-of-distribution logits,
+# which made shift/space swaps silently vanish (fixed in 6a38b88). Keeping the raw arrays
+# around and only encoding LIVE, after intervening (see _encode_km_actions), avoids that
+# failure mode structurally rather than by discipline.
 def _invert_actions(keypress, mouse):
     """The OPPOSITE action on every axis.
 
@@ -265,7 +352,8 @@ _ACTION_CLICK_NAMES = ["left", "right"]
 
 
 def _action_vec_to_bar(key_vec, mouse_vec):
-    """One 8-d keypress vector + one 2-d mouse vector -> the dict decode_debug._overlay_frame draws.
+    """One 8-d keypress vector + one 2-d mouse vector (raw pixels, plaicraft-debug#80 --
+    NOT symlog) -> the dict decode_debug._overlay_frame draws.
 
     Lets each row of the swap overlay show the actions it was ACTUALLY generated
     with. Reading the bar from the session DB instead would paint the true
@@ -274,12 +362,11 @@ def _action_vec_to_bar(key_vec, mouse_vec):
     """
     key_vec = np.asarray(key_vec, dtype=np.float32)
     mouse_vec = np.asarray(mouse_vec, dtype=np.float32)
-    unsymlog = lambda v: float(np.sign(v) * np.expm1(abs(v)))
     return {
         "keys": [n for i, n in enumerate(_ACTION_KEY_NAMES) if key_vec[i] > 0.5],
         "clicks": [n for i, n in enumerate(_ACTION_CLICK_NAMES) if key_vec[6 + i] > 0.5],
-        "mouseDX": unsymlog(mouse_vec[0]),
-        "mouseDY": unsymlog(mouse_vec[1]),
+        "mouseDX": float(mouse_vec[0]),
+        "mouseDY": float(mouse_vec[1]),
     }
 
 
@@ -343,7 +430,9 @@ def _action_metrics(p_key, g_key, p_mouse, g_mouse, sl, quantize="none"):
         out["key_acc"] = float((p_k == g_k).float().mean().item())
         out["key_acc_trivial"] = float((g_k == 0).float().mean().item())
     if p_mouse is not None and g_mouse is not None:
-        p_m, g_m = p_mouse[sl], g_mouse[sl]
+        # symlog at metric time: p_mouse/g_mouse are raw pixels (#80's B2), but the wandb
+        # metric stays on its historical, dynamic-range-compressed scale.
+        p_m, g_m = _symlog(p_mouse[sl]), _symlog(g_mouse[sl])
         out["mouse_l1"] = float((p_m - g_m).abs().mean().item())
         out["mouse_mse"] = float(((p_m - g_m) ** 2).mean().item())
         out["mouse_l1_trivial"] = float(g_m.abs().mean().item())
@@ -443,15 +532,20 @@ def run_debug_validation(model, diffusion, valset, device, out_dir,
                           or getattr(_m, "mouse_x_embedder", None) is not None
                           or generates_actions or generates_mouse)
     action_quantization = getattr(diffusion, "action_quantization", "none")
+    action_encoding = getattr(diffusion, "action_encoding", "raw")
+    is_km_fsq = action_encoding == "km_fsq"
+    km_tokenizer = _get_km_tokenizer(device, getattr(valset, "tokenizer_checkpoint", None)) if is_km_fsq else None
     sampling_model = _CFGWrapper(model, cfg_scale) if cfg_scale != 1.0 else model
 
     T, n_obs = valset.T, valset.n_observed
     x0_all = valset.load_all()  # (N, T, 3, H, W)
     n_rows = x0_all.shape[0]
     if actions and action_conditioned:
-        keypress_all, mouse_all = valset.load_all_actions()
+        keypress_all, mouse_all = valset.load_all_actions()  # native encoding: model conditioning
+        keypress_raw_all, mouse_raw_all = valset.load_all_actions_raw()  # always 8+2: overlays/interventions
     else:
         keypress_all, mouse_all = None, None
+        keypress_raw_all, mouse_raw_all = None, None
 
     per_row, agg, swap_rows = [], {}, []
     for lo in range(0, n_rows, chunk_size):
@@ -460,6 +554,8 @@ def run_debug_validation(model, diffusion, valset, device, out_dir,
         b = x0.shape[0]
         keypress_chunk = keypress_all[lo:hi].to(device) if keypress_all is not None else None
         mouse_chunk = mouse_all[lo:hi].to(device) if mouse_all is not None else None
+        keypress_raw_chunk = keypress_raw_all[lo:hi].to(device) if keypress_raw_all is not None else None
+        mouse_raw_chunk = mouse_raw_all[lo:hi].to(device) if mouse_raw_all is not None else None
 
         obs_mask = th.zeros(b, T, 1, 1, 1, device=device)
         obs_mask[:, :n_obs] = 1.0
@@ -510,6 +606,21 @@ def run_debug_validation(model, diffusion, valset, device, out_dir,
         # Keep the observed half exactly as given; only the generated half is model output.
         samples = samples * latent_mask + x0 * obs_mask
 
+        if is_km_fsq:
+            # The "Key design decision": VDT regresses continuous codes; snap to the nearest
+            # FSQ lattice point here, at inference, before decoding -- never during training.
+            act_for_decode = (debug_actions.quantize_km_fsq(samples_act)
+                              if action_quantization == "fsq" and samples_act is not None else samples_act)
+            p_key_chunk, p_mouse_chunk = (_decode_km_actions(km_tokenizer, act_for_decode)
+                                          if act_for_decode is not None else (None, None))
+            g_key_chunk, g_mouse_chunk = (_decode_km_actions(km_tokenizer, keypress_chunk)
+                                          if keypress_chunk is not None else (None, None))
+            metrics_quantize = "none"  # already hard-thresholded booleans; nothing left to snap
+        else:
+            p_key_chunk, g_key_chunk = samples_act, keypress_chunk
+            p_mouse_chunk, g_mouse_chunk = samples_mouse, mouse_chunk
+            metrics_quantize = action_quantization
+
         for j in range(b):
             row = valset.rows[lo + j]
             pred, gt = samples[j], x0[j]
@@ -522,17 +633,17 @@ def run_debug_validation(model, diffusion, valset, device, out_dir,
             rec = {"row": row["num"], "prompt": row["prompt"], "type": row["test_type"]}
             rec.update({f"next/{k}": v for k, v in m_next.items()})
             rec.update({f"roll/{k}": v for k, v in m_roll.items()})
-            p_key = samples_act[j].to(device) if samples_act is not None and keypress_chunk is not None else None
-            g_key = keypress_chunk[j].to(device) if p_key is not None else None
-            p_mouse = samples_mouse[j].to(device) if samples_mouse is not None and mouse_chunk is not None else None
-            g_mouse = mouse_chunk[j].to(device) if p_mouse is not None else None
+            p_key = p_key_chunk[j].to(device) if p_key_chunk is not None and g_key_chunk is not None else None
+            g_key = g_key_chunk[j].to(device) if p_key is not None else None
+            p_mouse = p_mouse_chunk[j].to(device) if p_mouse_chunk is not None and g_mouse_chunk is not None else None
+            g_mouse = g_mouse_chunk[j].to(device) if p_mouse is not None else None
             if p_key is not None or p_mouse is not None:
                 # Row n_obs is pinned GT (the action mask lags by one row), so the first genuinely generated action is row n_obs + 1.
                 first_gen = n_obs + 1
                 for scope, sl in (("next", slice(first_gen, first_gen + 1)),
                                   ("roll", slice(first_gen, None))):
                     rec.update({f"{scope}/{k}": v
-                                for k, v in _action_metrics(p_key, g_key, p_mouse, g_mouse, sl, action_quantization).items()})
+                                for k, v in _action_metrics(p_key, g_key, p_mouse, g_mouse, sl, metrics_quantize).items()})
             per_row.append(rec)
 
             slug = valset.slug(row)
@@ -546,9 +657,12 @@ def run_debug_validation(model, diffusion, valset, device, out_dir,
             if log_videos:
                 mp4 = out_dir / f"step{step}_{slug}.mp4"
                 try:
-                    # Top row keeps the recorded actions; this row shows what the model produced, falling back to recorded for any un-generated modality.
-                    pred_bar_key = samples_act[j] if samples_act is not None else keypress_chunk[j] if keypress_chunk is not None else None
-                    pred_bar_mouse = samples_mouse[j] if samples_mouse is not None else mouse_chunk[j] if mouse_chunk is not None else None
+                    # Top row keeps the recorded actions; this row shows what the model produced (always
+                    # 8+2/raw-pixels here, decoded already for km_fsq), falling back to the raw ground
+                    # truth for any un-generated modality -- never to the native 36-dim km codes, which
+                    # _action_bars cannot draw.
+                    pred_bar_key = p_key_chunk[j] if p_key_chunk is not None else keypress_raw_chunk[j] if keypress_raw_chunk is not None else None
+                    pred_bar_mouse = p_mouse_chunk[j] if p_mouse_chunk is not None else mouse_raw_chunk[j] if mouse_raw_chunk is not None else None
                     render_overlay(
                         gt_frames=gt.cpu().numpy(),
                         pred_frames=pred.cpu().numpy(),
@@ -567,10 +681,13 @@ def run_debug_validation(model, diffusion, valset, device, out_dir,
                     print(f"[debug_validation] overlay failed for row {row['num']}: {e!r}")
 
             # The swap test (acceptance criterion): true/swapped/zero actions on the same context.
-            if swap_test and action_conditioned and keypress_chunk is not None and mouse_chunk is not None:
+            # Always intervenes on the RAW 8+2 tick-resolution arrays -- see the note above
+            # _invert_actions -- and, for km_fsq, encodes the (possibly-intervened) result live
+            # through the tokenizer only when building each pass's model_kwargs.
+            if swap_test and action_conditioned and keypress_raw_chunk is not None and mouse_raw_chunk is not None:
                 try:
-                    key_true_j = keypress_chunk[j:j + 1]
-                    mouse_true_j = mouse_chunk[j:j + 1]
+                    key_true_j = keypress_raw_chunk[j:j + 1]
+                    mouse_true_j = mouse_raw_chunk[j:j + 1]
                     x0_j = x0[j:j + 1]
                     obs_mask_j = obs_mask[j:j + 1]
                     latent_mask_j = latent_mask[j:j + 1]
@@ -585,7 +702,12 @@ def run_debug_validation(model, diffusion, valset, device, out_dir,
                     # heun_sample's churn draws from the global RNG each step; reseed per pass too.
                     swap_seed = 20250813 + int(row["num"])
 
-                    def _sample_with_actions(key, mouse):
+                    def _sample_with_actions(key_raw, mouse_raw):
+                        if is_km_fsq:
+                            actions_in = _encode_km_actions(km_tokenizer, key_raw, mouse_raw)
+                            mouse_in = key_raw.new_zeros(key_raw.shape[0], key_raw.shape[1], 0)
+                        else:
+                            actions_in, mouse_in = key_raw, mouse_raw
                         with RNG(swap_seed):
                             s, _ = diffusion.heun_sample(
                                 sampling_model, x0_j.shape, noise=shared_noise,
@@ -594,11 +716,11 @@ def run_debug_validation(model, diffusion, valset, device, out_dir,
                                 model_kwargs={
                                     "frame_indices": None, "x0": x0_j,
                                     "obs_mask": obs_mask_j, "latent_mask": latent_mask_j,
-                                    "actions": key, "mouse": mouse,
+                                    "actions": actions_in, "mouse": mouse_in,
                                     # Pin the history only; future action tokens are denoised jointly with the video.
-                                    **({"actions0": key, "obs_action_mask": obs_act_mask_j}
+                                    **({"actions0": actions_in, "obs_action_mask": obs_act_mask_j}
                                        if generates_actions else {}),
-                                    **({"mouse0": mouse, "obs_mouse_mask": obs_act_mask_j}
+                                    **({"mouse0": mouse_in, "obs_mouse_mask": obs_act_mask_j}
                                        if generates_mouse else {}),
                                 },
                                 latent_mask=latent_mask_j.cpu(), return_decoded=False,
@@ -609,6 +731,10 @@ def run_debug_validation(model, diffusion, valset, device, out_dir,
                             key_out, mouse_out = _unpack_action_mouse_out(second, generates_actions, generates_mouse)
                         s = s.to(device)
                         video = (s * latent_mask_j + x0_j * obs_mask_j)[0]
+                        if is_km_fsq and key_out is not None:
+                            # Same snap-then-decode as the main pass, still batch=1 here.
+                            act_out = debug_actions.quantize_km_fsq(key_out) if action_quantization == "fsq" else key_out
+                            key_out, mouse_out = _decode_km_actions(km_tokenizer, act_out)
                         return (video, key_out[0] if key_out is not None else None,
                                 mouse_out[0] if mouse_out is not None else None)
 

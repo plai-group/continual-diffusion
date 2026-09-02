@@ -31,6 +31,29 @@ def quantize_keypress(x):
     return (x > 0.5).float()
 
 
+_FSQ_LEVELS = (8, 6, 5)
+
+
+def quantize_km_fsq(x):
+    """Closed-form nearest-lattice snap for a continuous (..., 36) km_fsq action prediction:
+    12 groups of 3 dims, each snapped independently onto the 8x6x5 FSQ grid (plaicraft-
+    debug#80). A direct scale+round+clamp -- exact, idempotent on lattice points, and cheap
+    (no search over the 240 per-group codes). Mirrors km_tokenizer.model.FSQ's own
+    codes_to_indices()/indices_to_codes() math exactly (skipping the tanh soft-bound FSQ.forward
+    uses for TRAINING-time gradient flow, which is not idempotent right at the lattice edges --
+    a snap has no gradient to protect, so the direct scale+round+clamp is the right one here)."""
+    if x.shape[-1] != KM_CODE_DIM:
+        raise ValueError(f"Expected last dim {KM_CODE_DIM}, got {x.shape[-1]}.")
+    orig_shape = x.shape
+    x = x.reshape(*orig_shape[:-1], KM_CODE_DIM // 3, 3)
+    levels = torch.tensor(_FSQ_LEVELS, dtype=x.dtype, device=x.device)
+    half_width = levels // 2
+    level_idx = (x * half_width + half_width).round()
+    level_idx = torch.minimum(level_idx.clamp(min=0), levels - 1)
+    codes = (level_idx - half_width) / half_width
+    return codes.reshape(orig_shape)
+
+
 def read_session_fps(session_dir):
     """The session table's fps column -- the DB's own record of its tick rate."""
     session_dir = Path(session_dir)

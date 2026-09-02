@@ -215,9 +215,13 @@ def run_action_ce_eval(model, diffusion, windowset, device, chunk_size=32):
     Two series from the SAME heun_sample call: the final Heun sample (``keys_sample``, one draw
     from the model's distribution) and ``pred_actstart`` from the first denoising iteration
     (``keys_mean``, an estimate of E[z0 | observed frames] while the action slot still carries no
-    signal). Both are decoded through the frozen keypress autoencoder and scored as summed
-    Bernoulli CE, alongside a per-key base-rate baseline computed from the same ground truth.
-    This is a trend within this eval set only -- no comparable absolute floor (plaicraft-debug#76).
+    signal). Both are decoded through the frozen keypress autoencoder and scored as positive-
+    dims-only CE (see keypress_cross_entropy), alongside a per-key base-rate baseline computed
+    from the same ground truth. Decoded outputs are collected across chunks and scored once
+    against the whole eval set -- keypress_cross_entropy's pressed-frame mean must be taken over
+    all scored windows together, not averaged chunk-by-chunk, since chunks can hold different
+    numbers of pressed frames. This is a trend within this eval set only -- no comparable
+    absolute floor (plaicraft-debug#76).
     """
     T, n_obs = windowset.T, windowset.n_observed
     x0_all = windowset.load_all()
@@ -231,13 +235,12 @@ def run_action_ce_eval(model, diffusion, windowset, device, chunk_size=32):
     y_true_all = y_true_all[:, sl]
 
     sched_sigma_max = float(diffusion.timestep2sigma(diffusion.num_timesteps - 1))
-    ce_sample_sum, ce_mean_sum, n_rows = 0.0, 0.0, 0
+    decoded_sample_chunks, decoded_mean_chunks = [], []
     for lo in range(0, n, chunk_size):
         hi = min(lo + chunk_size, n)
         x0 = x0_all[lo:hi].to(device)
         keypress = keypress_all[lo:hi].to(device)
         mouse = mouse_all[lo:hi].to(device)
-        y_true = y_true_all[lo:hi].to(device)
         b = x0.shape[0]
 
         obs_mask = th.zeros(b, T, 1, 1, 1, device=device)
@@ -258,16 +261,15 @@ def run_action_ce_eval(model, diffusion, windowset, device, chunk_size=32):
         )
         samples_video, (samples_act, _) = samples
 
-        decoded_sample = debug_actions.decode_keypress_latent(samples_act[:, sl].to(device))
-        decoded_mean = debug_actions.decode_keypress_latent(pred_actstart0[:, sl].to(device).float())
+        decoded_sample_chunks.append(debug_actions.decode_keypress_latent(samples_act[:, sl].to(device)).cpu())
+        decoded_mean_chunks.append(debug_actions.decode_keypress_latent(pred_actstart0[:, sl].to(device).float()).cpu())
 
-        ce_sample_sum += float(debug_actions.keypress_cross_entropy(decoded_sample, y_true).sum())
-        ce_mean_sum += float(debug_actions.keypress_cross_entropy(decoded_mean, y_true).sum())
-        n_rows += b * y_true.shape[1]
+    decoded_sample_all = th.cat(decoded_sample_chunks, dim=0)
+    decoded_mean_all = th.cat(decoded_mean_chunks, dim=0)
 
     out = {
-        "val/action_ce/keys_sample": ce_sample_sum / n_rows,
-        "val/action_ce/keys_mean": ce_mean_sum / n_rows,
+        "val/action_ce/keys_sample": float(debug_actions.keypress_cross_entropy(decoded_sample_all, y_true_all)),
+        "val/action_ce/keys_mean": float(debug_actions.keypress_cross_entropy(decoded_mean_all, y_true_all)),
         "val/action_ce/keys_baserate": float(debug_actions.keypress_ce_baserate(y_true_all)),
     }
     for k, v in out.items():

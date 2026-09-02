@@ -1,4 +1,5 @@
-"""issue #76 slice 2: keypress_cross_entropy / keypress_ce_baserate, hand-checkable nats."""
+"""issue #76 slice 2: keypress_cross_entropy / keypress_ce_baserate, positive-dims-only,
+pressed-frames-only, hand-checkable nats."""
 
 import math
 
@@ -7,55 +8,94 @@ import torch
 from improved_diffusion.debug_actions import keypress_cross_entropy, keypress_ce_baserate
 
 
-def test_matches_hand_computed_bce_for_moderate_logits():
-    # Cross-checks BCE-with-logits against the textbook -[y log p + (1-y) log(1-p)] form.
+def test_matches_hand_computed_logsigmoid_for_moderate_logits():
+    # Cross-checks logsigmoid against the textbook -log(sigmoid(x)) form, on held dims only.
     decoded = torch.tensor([[2.0, -1.5, 0.0, 3.0, -3.0, 0.5, -0.5, 1.0]])
     y = torch.tensor([[1.0, 0.0, 1.0, 0.0, 1.0, 1.0, 0.0, 0.0]])
     p = torch.sigmoid(decoded)
-    expected = -(y * torch.log(p) + (1 - y) * torch.log(1 - p)).sum(dim=-1)
+    expected = -(y * torch.log(p)).sum(dim=-1).mean()  # single (pressed) frame -> mean is a no-op
     assert torch.allclose(keypress_cross_entropy(decoded, y), expected, atol=1e-5)
 
 
-def test_all_zero_logits_give_eight_log_two():
+def test_single_key_hand_computed():
     decoded = torch.zeros(1, 8)
-    for y_val in (0.0, 1.0):
-        y = torch.full((1, 8), y_val)
-        assert torch.allclose(keypress_cross_entropy(decoded, y), torch.tensor([8 * math.log(2)]), atol=1e-5)
+    y = torch.zeros(1, 8)
+    y[0, 0] = 1.0
+    # logsigmoid(0) = -log(2), one held key -> CE = log(2).
+    assert torch.allclose(keypress_cross_entropy(decoded, y), torch.tensor(math.log(2)), atol=1e-6)
+
+
+def test_chorded_frame_sums_every_held_key():
+    # Two keys held in the same frame, at different logits -- CE must sum both terms, not
+    # average them, so a chorded frame costs everything it holds (provisioning for #77-style
+    # multi-key data even though this corpus never chords).
+    decoded = torch.zeros(1, 8)
+    decoded[0, 0] = 0.0
+    decoded[0, 1] = 1.0
+    y = torch.zeros(1, 8)
+    y[0, 0] = 1.0
+    y[0, 1] = 1.0
+    expected = -(math.log(torch.sigmoid(torch.tensor(0.0))) + math.log(torch.sigmoid(torch.tensor(1.0))))
+    assert torch.allclose(keypress_cross_entropy(decoded, y), torch.tensor(float(expected)), atol=1e-5)
+
+
+def test_all_zero_frame_excluded_not_zero_contribution():
+    # Frame 0 holds nothing -- a positive-only CE scores it a hard 0 regardless of the model, so
+    # it must be dropped from the mean entirely rather than diluting it with a 0 term.
+    decoded = torch.tensor([[5.0, -5.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],   # all-zero-y frame
+                            [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]])   # one held key, logit 0
+    y = torch.zeros(2, 8)
+    y[1, 0] = 1.0
+    ce = keypress_cross_entropy(decoded, y)
+    # If the zero frame wrongly contributed 0 to a mean over both frames, this would be half.
+    assert torch.allclose(ce, torch.tensor(math.log(2)), atol=1e-6)
 
 
 def test_finite_and_large_when_confidently_wrong():
-    decoded = torch.tensor([[50.0, -50.0] * 4])
-    y = torch.tensor([[1.0, 1.0] * 4])  # wrong on every "-50" dim, right on every "50" dim
+    decoded = torch.tensor([[-50.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]])
+    y = torch.zeros(1, 8)
+    y[0, 0] = 1.0  # confidently wrong on the only held key
     ce = keypress_cross_entropy(decoded, y)
-    assert torch.isfinite(ce).all()
-    assert ce.item() > 199  # 4 confidently-wrong dims contribute ~50 nats each
+    assert torch.isfinite(ce)
+    assert ce.item() > 49
 
 
 def test_near_zero_when_confidently_correct():
-    decoded = torch.full((1, 8), 50.0)
-    y = torch.ones(1, 8)
+    decoded = torch.zeros(1, 8)
+    decoded[0, 0] = 50.0
+    y = torch.zeros(1, 8)
+    y[0, 0] = 1.0
     assert keypress_cross_entropy(decoded, y).item() < 1e-10
 
 
-def test_baserate_matches_closed_form_entropy():
+def test_baserate_matches_closed_form():
     y = torch.tensor([
         [1.0, 0.0, 1.0, 0.0],
         [0.0, 1.0, 1.0, 0.0],
         [1.0, 1.0, 0.0, 1.0],
-    ])  # no dim is all-0 or all-1, so the plain log form has no singularity
-    p = y.mean(dim=0)
-    expected = -(p * torch.log(p) + (1 - p) * torch.log(1 - p)).sum()
+        [0.0, 0.0, 0.0, 0.0],  # all-zero frame, must be excluded from the mean
+    ])
+    q = y.mean(dim=0)
+    per_frame = -(y * torch.log(q)).sum(dim=-1)
+    pressed = y.sum(dim=-1) > 0
+    expected = per_frame[pressed].mean()
     assert torch.allclose(keypress_ce_baserate(y), expected, atol=1e-5)
 
 
-def test_baserate_degenerate_dims_contribute_zero():
-    y = torch.tensor([[0.0, 1.0], [0.0, 1.0], [0.0, 1.0]])  # col0 always 0, col1 always 1
-    assert keypress_ce_baserate(y).item() == 0.0
+def test_baserate_chorded_frame_sums_both_dims():
+    # Row 0 holds both keys -- its per-frame term must be the sum of both dims' surprise,
+    # not just one of them, matching keypress_cross_entropy's chorded-frame convention.
+    y = torch.tensor([[1.0, 1.0], [1.0, 0.0], [0.0, 1.0]])
+    q = y.mean(dim=0)  # [2/3, 2/3]
+    per_frame = -(y * torch.log(q)).sum(dim=-1)
+    pressed = y.sum(dim=-1) > 0
+    expected = per_frame[pressed].mean()
+    assert torch.allclose(keypress_ce_baserate(y), expected, atol=1e-6)
+    assert abs(float(per_frame[0]) - 2 * (-math.log(2 / 3))) < 1e-6
 
 
 def test_baserate_collapses_leading_dims():
-    # (N, T, 8) windows should pool over N*T when computing the per-key base rate.
     y = torch.zeros(5, 20, 8)
-    y[:, :, 0] = 1.0  # key 0 always held, others never
+    y[:, :, 0] = 1.0  # key 0 always held, always at base rate 1 -> zero surprise
     ce = keypress_ce_baserate(y)
-    assert ce.item() == 0.0
+    assert torch.allclose(ce, torch.tensor(0.0), atol=1e-6)

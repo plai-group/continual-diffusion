@@ -90,18 +90,29 @@ def decode_keypress_latent(latent):
 
 
 def keypress_cross_entropy(decoded, y_true):
-    """Issue #76: Bernoulli CE of the raw decoder output (as logits) against the true multi-hot,
-    summed over the 8 key dims -> nats/frame. No epsilon/clamp: BCE-with-logits is finite for any
-    finite logit, unlike -log(sigmoid(decoded)) computed via an intermediate probability."""
-    return F.binary_cross_entropy_with_logits(decoded, y_true, reduction="none").sum(dim=-1)
+    """Issue #76: positive-dims-only CE of the raw decoder output (as logits) against the true
+    multi-hot. Held keys within a frame are summed (-log of the joint probability of the held
+    set under the factorized head), so a chorded frame costs every key it holds -- written
+    multi-hot-general even though this corpus never chords, since the metric should provision
+    for it. The mean is over frames holding at least one key: an all-zero frame scores a hard 0
+    no matter the model, so including it would just dilute the mean by how press-dense the
+    sample is. The (1-y)*log(1-q) term is dropped -- the head is MSE-trained against a mostly-
+    zero target and biased toward zeros, the all-pressed case that term guards against is
+    unreachable, and key_acc already catches false presses. No epsilon/clamp: logsigmoid is
+    exact and finite for any finite logit."""
+    per_frame = -(y_true * F.logsigmoid(decoded)).sum(dim=-1)
+    pressed = y_true.sum(dim=-1) > 0
+    return per_frame[pressed].mean()
 
 
 def keypress_ce_baserate(y_true):
-    """CE of the per-key base-rate predictor measured from y_true, mirroring _action_metrics'
-    *_trivial convention. Closed-form Bernoulli entropy per dim, summed; xlogy makes a dim that
-    is never (or always) pressed contribute exactly 0, with no arbitrary epsilon."""
-    p = y_true.reshape(-1, y_true.shape[-1]).mean(dim=0)
-    return -(torch.special.xlogy(p, p) + torch.special.xlogy(1 - p, 1 - p)).sum()
+    """Same positive-only, pressed-frame-only CE as keypress_cross_entropy, but scored against
+    the per-key base rate q_d measured from y_true itself in place of a model's decoded logits.
+    xlogy makes a never-pressed key's 0*log(0) term exactly 0 rather than nan."""
+    q = y_true.reshape(-1, y_true.shape[-1]).mean(dim=0)
+    per_frame = -torch.special.xlogy(y_true, q).sum(dim=-1)
+    pressed = y_true.sum(dim=-1) > 0
+    return per_frame[pressed].mean()
 
 
 def _encode_offline(raw_keypress_100hz, chunk=4096):

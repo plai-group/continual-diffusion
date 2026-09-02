@@ -28,8 +28,10 @@ def _make_session(session_dir, n_frames, C, H, W):
     con.execute("CREATE TABLE keyboard (key_id TEXT, start_timestamp INTEGER, end_timestamp INTEGER)")
     con.execute("CREATE TABLE mouse_click (mouse_key_type TEXT, start_timestamp INTEGER, end_timestamp INTEGER)")
     con.execute("CREATE TABLE mouse_movement (timestamp INTEGER, mouseDX REAL, mouseDY REAL)")
-    # "w" (key_id 87) held during frame 3's window, so the ground truth isn't degenerate.
-    con.execute("INSERT INTO keyboard VALUES ('87', 300, 400)")
+    # "w" (key_id 87) held during window 5 (ms 500-600) -> after the causal shift this lands
+    # on raw frame 6, inside the scored range (n_observed+1 .. T-1 = 5..7), so the ground truth
+    # actually has a pressed frame to average keypress_ce_baserate/keypress_cross_entropy over.
+    con.execute("INSERT INTO keyboard VALUES ('87', 500, 600)")
     con.execute(
         "CREATE TABLE key_press_encodings "
         "(id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT, "

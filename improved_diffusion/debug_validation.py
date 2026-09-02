@@ -234,7 +234,8 @@ def run_action_ce_eval(model, diffusion, windowset, device, chunk_size=32):
             "frame_indices": None, "x0": x0,
             "obs_mask": obs_mask, "latent_mask": latent_mask,
             "actions": keypress, "actions0": keypress, "obs_action_mask": obs_act_mask,
-            "mouse": mouse,
+            # heun_sample resamples "mouse" every step; without mouse0 the pinned history is lost.
+            "mouse": mouse, "mouse0": mouse, "obs_mouse_mask": obs_act_mask,
         }
         (samples, pred_actstart0), _ = diffusion.heun_sample(
             model, x0.shape, sigma_max=sched_sigma_max, clip_denoised=True,

@@ -69,7 +69,27 @@ def test_run_action_ce_eval_end_to_end():
         _make_session(root / "sess0", T, C, H, W)
         windowset = DebugCorpusWindowSet(root, T=T, n_observed=n_observed, n_windows=10, seed=0)
 
-        out = run_action_ce_eval(model, diffusion, windowset, device="cpu", chunk_size=4)
+        # heun_sample overwrites model_kwargs["mouse"] with its own sample at every step, so the
+        # observed mouse history survives only via mouse0 -- capture the kwargs and prove it is set.
+        seen_kwargs = []
+        real_heun = diffusion.heun_sample
+
+        def _capture(*a, **kw):
+            seen_kwargs.append(kw["model_kwargs"])
+            return real_heun(*a, **kw)
+
+        diffusion.heun_sample = _capture
+        try:
+            out = run_action_ce_eval(model, diffusion, windowset, device="cpu", chunk_size=4)
+        finally:
+            diffusion.heun_sample = real_heun
+
+        assert seen_kwargs, "run_action_ce_eval never called heun_sample"
+        for kw in seen_kwargs:
+            assert "mouse0" in kw and "obs_mouse_mask" in kw, \
+                "observed mouse history is not pinned to ground truth"
+            assert torch.equal(kw["mouse0"], kw["mouse"])
+            assert torch.equal(kw["obs_mouse_mask"], kw["obs_action_mask"])
 
         # Baserate is measured from the same scored rows, independent of the model -- cross-check
         # by recomputing it directly from the windowset's ground truth.

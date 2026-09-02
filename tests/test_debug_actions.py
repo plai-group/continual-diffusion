@@ -169,6 +169,19 @@ def test_load_or_build_applies_causal_shift_to_db_encodings():
     assert np.allclose(encoded[2], encodings[1].reshape(-1))
 
 
+def test_encode_keypress_live_matches_plaicraft_debug_ground_truth():
+    # Issue #76 slice 0: cross-repo layout guard. Fixture rows are real plaicraft-debug
+    # key_press_encodings (plus one synthetic multi-key row, no real session in this corpus
+    # ever holds two keys at once) -- a wholly independent computation of the encoding, so a
+    # mirrored encode/decode channel-mapping bug (the pre-79a6919 F.pad-into-slots-0-7 bug)
+    # cannot cancel out the way a round-trip test would.
+    fixture = np.load(Path(__file__).parent / "fixtures" / "keypress_layout_ground_truth.npz")
+    raw = torch.from_numpy(fixture["raw"])
+    expected = torch.from_numpy(fixture["encoded"])
+    live = da.encode_keypress_live(raw)
+    assert torch.allclose(live, expected, atol=1e-4)
+
+
 def test_load_or_build_raises_when_table_missing():
     n_frames = 3
     with tempfile.TemporaryDirectory() as d:

@@ -48,12 +48,14 @@ LPIPS_UPSAMPLE = 4
 class DebugValidationSet:
     """The validation rows plus the frames each one needs."""
 
-    def __init__(self, db_path, data_root, T=20, n_observed=10):
+    def __init__(self, db_path, data_root, T=20, n_observed=10, action_encoding="raw", tokenizer_checkpoint=None):
         self.db_path = Path(db_path)
         self.data_root = Path(data_root)
         self.T = T
         self.n_observed = n_observed
         self.n_generated = T - n_observed
+        self.action_encoding = action_encoding
+        self.tokenizer_checkpoint = tokenizer_checkpoint
         self.rows = self._load_rows()
 
     def _load_rows(self):
@@ -117,7 +119,9 @@ class DebugValidationSet:
 
     def load_action_window(self, row):
         """((T, 8), (T, 2)) float32: same window as load_window, causally-shifted keypress/mouse."""
-        keypress, mouse = debug_actions.load_or_build(row["session_dir"])
+        keypress, mouse = debug_actions.load_or_build(
+            row["session_dir"], action_encoding=self.action_encoding, tokenizer_checkpoint=self.tokenizer_checkpoint,
+        )
         ws, we = row["window_start"], row["window_start"] + self.T
         if we > keypress.shape[0]:
             raise ValueError(

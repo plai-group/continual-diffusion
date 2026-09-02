@@ -113,7 +113,8 @@ def get_data_path(dataset_name):
 
 
 def load_data(dataset_name, batch_size, T=None, deterministic=False, num_workers=1, return_dataset=False,
-              resume_id='', seed=0, buffer_size=None, n_sequential=1, save_every=None, frame_range=(0, None)):
+              resume_id='', seed=0, buffer_size=None, n_sequential=1, save_every=None, frame_range=(0, None),
+              action_encoding="raw", tokenizer_checkpoint=None):
     data_path = get_data_path(dataset_name)
     T = default_T_dict[dataset_name] if T is None else T
     shard = MPI.COMM_WORLD.Get_rank()
@@ -138,7 +139,8 @@ def load_data(dataset_name, batch_size, T=None, deterministic=False, num_workers
     elif "egolife" in dataset_name:
         dataset = ContinuousEgoLifeDataset(data_path, window_length=T, frame_range=frame_range)
     elif "debug_toy" in dataset_name:
-        dataset = ContinuousDebugDataset(data_path, window_length=T, frame_range=frame_range)
+        dataset = ContinuousDebugDataset(data_path, window_length=T, frame_range=frame_range,
+                                         action_encoding=action_encoding, tokenizer_checkpoint=tokenizer_checkpoint)
     else:
         raise Exception("no dataset", dataset_name)
 
@@ -164,7 +166,8 @@ def load_data(dataset_name, batch_size, T=None, deterministic=False, num_workers
 
 
 def get_eval_dataset(dataset_name, T=None, seed=0, train=False, eval_dataset_config=eval_dataset_configs["default"],
-                     frame_range=(0, None), spacing_kwargs=dict(n_data=None), custom_clip_path=None):
+                     frame_range=(0, None), spacing_kwargs=dict(n_data=None), custom_clip_path=None,
+                     action_encoding="raw", tokenizer_checkpoint=None):
     """
     """
     data_path = get_data_path(dataset_name)
@@ -225,7 +228,8 @@ def get_eval_dataset(dataset_name, T=None, seed=0, train=False, eval_dataset_con
         else:
             dataset = SpacedEgoLifeDataset(**spacing_kwargs, **shared_args)
     elif "debug_toy" in dataset_name:
-        shared_args = dict(dataset_path=data_path, window_length=T, frame_range=frame_range)
+        shared_args = dict(dataset_path=data_path, window_length=T, frame_range=frame_range,
+                           action_encoding=action_encoding, tokenizer_checkpoint=tokenizer_checkpoint)
         if eval_dataset_config == eval_dataset_configs["continuous"]:
             dataset = ContinuousDebugDataset(**shared_args)
         elif eval_dataset_config == eval_dataset_configs["chunked"]:

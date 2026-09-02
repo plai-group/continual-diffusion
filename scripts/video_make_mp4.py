@@ -55,11 +55,15 @@ if __name__ == "__main__":
                 model_args.input_size = model_args.image_size
             if is_vdt and not hasattr(model_args, "patch_size"):
                 model_args.patch_size = 2
+        if not hasattr(model_args, "action_encoding"):  # plaicraft-debug#80: pre-#80 checkpoints are raw
+            model_args.action_encoding = "raw"
         # Load the dataset (to get observations from)
         eval_dataset_args = dict(dataset_name=model_args.dataset, T=T, spacing_kwargs=dict(n_data=args.num_sampled_videos),
                                  train=eval_on_train, eval_dataset_config=eval_dataset_config,
                                  frame_range=(parsed["lower_frame_range"], parsed["upper_frame_range"]),
-                                 custom_clip_path=args.custom_clip_path)
+                                 custom_clip_path=args.custom_clip_path,
+                                 action_encoding=getattr(model_args, "action_encoding", "raw"),
+                                 tokenizer_checkpoint=getattr(model_args, "km_tokenizer_checkpoint", None))
         dataset = get_eval_dataset(**eval_dataset_args)
 
     out_dir = (Path(args.out_dir) if args.out_dir is not None else Path(args.eval_dir)) / videos_prefix

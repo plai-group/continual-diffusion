@@ -31,6 +31,33 @@ def quantize_keypress(x):
     return (x > 0.5).float()
 
 
+def read_session_fps(session_dir):
+    """The session table's fps column -- the DB's own record of its tick rate."""
+    session_dir = Path(session_dir)
+    db_path = session_dir / f"{session_dir.name}.db"
+    con = sqlite3.connect(str(db_path))
+    try:
+        row = con.execute("SELECT fps FROM session").fetchone()
+    finally:
+        con.close()
+    return float(row[0]) if row is not None else None
+
+
+def validate_action_encoding(action_encoding, fps=None, action_dim=None, mouse_dim=None):
+    """km_fsq needs fps==12.5, action_dim==36, mouse_dim==0; raw needs action_dim==8,
+    mouse_dim==2. Every argument but action_encoding is optional, so this doubles as a
+    dataset-construction guard (fps only) and a CLI guard (dims only)."""
+    if action_encoding not in ("raw", "km_fsq"):
+        raise ValueError(f"unknown action_encoding {action_encoding!r}, expected 'raw' or 'km_fsq'")
+    expected_dim, expected_mouse = (KM_CODE_DIM, 0) if action_encoding == "km_fsq" else (KEYPRESS_DIM, MOUSE_DIM)
+    if action_encoding == "km_fsq" and fps is not None and abs(fps - 12.5) > 1e-6:
+        raise ValueError(f"action_encoding='km_fsq' requires session fps==12.5, got {fps}")
+    if action_dim is not None and action_dim != expected_dim:
+        raise ValueError(f"action_encoding={action_encoding!r} expects action_dim={expected_dim}, got {action_dim}")
+    if mouse_dim is not None and mouse_dim != expected_mouse:
+        raise ValueError(f"action_encoding={action_encoding!r} expects mouse_dim={expected_mouse}, got {mouse_dim}")
+
+
 def build_action_array(session_db_path, n_ticks):
     """
     10 ms sub-bins over the whole window -> (key_press, mouse): (n_ticks*8, 8) and

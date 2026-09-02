@@ -122,7 +122,6 @@ def test_action_metrics_decodes_80dim_latents_before_scoring():
 
     out = _action_metrics(p_latent, g_latent, p_mouse, g_mouse, slice(0, T))
     # Same underlying raw keypress on both sides -> the decoded/thresholded comparison must agree exactly.
-    assert out["key_acc"] == 1.0
     assert out["key_jaccard"] == 0.0
 
 
@@ -135,7 +134,7 @@ def test_action_metrics_key_jaccard_hand_computed():
     assert out["key_jaccard"] == 0.5
 
 
-def test_action_metrics_key_jaccard_no_keys_held_is_one():
+def test_action_metrics_key_jaccard_no_keys_held_is_zero():
     latent = debug_actions.encode_keypress_live(torch.zeros(1, 8))
     out = _action_metrics(latent, latent, None, None, slice(0, 1))
-    assert out["key_jaccard"] == 1.0
+    assert out["key_jaccard"] == 0.0

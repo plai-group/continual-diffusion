@@ -141,6 +141,16 @@ def main():
         print(f"debug validation: {len(valset.rows)} rows -> {out_dir}")
         debug_validation = (valset, out_dir, args.debug_validation_per_task)
 
+    # Issue-76: keypress cross-entropy on a fixed sample of held-out corpus windows.
+    action_ce = None
+    if args.action_ce_root:
+        from improved_diffusion.debug_validation import DebugCorpusWindowSet
+        action_ce = DebugCorpusWindowSet(
+            args.action_ce_root, T=args.T, n_observed=args.T // 2,
+            n_windows=args.action_ce_windows, seed=args.action_ce_seed,
+        )
+        print(f"action_ce: {len(action_ce.rows)} windows -> {args.action_ce_root}")
+
     print("training...")
     TrainLoop(
         model=model,
@@ -168,6 +178,7 @@ def main():
         clip_grad=args.clip_grad,
         optimizer=args.optimizer,
         debug_validation=debug_validation,
+        action_ce=action_ce,
         args=args,
     ).run_loop()
 
@@ -212,6 +223,10 @@ def create_argparser():
         debug_validation_root="",
         debug_validation_out="",
         debug_validation_per_task=False,
+        # Issue-76 keypress cross-entropy eval set (empty root path disables it).
+        action_ce_root="",
+        action_ce_windows=1000,
+        action_ce_seed=0,
         cfg_scale=1.0,  # sampling-time only; not a model kwarg. 1.0 = no guidance.
         generate_actions=False,
         # Warm start from a different architecture: step counter stays 0, optimizer/EMA stay fresh (--resume_checkpoint loads strict and reads the step from the filename).

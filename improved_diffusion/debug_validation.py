@@ -207,6 +207,74 @@ class DebugCorpusWindowSet:
         return th.stack(out)
 
 
+@th.no_grad()
+def run_action_ce_eval(model, diffusion, windowset, device, chunk_size=32):
+    """Issue #76: keypress cross-entropy of the model's generated actions against the true
+    multi-hot keypress, on a fixed sample of held-out non-overlapping windows.
+
+    Two series from the SAME heun_sample call: the final Heun sample (``keys_sample``, one draw
+    from the model's distribution) and ``pred_actstart`` from the first denoising iteration
+    (``keys_mean``, an estimate of E[z0 | observed frames] while the action slot still carries no
+    signal). Both are decoded through the frozen keypress autoencoder and scored as summed
+    Bernoulli CE, alongside a per-key base-rate baseline computed from the same ground truth.
+    This is a trend within this eval set only -- no comparable absolute floor (plaicraft-debug#76).
+    """
+    T, n_obs = windowset.T, windowset.n_observed
+    x0_all = windowset.load_all()
+    keypress_all, mouse_all = windowset.load_all_actions()
+    y_true_all = windowset.load_all_keypress_raw()
+
+    n = x0_all.shape[0]
+    # Row n_obs is pinned GT (the action mask lags the frame mask by one row); score what's generated.
+    first_gen = n_obs + 1
+    sl = slice(first_gen, None)
+    y_true_all = y_true_all[:, sl]
+
+    sched_sigma_max = float(diffusion.timestep2sigma(diffusion.num_timesteps - 1))
+    ce_sample_sum, ce_mean_sum, n_rows = 0.0, 0.0, 0
+    for lo in range(0, n, chunk_size):
+        hi = min(lo + chunk_size, n)
+        x0 = x0_all[lo:hi].to(device)
+        keypress = keypress_all[lo:hi].to(device)
+        mouse = mouse_all[lo:hi].to(device)
+        y_true = y_true_all[lo:hi].to(device)
+        b = x0.shape[0]
+
+        obs_mask = th.zeros(b, T, 1, 1, 1, device=device)
+        obs_mask[:, :n_obs] = 1.0
+        latent_mask = 1.0 - obs_mask
+        obs_act_mask = frame_mask_to_action_mask(obs_mask)
+
+        model_kwargs = {
+            "frame_indices": None, "x0": x0,
+            "obs_mask": obs_mask, "latent_mask": latent_mask,
+            "actions": keypress, "actions0": keypress, "obs_action_mask": obs_act_mask,
+            "mouse": mouse,
+        }
+        (samples, pred_actstart0), _ = diffusion.heun_sample(
+            model, x0.shape, sigma_max=sched_sigma_max, clip_denoised=True,
+            model_kwargs=model_kwargs, latent_mask=latent_mask.cpu(),
+            return_decoded=False, return_pred_actstart0=True,
+        )
+        samples_video, (samples_act, _) = samples
+
+        decoded_sample = debug_actions.decode_keypress_latent(samples_act[:, sl].to(device))
+        decoded_mean = debug_actions.decode_keypress_latent(pred_actstart0[:, sl].to(device).float())
+
+        ce_sample_sum += float(debug_actions.keypress_cross_entropy(decoded_sample, y_true).sum())
+        ce_mean_sum += float(debug_actions.keypress_cross_entropy(decoded_mean, y_true).sum())
+        n_rows += b * y_true.shape[1]
+
+    out = {
+        "val/action_ce/keys_sample": ce_sample_sum / n_rows,
+        "val/action_ce/keys_mean": ce_mean_sum / n_rows,
+        "val/action_ce/keys_baserate": float(debug_actions.keypress_ce_baserate(y_true_all)),
+    }
+    for k, v in out.items():
+        logger.logkv(k, v, distributed=False)
+    return out
+
+
 def _to01(x):
     return ((x + 1.0) / 2.0).clamp(0.0, 1.0)
 

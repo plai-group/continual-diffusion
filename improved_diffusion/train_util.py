@@ -65,9 +65,12 @@ class TrainLoop:
         clip_grad=None,
         optimizer='adam',
         debug_validation=None,
+        action_ce=None,
     ):
         # (valset, out_dir) for the issue-58 plaicraft-debug validation set, or None.
         self.debug_validation = debug_validation
+        # DebugCorpusWindowSet for the issue-76 keypress cross-entropy metric, or None.
+        self.action_ce = action_ce
         self.args = args
         self.model = model
         self.diffusion = diffusion
@@ -711,6 +714,14 @@ class TrainLoop:
                     )
                 except Exception as e:
                     print(f"[debug_validation] skipped at step {self.step}: {e!r}")
+
+            # Issue-76 keypress cross-entropy: same held-out corpus windows every step, never lets a failure kill a run.
+            if self.action_ce is not None:
+                from .debug_validation import run_action_ce_eval
+                try:
+                    run_action_ce_eval(self.model, self.diffusion, self.action_ce, dist_util.dev())
+                except Exception as e:
+                    print(f"[action_ce] skipped at step {self.step}: {e!r}")
 
             logger.logkv("timing/sampling_time", time() - sample_start, distributed=False)
 

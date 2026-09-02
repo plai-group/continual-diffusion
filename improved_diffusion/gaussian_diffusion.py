@@ -817,6 +817,7 @@ class GaussianDiffusion:
         num_steps=50,
         decode_chunk_size=10,
         visualize_reverse_diffusion=False,
+        return_pred_actstart0=False,
     ):
         del return_attn_weights, progress, latent_mask
 
@@ -846,8 +847,11 @@ class GaussianDiffusion:
                 timesteps.append(nearest_timestep)
         sigmas_snapped = [self.timestep2sigma(t) for t in timesteps] + [0]  # Add zero because we need a value for final s_next
 
-        def get_denoised_estimate(xt, at, mt, t):
+        pred_actstart0 = None  # issue #76: raw (unclipped) pred_actstart from the first denoising step, for ce_mean
+
+        def get_denoised_estimate(xt, at, mt, t, capture_actstart0=False):
             # NOTE: Translate between VE and VP reverse diffusion by scaling the noise level (refer to the EDM paper)
+            nonlocal pred_actstart0
             scaled_x = xt * self.sqrt_alphas_cumprod[t]
             cur_kwargs = dict(model_kwargs) if model_kwargs is not None else {}
             if at is not None:
@@ -862,6 +866,8 @@ class GaussianDiffusion:
                 model, scaled_x.to(th.float32), t_tensor.to(th.int32).view(-1).to(device),
                 clip_denoised=clip_denoised, denoised_fn=denoised_fn, model_kwargs=cur_kwargs,
             )
+            if capture_actstart0:
+                pred_actstart0 = out["pred_actstart"]
             obs_indicator = cur_kwargs["obs_mask"] if "obs_mask" in cur_kwargs else 0
             latent_indicator = 1 - obs_indicator
             denoised_x = out["pred_xstart"]
@@ -941,7 +947,9 @@ class GaussianDiffusion:
                 m_hat = (m_cur + sigma_diff * th.randn_like(m_cur)) if m_cur is not None else None
 
             # Euler step.
-            denoised_x, denoised_a, denoised_m, _ = get_denoised_estimate(x_hat, a_hat, m_hat, t_hat)
+            denoised_x, denoised_a, denoised_m, _ = get_denoised_estimate(
+                x_hat, a_hat, m_hat, t_hat, capture_actstart0=(return_pred_actstart0 and i == 0)
+            )
             d_cur_x = (x_hat - denoised_x) / s_hat
             x_next = x_hat + (s_next - s_hat) * d_cur_x
             if a_hat is not None and denoised_a is not None:
@@ -972,9 +980,10 @@ class GaussianDiffusion:
 
         samples_video = ((x_next, self.decode(x_next, chunk_size=decode_chunk_size))
                          if return_decoded else x_next)
-        if sample_actions or sample_mouse:
-            return (samples_video, (a_next, m_next)), history
-        return samples_video, history
+        result = (samples_video, (a_next, m_next)) if (sample_actions or sample_mouse) else samples_video
+        if return_pred_actstart0:
+            return (result, pred_actstart0), history
+        return result, history
 
 
     def _vb_terms_bpd(

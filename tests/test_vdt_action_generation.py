@@ -366,6 +366,44 @@ def test_heun_sample():
     print("  [PASS] Neither modality active -> bare video tensor returned")
 
 
+def test_heun_sample_return_pred_actstart0():
+    # Issue #76: opt-in first-iteration pred_actstart, without disturbing the default return shape.
+    B, T, C, H, W = 2, 8, 3, 32, 32
+    action_dim = 10
+    model, diffusion = create_vdt_model_and_diffusion(
+        model_name="VDT-S", patch_size=4, input_size=(32, 32), in_channels=C,
+        num_frames=T, learn_sigma=False, sigma_small=False, diffusion_steps=100,
+        diffusion_space_kwargs=dict(diffusion_space="pixel", pre_encoded=False),
+        noise_schedule="linear", timestep_respacing="", use_kl=False,
+        predict_xstart=False, rescale_timesteps=True, rescale_learned_sigmas=True,
+        use_checkpoint=False, use_edm_scaling=False,
+        action_dim=action_dim, action_dropout_prob=0.0, generate_actions=True,
+    )
+    x0 = torch.randn(B, T, C, H, W)
+    actions0 = torch.randn(B, T, action_dim)
+    obs_mask = torch.zeros(B, T, 1, 1, 1)
+    obs_mask[:, :4] = 1.0
+    model_kwargs = {"x0": x0, "actions0": actions0, "obs_mask": obs_mask, "latent_mask": 1.0 - obs_mask}
+
+    # Default (omitted) return_pred_actstart0 must not change the existing 2-tuple shape.
+    samples, _ = diffusion.heun_sample(model, (B, T, C, H, W), model_kwargs=model_kwargs, num_steps=5, return_decoded=False)
+    samples_video, (samples_action, samples_mouse) = samples
+    assert samples_video.shape == (B, T, C, H, W)
+
+    result, _ = diffusion.heun_sample(
+        model, (B, T, C, H, W), model_kwargs=model_kwargs, num_steps=5,
+        return_decoded=False, return_pred_actstart0=True,
+    )
+    samples, pred_actstart0 = result
+    samples_video, (samples_action, samples_mouse) = samples
+    assert samples_video.shape == (B, T, C, H, W)
+    assert pred_actstart0.shape == (B, T, action_dim)
+    assert torch.isfinite(pred_actstart0).all()
+    # Unlike the final sample, this is p_mean_variance's raw x0-estimate at the noisiest step --
+    # it must differ from the converged sample, not just be a copy of it.
+    assert not torch.allclose(pred_actstart0.double(), samples_action.double())
+
+
 def test_heun_sample_with_mouse():
     print("\n" + "=" * 60)
     print("3b. Testing Joint Heun Sampling (Video + Keypress + Mouse)")

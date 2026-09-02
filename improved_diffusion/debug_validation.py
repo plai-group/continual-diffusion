@@ -440,16 +440,13 @@ def _action_metrics(p_key, g_key, p_mouse, g_mouse, sl, quantize=False):
     Keypress and mouse are computed independently -- either side may be None
     (that modality wasn't generated) and simply contributes no keys.
 
-    Keys are pressed 2-33% of the time in this corpus, so the do-nothing
-    predictor already scores ~0.93 key_acc and its mouse_mse is ~3.4. Without
-    the *_trivial series a dead action head and a learning one look alike on
-    the dashboard. They are measured from the GT rows in this batch rather
-    than hard-coded, so they track whatever data the run actually saw.
+    Keys are held only 2-33% of the time here, so a plain accuracy sits near
+    0.93 for a dead action head. key_jaccard_distance drops the true-negative
+    majority -- unheld keys correctly predicted unheld -- and scores 1 - IoU
+    over which keys were actually held; 0.0 when neither side holds any key.
 
-    key_jaccard_distance is key_acc's complement for a rare-positive label: it drops the
-    true-negative majority (unheld keys, correctly predicted unheld) that lets
-    key_acc float near 1.0 for a dead head, and instead scores 1 - IoU over
-    which keys were actually held; 0.0 when neither side holds any key.
+    mouse_mse's do-nothing baseline is ~3.4, so mouse keeps a *_trivial pair,
+    measured from this batch's GT rows rather than hard-coded.
     """
     out = {}
     if p_key is not None and g_key is not None:
@@ -791,8 +788,8 @@ def run_debug_validation(model, diffusion, valset, device, out_dir,
             vals = [r[f"{scope}/{k}"] for r in per_row if f"{scope}/{k}" in r]
             if vals:
                 agg[f"{prefix}/{k}"] = float(np.mean(vals))
-    ACT_METRIC_KEYS = ("key_acc", "key_jaccard_distance", "mouse_l1", "mouse_mse",
-                       "key_acc_trivial", "mouse_l1_trivial", "mouse_mse_trivial")
+    ACT_METRIC_KEYS = ("key_jaccard_distance", "mouse_l1", "mouse_mse",
+                       "mouse_l1_trivial", "mouse_mse_trivial")
     for scope, prefix in (("next", "val/action"), ("roll", "val/action_roll")):
         for k in ACT_METRIC_KEYS:
             vals = [r[f"{scope}/{k}"] for r in per_row if f"{scope}/{k}" in r]

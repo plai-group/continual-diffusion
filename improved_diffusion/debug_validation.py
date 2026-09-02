@@ -1,20 +1,3 @@
-"""
-Issue #58 validation for the plaicraft-debug toy world.
-
-Each row of the validation DB names a moment (``R_start``) in a held-out
-recording.  We hand VDT the 10 video frames immediately before that moment and
-ask it to generate the next 10, at exactly the observed/generated split the
-model was trained on -- so nothing here is off-distribution.
-
-The model is *not* action-conditioned.  The action-driven part of each task
-(the jump, the strafe) is information VDT was never shown, so per-task scores
-measure world reconstruction, not action following, and are not comparable to
-action-conditioned baselines.  Frame 10 -- the first generated frame, only
-100ms past the last observed one -- is the cleanest read, because 100ms of
-unknown action moves the camera very little.
-"""
-
-import os
 import sqlite3
 from pathlib import Path
 
@@ -30,7 +13,6 @@ from .logger import logger
 from .rng_util import RNG
 from .decode_debug import (
     render_overlay,
-    get_frame_actions,
     _to_uint8_frame,
     _overlay_frame,
     DECODE_VIDEO_FPS,
@@ -763,13 +745,11 @@ def run_debug_validation(model, diffusion, valset, device, out_dir,
                     true01 = _to01(true_full[n_obs:])
                     swap01 = _to01(swap_full[n_obs:])
                     zero01 = _to01(zero_full[n_obs:])
-                    gt01 = _to01(gt[n_obs:])
 
                     swap_rows.append(dict(
                         l2_true_swap=float(th.mean((true01 - swap01) ** 2)),
                         l2_true_zero=float(th.mean((true01 - zero01) ** 2)),
                         l2_swap_zero=float(th.mean((swap01 - zero01) ** 2)),
-                        psnr_true=float(metrics.psnr(true01, gt01)),
                     ))
 
                     if log_videos:
@@ -822,7 +802,6 @@ def run_debug_validation(model, diffusion, valset, device, out_dir,
         agg["val/swap/l2_true_vs_swap"] = float(np.mean([r["l2_true_swap"] for r in swap_rows]))
         agg["val/swap/l2_true_vs_zero"] = float(np.mean([r["l2_true_zero"] for r in swap_rows]))
         agg["val/swap/l2_swap_vs_zero"] = float(np.mean([r["l2_swap_zero"] for r in swap_rows]))
-        agg["val/swap/psnr_true"] = float(np.mean([r["psnr_true"] for r in swap_rows]))
 
     for k, v in agg.items():
         logger.logkv(k, v, distributed=False)

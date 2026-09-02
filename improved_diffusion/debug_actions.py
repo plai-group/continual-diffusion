@@ -1,14 +1,18 @@
 # Per-tick action arrays for plaicraft-debug sessions, cached to <session_dir>/actions_{keypress,mouse}.npy.
+import json
 import os
 import sqlite3
 from pathlib import Path
 
 import h5py
 import numpy as np
-import torch as th
+import torch
 
 KEYPRESS_DIM = 8
 MOUSE_DIM = 2
+KM_CODE_DIM = 36  # 12 FSQ groups x 3 dims (plaicraft-debug#80)
+# Bump when build_action_array's binning rule changes, to force km cache rebuilds.
+SUBBIN_RULE_VERSION = "1"
 
 # The 12.5 Hz action grid (plaicraft-debug#80): one tick per video frame, one
 # tokenizer control-frame every SUBBIN_MS ms within a tick.
@@ -136,5 +140,70 @@ def load_or_build_raw(session_dir):
     return np.load(keypress_path, mmap_mode="r"), np.load(mouse_path, mmap_mode="r")
 
 
-def load_or_build(session_dir):
-    return load_or_build_raw(session_dir)
+def _km_cache_paths(session_dir):
+    return session_dir / "actions_km_codes.npy", session_dir / "actions_km_codes.json"
+
+
+def _load_or_build_km_codes(session_dir, tokenizer_checkpoint, device):
+    """Scatter the 8 compact dims to 79-wide at _RAW_POSITIONS, run the km tokenizer once,
+    cache the (n_ticks, 36) post-FSQ quantized codes plus a sidecar recording which
+    checkpoint and which binning rule produced them. A sidecar mismatch rebuilds, it
+    never fails -- the cache is just stale, not corrupt."""
+    from .km_tokenizer.keypress_scatter import scatter_keypress
+    from .km_tokenizer.model import _sha256, load_tokenizer
+
+    session_dir = Path(session_dir)
+    sid = session_dir.name
+    n_ticks = _n_ticks_from_hdf5(session_dir)
+    codes_path, sidecar_path = _km_cache_paths(session_dir)
+
+    checkpoint_path = Path(tokenizer_checkpoint)
+    expected_sidecar = {
+        "tokenizer_sha256": _sha256(checkpoint_path),
+        "subbin_rule_version": SUBBIN_RULE_VERSION,
+    }
+
+    if codes_path.exists() and sidecar_path.exists():
+        try:
+            sidecar = json.loads(sidecar_path.read_text())
+        except (json.JSONDecodeError, OSError):
+            sidecar = None
+        if sidecar == expected_sidecar:
+            codes = _load_cached(codes_path, n_ticks, KM_CODE_DIM)
+            if codes is not None:
+                return codes
+
+    db_path = session_dir / f"{sid}.db"
+    key_sub, mouse_sub = build_action_array(db_path, n_ticks)
+    device = device or ("cuda" if torch.cuda.is_available() else "cpu")
+    tokenizer = load_tokenizer(checkpoint_path=checkpoint_path, device=device)
+    key_press = scatter_keypress(torch.from_numpy(key_sub).float()).unsqueeze(0).to(device)
+    mouse_movement = torch.from_numpy(mouse_sub).float().unsqueeze(0).to(device)
+    with torch.no_grad():
+        prequantized, _frame_mask, _block_mask = tokenizer._encode_prequantized(key_press, mouse_movement)
+        _token_ids, quantized_codes = tokenizer._quantize(prequantized)
+    codes = quantized_codes[0].reshape(n_ticks, KM_CODE_DIM).cpu().numpy().astype(np.float32)
+
+    tmp_codes = codes_path.with_name(f".{codes_path.stem}.{os.getpid()}.tmp.npy")
+    np.save(tmp_codes, codes)
+    os.replace(tmp_codes, codes_path)
+    tmp_sidecar = sidecar_path.with_name(f".{sidecar_path.stem}.{os.getpid()}.tmp.json")
+    tmp_sidecar.write_text(json.dumps(expected_sidecar))
+    os.replace(tmp_sidecar, sidecar_path)
+
+    return np.load(codes_path, mmap_mode="r")
+
+
+def load_or_build(session_dir, action_encoding="raw", tokenizer_checkpoint=None, device=None):
+    """raw -> (n_ticks, 8) keypress + (n_ticks, 2) mouse, both tick-resolution ground truth.
+    km_fsq -> (n_ticks, 36) quantized codes + (n_ticks, 0) empty mouse (folded into the codes)."""
+    if action_encoding == "raw":
+        return load_or_build_raw(session_dir)
+    if action_encoding == "km_fsq":
+        from .km_tokenizer.model import DEFAULT_CHECKPOINT
+
+        checkpoint = tokenizer_checkpoint or DEFAULT_CHECKPOINT
+        codes = _load_or_build_km_codes(session_dir, checkpoint, device)
+        n_ticks = codes.shape[0]
+        return codes, np.zeros((n_ticks, 0), dtype=np.float32)
+    raise ValueError(f"unknown action_encoding {action_encoding!r}, expected 'raw' or 'km_fsq'")

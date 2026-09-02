@@ -99,3 +99,11 @@ def test_baserate_collapses_leading_dims():
     y[:, :, 0] = 1.0  # key 0 always held, always at base rate 1 -> zero surprise
     ce = keypress_ce_baserate(y)
     assert torch.allclose(ce, torch.tensor(0.0), atol=1e-6)
+
+
+def test_no_pressed_frames_is_zero_not_nan():
+    """An empty pressed-frame selection means 0 nats, not an empty .mean() -> nan."""
+    y_true = torch.zeros(4, 8)
+    decoded = torch.randn(4, 8)
+    assert float(keypress_cross_entropy(decoded, y_true)) == 0.0
+    assert float(keypress_ce_baserate(y_true)) == 0.0

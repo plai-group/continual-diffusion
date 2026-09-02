@@ -89,20 +89,24 @@ def decode_keypress_latent(latent):
     return raw.reshape(*orig_shape, KEYPRESS_DIM)
 
 
+def _pressed_frame_mean(per_frame, y_true):
+    """Mean over frames holding at least one key, and 0 when none do -- a keyless frame scores an exact 0 under a positive-only CE, so an empty selection is 0 nats, not nan."""
+    pressed = y_true.sum(dim=-1) > 0
+    return per_frame[pressed].mean() if pressed.any() else per_frame.new_zeros(())
+
+
 def keypress_cross_entropy(decoded, y_true):
     """Issue #76: positive-dims-only CE of the raw decoder output (as logits) against the true
     multi-hot. Held keys within a frame are summed (-log of the joint probability of the held
     set under the factorized head), so a chorded frame costs every key it holds -- written
     multi-hot-general even though this corpus never chords, since the metric should provision
-    for it. The mean is over frames holding at least one key: an all-zero frame scores a hard 0
-    no matter the model, so including it would just dilute the mean by how press-dense the
-    sample is. The (1-y)*log(1-q) term is dropped -- the head is MSE-trained against a mostly-
-    zero target and biased toward zeros, the all-pressed case that term guards against is
-    unreachable, and key_jaccard_distance already catches false presses. No epsilon/clamp: logsigmoid is
-    exact and finite for any finite logit."""
+    for it. Scored only over pressed frames, so the number is not diluted by how press-dense the
+    sample happens to be. The (1-y)*log(1-q) term is dropped -- the head is MSE-trained against a
+    mostly-zero target and biased toward zeros, the all-pressed case that term guards against is
+    unreachable, and key_jaccard_distance already catches false presses. No epsilon/clamp:
+    logsigmoid is exact and finite for any finite logit."""
     per_frame = -(y_true * F.logsigmoid(decoded)).sum(dim=-1)
-    pressed = y_true.sum(dim=-1) > 0
-    return per_frame[pressed].mean()
+    return _pressed_frame_mean(per_frame, y_true)
 
 
 def keypress_ce_baserate(y_true):
@@ -111,8 +115,7 @@ def keypress_ce_baserate(y_true):
     xlogy makes a never-pressed key's 0*log(0) term exactly 0 rather than nan."""
     q = y_true.reshape(-1, y_true.shape[-1]).mean(dim=0)
     per_frame = -torch.special.xlogy(y_true, q).sum(dim=-1)
-    pressed = y_true.sum(dim=-1) > 0
-    return per_frame[pressed].mean()
+    return _pressed_frame_mean(per_frame, y_true)
 
 
 def _encode_offline(raw_keypress_100hz, chunk=4096):

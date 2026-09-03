@@ -476,6 +476,48 @@ def _label_panel(panel, text):
     return panel
 
 
+def _render_pair_overlay(frames_gt, frames_pred, actions_gt, actions_pred,
+                         n_observed, out_path, title=None):
+    """Side-by-side mp4: GT | PRED, from already-baked (keypress, mouse) tensors.
+
+    CorpusValidationSet rows (issue #81) have no session db -- decode_debug.
+    render_overlay's get_frame_actions can't draw their bars (it also hardcodes
+    100ms/10Hz frames, wrong for this corpus's 80ms/12.5Hz ticks). Both action
+    tensors are already loaded raw by run_debug_validation's caller, so this
+    reuses the same low-level primitives _render_triple_overlay does, just for
+    2 panels instead of 4.
+    """
+    frames_gt = np.asarray(frames_gt)
+    frames_pred = np.asarray(frames_pred)
+    T = frames_gt.shape[0]
+
+    acts = [(_to_display_actions(k), _to_display_actions(m)) for k, m in (actions_gt, actions_pred)]
+    labels = ["GT", "PRED"]
+
+    out_path = Path(out_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+
+    import imageio
+
+    writer = imageio.get_writer(
+        str(out_path), fps=DECODE_VIDEO_FPS, codec="libx264",
+        macro_block_size=1,
+        ffmpeg_params=["-pix_fmt", "yuv420p"],
+    )
+    for t in range(T):
+        border = t < n_observed
+        panels = [
+            _label_panel(
+                _overlay_frame(_to_uint8_frame(frames[t]),
+                               _action_vec_to_bar(dk[t], dm[t]), border=border),
+                lab)
+            for frames, (dk, dm), lab in zip((frames_gt, frames_pred), acts, labels)
+        ]
+        writer.append_data(cv2.hconcat(panels))
+    writer.close()
+    return out_path
+
+
 def _render_triple_overlay(frames_gt, frames_true, frames_swap, frames_zero,
                            actions_gt, actions_true, actions_swap, actions_zero,
                            n_observed, out_path, title=None, true_label="TRUE"):
@@ -695,17 +737,32 @@ def run_debug_validation(model, diffusion, valset, device, out_dir,
                     # _action_bars cannot draw.
                     pred_bar_key = p_key_chunk[j] if p_key_chunk is not None else keypress_raw_chunk[j] if keypress_raw_chunk is not None else None
                     pred_bar_mouse = p_mouse_chunk[j] if p_mouse_chunk is not None else mouse_raw_chunk[j] if mouse_raw_chunk is not None else None
-                    render_overlay(
-                        gt_frames=gt.cpu().numpy(),
-                        pred_frames=pred.cpu().numpy(),
-                        pred_actions=(_action_bars(pred_bar_key, pred_bar_mouse)
-                                      if pred_bar_key is not None and pred_bar_mouse is not None else None),
-                        session_db_path=str(row["session_db"]),
-                        start_frame_idx=row["window_start"],
-                        out_path=str(mp4),
-                        n_observed=n_obs,
-                        title=row["prompt"],
-                    )
+                    if is_corpus_valset:
+                        # No session db to read GT actions from (frozen npz package,
+                        # issue #81), and get_frame_actions hardcodes 10Hz framing anyway
+                        # -- draw both rows from the already-loaded raw tensors instead.
+                        _render_pair_overlay(
+                            frames_gt=gt.cpu().numpy(),
+                            frames_pred=pred.cpu().numpy(),
+                            actions_gt=(keypress_raw_chunk[j].cpu().numpy(), mouse_raw_chunk[j].cpu().numpy()),
+                            actions_pred=((pred_bar_key.cpu().numpy() if pred_bar_key is not None else keypress_raw_chunk[j].cpu().numpy()),
+                                          (pred_bar_mouse.cpu().numpy() if pred_bar_mouse is not None else mouse_raw_chunk[j].cpu().numpy())),
+                            n_observed=n_obs,
+                            out_path=str(mp4),
+                            title=row["prompt"],
+                        )
+                    else:
+                        render_overlay(
+                            gt_frames=gt.cpu().numpy(),
+                            pred_frames=pred.cpu().numpy(),
+                            pred_actions=(_action_bars(pred_bar_key, pred_bar_mouse)
+                                          if pred_bar_key is not None and pred_bar_mouse is not None else None),
+                            session_db_path=str(row["session_db"]),
+                            start_frame_idx=row["window_start"],
+                            out_path=str(mp4),
+                            n_observed=n_obs,
+                            title=row["prompt"],
+                        )
                     import wandb
                     logger.logkv(f"val/overlay/{slug}", wandb.Video(str(mp4)), distributed=False)
                 except Exception as e:

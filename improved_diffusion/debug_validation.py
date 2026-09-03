@@ -347,6 +347,29 @@ def _zero_actions(keypress, mouse, where):
             th.where(where.bool(), th.zeros_like(mouse), mouse))
 
 
+def _swap_single_action(keypress, mouse, boundary_idx, swap_kind, swap_dim=None, swap_counterpart_dim=None):
+    """(B,T,8)+(B,T,2) raw action tensors -> same shapes, with ONLY row `boundary_idx`
+    modified per swap_kind; every other row -- including the rest of the generated
+    region -- comes back byte-identical to the input.
+
+    Issue #81: one flipped decision at the action boundary, matching a
+    CorpusValidationSet exercise's own swap_kind/swap_dim/swap_counterpart_dim.
+    Deliberately NOT _swap_actions, which flips an entire region.
+    """
+    keypress, mouse = keypress.clone(), mouse.clone()
+    if swap_kind == "keypress":
+        a = keypress[:, boundary_idx, swap_dim].clone()
+        keypress[:, boundary_idx, swap_dim] = keypress[:, boundary_idx, swap_counterpart_dim]
+        keypress[:, boundary_idx, swap_counterpart_dim] = a
+    elif swap_kind == "mouse_dx":
+        mouse[:, boundary_idx, 0] = -mouse[:, boundary_idx, 0]
+    elif swap_kind == "mouse_dy":
+        mouse[:, boundary_idx, 1] = -mouse[:, boundary_idx, 1]
+    else:
+        raise ValueError(f"unknown swap_kind {swap_kind!r}, expected keypress/mouse_dx/mouse_dy")
+    return keypress, mouse
+
+
 #: order of the 6 key dims in the 8-d keypress vector; names must match the
 #: labels decode_debug draws, i.e. the values of its KEY_ID_TO_NAME.
 _ACTION_KEY_NAMES = ["w", "a", "s", "d", "space", "Shift_L"]
@@ -544,6 +567,9 @@ def run_debug_validation(model, diffusion, valset, device, out_dir,
     sampling_model = _CFGWrapper(model, cfg_scale) if cfg_scale != 1.0 else model
 
     T, n_obs = valset.T, valset.n_observed
+    # CorpusValidationSet (issue #81) rows carry swap_kind: their swap test targets
+    # only the single boundary action, not the whole generated region.
+    is_corpus_valset = bool(valset.rows) and "swap_kind" in valset.rows[0]
     x0_all = valset.load_all()  # (N, T, 3, H, W)
     n_rows = x0_all.shape[0]
     if actions and action_conditioned:
@@ -701,7 +727,14 @@ def run_debug_validation(model, diffusion, valset, device, out_dir,
                     # Rewrite only the actions driving the generated frames: rows n_obs..T-1, the frame-mask complement, not the action-mask complement (which lags one row) -- leave the history true.
                     intervene_on = 1.0 - obs_mask_j.reshape(
                         obs_mask_j.shape[0], obs_mask_j.shape[1], 1)
-                    key_swap_j, mouse_swap_j = _swap_actions(key_true_j, mouse_true_j, intervene_on)
+                    if is_corpus_valset:
+                        key_swap_j, mouse_swap_j = _swap_single_action(
+                            key_true_j, mouse_true_j, boundary_idx=n_obs,
+                            swap_kind=row["swap_kind"], swap_dim=row.get("swap_dim"),
+                            swap_counterpart_dim=row.get("swap_counterpart_dim"),
+                        )
+                    else:
+                        key_swap_j, mouse_swap_j = _swap_actions(key_true_j, mouse_true_j, intervene_on)
                     key_zero_j, mouse_zero_j = _zero_actions(key_true_j, mouse_true_j, intervene_on)
                     # Same starting noise for all three passes, so only the actions tensor differs.
                     shared_noise = th.randn(*x0_j.shape, device=device)

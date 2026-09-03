@@ -141,7 +141,8 @@ def main():
         from improved_diffusion.corpus_validation import CorpusValidationSet
         valset = CorpusValidationSet(
             args.debug_validation_dir, T=args.T, n_observed=args.T // 2,
-            action_encoding=args.action_encoding,
+            action_encoding=args.action_encoding, tokenizer_checkpoint=args.km_tokenizer_checkpoint,
+            device=dist_util.dev(),
         )
         out_dir = args.debug_validation_out or os.path.join("results", "debug_validation")
         print(f"debug validation (corpus): {len(valset.rows)} rows -> {out_dir}")

@@ -16,9 +16,12 @@ import torch as th
 class CorpusValidationSet:
     """The 13 frozen exercises plus the frames/actions each one needs."""
 
-    def __init__(self, validation_dir, T=None, n_observed=None, action_encoding="raw"):
+    def __init__(self, validation_dir, T=None, n_observed=None, action_encoding="raw",
+                 tokenizer_checkpoint=None, device=None):
         self.validation_dir = Path(validation_dir)
         self.action_encoding = action_encoding
+        self.tokenizer_checkpoint = tokenizer_checkpoint
+        self.device = device
         npz_path = self.validation_dir / "validation.npz"
         manifest_path = self.validation_dir / "manifest.json"
         if not npz_path.exists():
@@ -77,20 +80,19 @@ class CorpusValidationSet:
         """(keypress, mouse) float32, in the model's NATIVE conditioning encoding.
 
         raw -> (13, T, 8) + (13, T, 2), straight from the npz.
-        km_fsq -> (13, T, 36) codes + (13, T, 0) empty mouse, from
-        scripts/build_debug_validation_km_codes.py's km_codes.npz (folded into the
-        codes, same convention as debug_actions.load_or_build). That script must
-        have been run against this validation_dir first -- raised loudly here if not.
+        km_fsq -> (13, T, 36) codes + (13, T, 0) empty mouse (folded into the codes,
+        same convention as debug_actions.load_or_build). Built lazily on first use via
+        scripts/build_debug_validation_km_codes.build_km_codes and cached in
+        validation_dir/km_codes.npz; a stale or missing cache is rebuilt automatically.
         """
         if self.action_encoding == "raw":
             return self.load_all_actions_raw()
         if self.action_encoding == "km_fsq":
-            codes_path = self.validation_dir / "km_codes.npz"
-            if not codes_path.exists():
-                raise FileNotFoundError(
-                    f"action_encoding='km_fsq' needs {codes_path}; run "
-                    "scripts/build_debug_validation_km_codes.py against this validation_dir first"
-                )
+            from scripts.build_debug_validation_km_codes import build_km_codes
+            from improved_diffusion.km_tokenizer.model import DEFAULT_CHECKPOINT
+
+            checkpoint = self.tokenizer_checkpoint or DEFAULT_CHECKPOINT
+            codes_path = build_km_codes(self.validation_dir, checkpoint, self.device)
             km_codes = np.asarray(np.load(codes_path)["km_codes"], dtype=np.float32)
             empty_mouse = np.zeros((km_codes.shape[0], km_codes.shape[1], 0), dtype=np.float32)
             return th.from_numpy(km_codes), th.from_numpy(empty_mouse)

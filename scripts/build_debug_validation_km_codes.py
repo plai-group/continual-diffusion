@@ -13,6 +13,8 @@ steps are idempotent: a matching sidecar skips the km_codes rebuild unless
 import argparse
 import json
 import os
+import tempfile
+import warnings
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -50,21 +52,29 @@ def build_km_codes(validation_dir, tokenizer_checkpoint, device, force=False):
             return codes_path
 
     valset = CorpusValidationSet(validation_dir)
-    keypress, mouse = valset.load_all_actions()
+    keypress, mouse = valset.load_all_actions_raw()  # never load_all_actions: km_fsq would recurse into this builder
     device = device or ("cuda" if torch.cuda.is_available() else "cpu")
     tokenizer = load_tokenizer(checkpoint_path=checkpoint_path, device=device)
     with torch.no_grad():
         km_codes = _encode_km_actions(tokenizer, keypress.to(device), mouse.to(device))
     km_codes = km_codes.cpu().numpy().astype(np.float32)
-
-    tmp_codes = codes_path.with_name(f".{codes_path.stem}.{os.getpid()}.tmp.npz")
-    np.savez(tmp_codes, km_codes=km_codes)
-    os.replace(tmp_codes, codes_path)
-
     sidecar = dict(expected, built_at=datetime.now(timezone.utc).isoformat())
-    tmp_sidecar = sidecar_path.with_name(f".{sidecar_path.stem}.{os.getpid()}.tmp.json")
-    tmp_sidecar.write_text(json.dumps(sidecar, indent=2))
-    os.replace(tmp_sidecar, sidecar_path)
+
+    try:
+        tmp_codes = codes_path.with_name(f".{codes_path.stem}.{os.getpid()}.tmp.npz")
+        np.savez(tmp_codes, km_codes=km_codes)
+        os.replace(tmp_codes, codes_path)
+        tmp_sidecar = sidecar_path.with_name(f".{sidecar_path.stem}.{os.getpid()}.tmp.json")
+        tmp_sidecar.write_text(json.dumps(sidecar, indent=2))
+        os.replace(tmp_sidecar, sidecar_path)
+    except OSError as e:
+        # validation_dir may be read-only/shared; cache in a private tmp dir instead of crashing.
+        fallback_dir = Path(tempfile.mkdtemp(prefix="km_codes_"))
+        codes_path = fallback_dir / "km_codes.npz"
+        np.savez(codes_path, km_codes=km_codes)
+        (fallback_dir / "km_codes_manifest.json").write_text(json.dumps(sidecar, indent=2))
+        warnings.warn(f"cannot write km_codes cache under {validation_dir} ({e}); using {fallback_dir}")
+
     print(f"wrote {codes_path} ({km_codes.shape})")
     return codes_path
 

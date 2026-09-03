@@ -16,8 +16,9 @@ import torch as th
 class CorpusValidationSet:
     """The 13 frozen exercises plus the frames/actions each one needs."""
 
-    def __init__(self, validation_dir, T=None, n_observed=None):
+    def __init__(self, validation_dir, T=None, n_observed=None, action_encoding="raw"):
         self.validation_dir = Path(validation_dir)
+        self.action_encoding = action_encoding
         npz_path = self.validation_dir / "validation.npz"
         manifest_path = self.validation_dir / "manifest.json"
         if not npz_path.exists():
@@ -73,12 +74,32 @@ class CorpusValidationSet:
         return th.from_numpy(self._frames.copy())
 
     def load_all_actions(self):
+        """(keypress, mouse) float32, in the model's NATIVE conditioning encoding.
+
+        raw -> (13, T, 8) + (13, T, 2), straight from the npz.
+        km_fsq -> (13, T, 36) codes + (13, T, 0) empty mouse, from
+        scripts/build_debug_validation_km_codes.py's km_codes.npz (folded into the
+        codes, same convention as debug_actions.load_or_build). That script must
+        have been run against this validation_dir first -- raised loudly here if not.
+        """
+        if self.action_encoding == "raw":
+            return self.load_all_actions_raw()
+        if self.action_encoding == "km_fsq":
+            codes_path = self.validation_dir / "km_codes.npz"
+            if not codes_path.exists():
+                raise FileNotFoundError(
+                    f"action_encoding='km_fsq' needs {codes_path}; run "
+                    "scripts/build_debug_validation_km_codes.py against this validation_dir first"
+                )
+            km_codes = np.asarray(np.load(codes_path)["km_codes"], dtype=np.float32)
+            empty_mouse = np.zeros((km_codes.shape[0], km_codes.shape[1], 0), dtype=np.float32)
+            return th.from_numpy(km_codes), th.from_numpy(empty_mouse)
+        raise ValueError(f"unknown action_encoding {self.action_encoding!r}, expected 'raw' or 'km_fsq'")
+
+    def load_all_actions_raw(self):
         """(keypress: (13, T, 8), mouse: (13, T, 2)) float32, straight from the npz.
 
-        Always the raw tick-resolution arrays -- the frozen contract carries no
-        other encoding, so this doubles as load_all_actions_raw for duck typing
-        with run_debug_validation (overlays/interventions always want raw anyway).
-        """
+        Always the raw tick-resolution arrays, independent of action_encoding --
+        overlays and interventions read this, never the model's native conditioning
+        tensor (mirrors DebugValidationSet.load_all_actions_raw, plaicraft-debug#80/81)."""
         return th.from_numpy(self._keypress.copy()), th.from_numpy(self._mouse.copy())
-
-    load_all_actions_raw = load_all_actions

@@ -64,7 +64,10 @@ def main():
     print(f"loaded {args.checkpoint} (step {step}), T={ns.T}")
 
     if using_dir:
-        valset = CorpusValidationSet(args.debug_validation_dir, T=ns.T, n_observed=ns.T // 2)
+        valset = CorpusValidationSet(
+            args.debug_validation_dir, T=ns.T, n_observed=ns.T // 2,
+            action_encoding=getattr(ns, "action_encoding", "raw"),
+        )
         print(f"validation rows: {len(valset.rows)}")
         for r in valset.rows:
             print(f"  {r['num']:2d} {r['prompt'][:38]:38s} swap_kind={r['swap_kind']} win={r['window_start']}")

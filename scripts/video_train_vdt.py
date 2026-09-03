@@ -139,7 +139,10 @@ def main():
         if args.debug_validation_db:
             print("[video_train_vdt] --debug_validation_dir set: ignoring --debug_validation_db")
         from improved_diffusion.corpus_validation import CorpusValidationSet
-        valset = CorpusValidationSet(args.debug_validation_dir, T=args.T, n_observed=args.T // 2)
+        valset = CorpusValidationSet(
+            args.debug_validation_dir, T=args.T, n_observed=args.T // 2,
+            action_encoding=args.action_encoding,
+        )
         out_dir = args.debug_validation_out or os.path.join("results", "debug_validation")
         print(f"debug validation (corpus): {len(valset.rows)} rows -> {out_dir}")
         debug_validation = (valset, out_dir, args.debug_validation_per_task)

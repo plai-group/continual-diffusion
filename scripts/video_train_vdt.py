@@ -131,8 +131,19 @@ def main():
     )
 
     # Issue-58: fixed prompt set from the plaicraft-debug validation recording.
+    # Issue-81: --debug_validation_dir points at the frozen held-out-policy package
+    # instead, and wins if both are set (validate_debug_offline.py still needs the
+    # DebugValidationSet path to re-score old checkpoints against the human set).
     debug_validation = None
-    if args.debug_validation_db:
+    if args.debug_validation_dir:
+        if args.debug_validation_db:
+            print("[video_train_vdt] --debug_validation_dir set: ignoring --debug_validation_db")
+        from improved_diffusion.corpus_validation import CorpusValidationSet
+        valset = CorpusValidationSet(args.debug_validation_dir, T=args.T, n_observed=args.T // 2)
+        out_dir = args.debug_validation_out or os.path.join("results", "debug_validation")
+        print(f"debug validation (corpus): {len(valset.rows)} rows -> {out_dir}")
+        debug_validation = (valset, out_dir, args.debug_validation_per_task)
+    elif args.debug_validation_db:
         from improved_diffusion.debug_validation import DebugValidationSet
         valset = DebugValidationSet(
             args.debug_validation_db, args.debug_validation_root,
@@ -212,6 +223,7 @@ def create_argparser():
         # Issue-58 plaicraft-debug validation set (empty db path disables it).
         debug_validation_db="",
         debug_validation_root="",
+        debug_validation_dir="",  # issue-81: frozen held-out-policy package; wins over debug_validation_db
         debug_validation_out="",
         debug_validation_per_task=False,
         cfg_scale=1.0,  # sampling-time only; not a model kwarg. 1.0 = no guidance.

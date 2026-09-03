@@ -69,7 +69,9 @@ class DebugValidationSet:
         conn.row_factory = sqlite3.Row
         raw = conn.execute(
             'SELECT Num, Prompt, "Test Type", Session_ID, player_email, '
-            '"R_start (ms)", "R_duration (ms)" FROM validation_rows ORDER BY Num'
+            # Num is a TEXT column, so a plain ORDER BY sorts "10" between "1" and "2".
+            '"R_start (ms)", "R_duration (ms)" FROM validation_rows '
+            'ORDER BY CAST(Num AS INTEGER)'
         ).fetchall()
         conn.close()
 

@@ -159,3 +159,27 @@ def test_mouse_wrong_column_count_raises(tmp_path):
     with pytest.raises(ValueError) as exc:
         CorpusValidationSet(vdir)
     assert "mouse" in str(exc.value)
+
+
+def test_duplicate_manifest_name_raises(tmp_path):
+    vdir, *_ = _make_fixture(tmp_path)
+    manifest = json.loads((vdir / "manifest.json").read_text())
+    manifest["exercises"][1]["name"] = manifest["exercises"][0]["name"]
+    (vdir / "manifest.json").write_text(json.dumps(manifest))
+    with pytest.raises(ValueError) as exc:
+        CorpusValidationSet(vdir)
+    assert "duplicate" in str(exc.value)
+
+
+def test_duplicate_npz_name_raises(tmp_path):
+    # Manifest names stay unique (by_name lookup still resolves for every row);
+    # only the npz's own names array has the duplicate.
+    vdir, *_ = _make_fixture(tmp_path)
+    npz = dict(np.load(vdir / "validation.npz"))
+    names = npz["names"].copy()
+    names[1] = names[0]
+    npz["names"] = names
+    np.savez(vdir / "validation.npz", **npz)
+    with pytest.raises(ValueError) as exc:
+        CorpusValidationSet(vdir)
+    assert "duplicate" in str(exc.value)

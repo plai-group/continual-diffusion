@@ -86,6 +86,44 @@ def test_build_km_codes_force_rebuilds(tmp_path):
     assert codes_path.stat().st_mtime_ns >= mtime_before
 
 
+def test_build_km_codes_memoizes_sha_across_cache_hits(tmp_path, monkeypatch):
+    # A stale/missing sidecar must still trigger a full rebuild -- the first call
+    # here is a genuine cache miss (no sidecar yet) and must still hash for real.
+    vdir = _make_fixture(tmp_path)
+    build_km_codes(vdir, DEFAULT_CHECKPOINT, device="cpu")
+
+    import build_debug_validation_km_codes as mod
+    real_sha256 = mod._sha256
+    calls = []
+
+    def _counting(path):
+        calls.append(path)
+        return real_sha256(path)
+
+    monkeypatch.setattr(mod, "_sha256", _counting)
+    build_km_codes(vdir, DEFAULT_CHECKPOINT, device="cpu")  # cache hit: memoized, no re-hash
+    build_km_codes(vdir, DEFAULT_CHECKPOINT, device="cpu")  # cache hit again
+    assert len(calls) == 0  # DEFAULT_CHECKPOINT's (path, mtime, size) was already memoized above
+
+
+def test_render_gt_overlays_uses_raw_actions_not_native_encoding(tmp_path, monkeypatch):
+    # render_gt_overlays must call load_all_actions_raw, never load_all_actions --
+    # the overlay bars always want raw 8+2, independent of action_encoding.
+    vdir = _make_fixture(tmp_path)
+
+    def _boom(self):
+        raise AssertionError("render_gt_overlays must not call load_all_actions")
+    monkeypatch.setattr("improved_diffusion.corpus_validation.CorpusValidationSet.load_all_actions", _boom)
+
+    class _NullWriter:
+        def append_data(self, frame):
+            pass
+        def close(self):
+            pass
+    monkeypatch.setattr(imageio, "get_writer", lambda *a, **k: _NullWriter())
+    render_gt_overlays(vdir)  # must not raise
+
+
 def test_render_gt_overlays_writes_one_mp4_per_exercise(tmp_path, monkeypatch):
     vdir = _make_fixture(tmp_path)
 

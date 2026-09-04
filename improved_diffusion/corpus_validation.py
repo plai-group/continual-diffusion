@@ -15,6 +15,13 @@ import torch as th
 from . import debug_actions
 
 
+def _duplicates(seq):
+    seen, dupes = set(), set()
+    for x in seq:
+        (dupes if x in seen else seen).add(x)
+    return dupes
+
+
 class CorpusValidationSet:
     """The 13 frozen exercises plus the frames/actions each one needs."""
 
@@ -52,6 +59,7 @@ class CorpusValidationSet:
         boundary_ticks = npz["boundary_ticks"]
 
         self._validate_shapes(names, session_ids, window_start_ticks, boundary_ticks)
+        self._validate_unique_names(names)
 
         by_name = {e["name"]: e for e in self.manifest["exercises"]}
         self.rows = []
@@ -113,6 +121,18 @@ class CorpusValidationSet:
             raise ValueError(f"keypress.shape={self._keypress.shape} must have 8 columns (raw keypress dim)")
         if self._mouse.shape[-1] != 2:
             raise ValueError(f"mouse.shape={self._mouse.shape} must have 2 columns (raw mouse dim)")
+
+    def _validate_unique_names(self, npz_names):
+        """A duplicate name collapses in by_name (dict) and produces identical slug()s,
+        so overlay mp4s overwrite each other and wandb keys collide -- silent partial
+        loss of the validation set (plaicraft-debug#81 AC: boundaries are unique)."""
+        manifest_names = [e["name"] for e in self.manifest["exercises"]]
+        dupes = _duplicates(manifest_names)
+        if dupes:
+            raise ValueError(f"manifest exercises contain duplicate name(s): {sorted(dupes)}")
+        dupes = _duplicates(npz_names)
+        if dupes:
+            raise ValueError(f"validation.npz names array contains duplicate name(s): {sorted(dupes)}")
 
     def slug(self, row):
         return f"{row['num']:02d}_{row['name']}"

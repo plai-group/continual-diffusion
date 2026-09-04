@@ -33,6 +33,29 @@ def _km_codes_paths(validation_dir):
     return validation_dir / "km_codes.npz", validation_dir / "km_codes_manifest.json"
 
 
+_SHA256_CACHE = {}
+
+
+def _cached_sha256(path):
+    """_sha256 is called on EVERY validation interval (build_km_codes runs once per
+    call to load_all_actions), but the tokenizer checkpoint doesn't change within a
+    process -- so key the memo on (path, mtime, size) and skip re-hashing a
+    potentially large file when nothing has moved. Falls back to always-recompute
+    if the file can't be stat'd (never persists a wrong answer)."""
+    path = Path(path)
+    try:
+        st = path.stat()
+        key = (str(path), st.st_mtime_ns, st.st_size)
+    except OSError:
+        key = None
+    if key is not None and key in _SHA256_CACHE:
+        return _SHA256_CACHE[key]
+    digest = _sha256(path)
+    if key is not None:
+        _SHA256_CACHE[key] = digest
+    return digest
+
+
 def build_km_codes(validation_dir, tokenizer_checkpoint, device, force=False):
     """Scatter+encode the frozen raw keypress/mouse through the km tokenizer once,
     caching the (13, T, 36) codes with a sidecar recording the checkpoint used --
@@ -40,7 +63,7 @@ def build_km_codes(validation_dir, tokenizer_checkpoint, device, force=False):
     validation_dir = Path(validation_dir)
     codes_path, sidecar_path = _km_codes_paths(validation_dir)
     checkpoint_path = Path(tokenizer_checkpoint)
-    expected = {"tokenizer_sha256": _sha256(checkpoint_path), "subbin_rule_version": da.SUBBIN_RULE_VERSION}
+    expected = {"tokenizer_sha256": _cached_sha256(checkpoint_path), "subbin_rule_version": da.SUBBIN_RULE_VERSION}
 
     if not force and codes_path.exists() and sidecar_path.exists():
         try:
@@ -86,7 +109,7 @@ def render_gt_overlays(validation_dir, out_dir=None):
     validation_dir = Path(validation_dir)
     valset = CorpusValidationSet(validation_dir)
     frames = valset.load_all().numpy()
-    keypress, mouse = valset.load_all_actions()
+    keypress, mouse = valset.load_all_actions_raw()  # overlays want raw 8+2 always, not the model's native encoding
     dk, dm = _to_display_actions(keypress), _to_display_actions(mouse)  # boundary action -> frame n_observed-1
     out_dir = Path(out_dir) if out_dir else validation_dir / "decoded"
     out_dir.mkdir(parents=True, exist_ok=True)

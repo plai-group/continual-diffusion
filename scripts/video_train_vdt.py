@@ -55,6 +55,13 @@ def init_wandb(config, id):
     print(f"Number of nodes: {num_nodes}")
 
 
+def resolve_keypress_loss_weight(args):
+    """Sentinel default: unset (None) picks 10/36 for km_fsq, 1.0 otherwise; an explicit value always wins."""
+    if args.keypress_loss_weight is None:
+        args.keypress_loss_weight = _KM_FSQ_KEYPRESS_LOSS_WEIGHT if args.action_encoding == "km_fsq" else 1.0
+    return args.keypress_loss_weight
+
+
 def num_available_cores():
     # Copied from pytorch source code https://pytorch.org/docs/stable/_modules/torch/utils/data/dataloader.html#DataLoader
     max_num_worker_suggest = None
@@ -98,8 +105,7 @@ def main():
     args.model_type = 'vdt'
 
     validate_action_encoding(args.action_encoding, action_dim=args.action_dim, mouse_dim=args.mouse_dim)
-    if args.action_encoding == "km_fsq" and "--keypress_loss_weight" not in sys.argv:
-        args.keypress_loss_weight = _KM_FSQ_KEYPRESS_LOSS_WEIGHT
+    resolve_keypress_loss_weight(args)
 
     dist_util.setup_dist()
     resume = bool(args.resume_id)
@@ -219,8 +225,10 @@ def create_argparser():
         km_tokenizer_checkpoint=str(KM_TOKENIZER_DEFAULT_CHECKPOINT),
     )
     defaults.update(model_and_diffusion_defaults(model_type='vdt'))
+    defaults.pop("keypress_loss_weight")  # sentinel-resolved post-parse, once action_encoding is known (plaicraft-debug#80)
     parser = argparse.ArgumentParser()
     add_dict_to_argparser(parser, defaults)
+    parser.add_argument("--keypress_loss_weight", type=float, default=None)
     return parser
 
 

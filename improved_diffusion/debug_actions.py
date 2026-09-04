@@ -74,14 +74,21 @@ def read_session_fps(session_dir):
 def validate_action_encoding(action_encoding, fps=None, action_dim=None, mouse_dim=None):
     """km_fsq needs fps==12.5, action_dim==36, mouse_dim==0; raw needs action_dim==8,
     mouse_dim==2 -- except raw with both dims 0, which means no action conditioning
-    at all (the video-only default) and skips the dim check entirely."""
+    at all (the video-only default) and skips every check entirely. Both encodings need
+    the corpus fps to match decode_debug.DECODE_VIDEO_FPS: it (and debug_validation.VIDEO_FPS)
+    are hardcoded to 12.5, so a mismatched raw corpus would silently read wrong overlay
+    windows and start_frame math rather than fail loudly (plaicraft-debug#80's B4 fix)."""
+    from .decode_debug import DECODE_VIDEO_FPS
+
     if action_encoding not in ("raw", "km_fsq"):
         raise ValueError(f"unknown action_encoding {action_encoding!r}, expected 'raw' or 'km_fsq'")
     if action_encoding == "raw" and action_dim == 0 and mouse_dim == 0:
         return
     expected_dim, expected_mouse = (KM_CODE_DIM, 0) if action_encoding == "km_fsq" else (KEYPRESS_DIM, MOUSE_DIM)
-    if action_encoding == "km_fsq" and fps is not None and abs(fps - 12.5) > 1e-6:
-        raise ValueError(f"action_encoding='km_fsq' requires session fps==12.5, got {fps}")
+    if fps is not None and abs(fps - DECODE_VIDEO_FPS) > 1e-6:
+        raise ValueError(
+            f"action_encoding={action_encoding!r} requires session fps=={DECODE_VIDEO_FPS}, got {fps}"
+        )
     if action_dim is not None and action_dim != expected_dim:
         raise ValueError(f"action_encoding={action_encoding!r} expects action_dim={expected_dim}, got {action_dim}")
     if mouse_dim is not None and mouse_dim != expected_mouse:

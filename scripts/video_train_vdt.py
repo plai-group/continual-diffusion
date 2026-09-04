@@ -102,6 +102,7 @@ def main():
     validate_action_encoding(args.action_encoding, action_dim=args.action_dim, mouse_dim=args.mouse_dim)
     if args.action_encoding == "km_fsq" and "--keypress_loss_weight" not in sys.argv:
         args.keypress_loss_weight = _KM_FSQ_KEYPRESS_LOSS_WEIGHT
+    # raw_fused (plaicraft-debug#81) skips this: its single 10-dim term is 10/10 by construction, default weight 1.0 is correct.
 
     dist_util.setup_dist()
     resume = bool(args.resume_id)

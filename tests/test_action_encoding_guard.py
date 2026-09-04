@@ -38,6 +38,25 @@ def test_validate_action_encoding_raw_dims_ok():
     validate_action_encoding("raw", action_dim=8, mouse_dim=2)
 
 
+def test_validate_action_encoding_raw_zero_dims_ok():
+    validate_action_encoding("raw", action_dim=0, mouse_dim=0)  # video-only, no action conditioning
+
+
+def test_validate_action_encoding_km_fsq_zero_dims_raises():
+    with pytest.raises(ValueError, match="action_dim"):
+        validate_action_encoding("km_fsq", action_dim=0, mouse_dim=0)
+
+
+def test_validate_action_encoding_raw_partial_action_dim_raises():
+    with pytest.raises(ValueError, match="mouse_dim"):
+        validate_action_encoding("raw", action_dim=8, mouse_dim=0)
+
+
+def test_validate_action_encoding_raw_partial_mouse_dim_raises():
+    with pytest.raises(ValueError, match="action_dim"):
+        validate_action_encoding("raw", action_dim=0, mouse_dim=2)
+
+
 def test_validate_action_encoding_raw_wrong_action_dim_raises():
     with pytest.raises(ValueError, match="action_dim"):
         validate_action_encoding("raw", action_dim=36)

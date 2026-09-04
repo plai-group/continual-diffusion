@@ -141,11 +141,20 @@ def build_action_array(session_db_path, n_ticks):
     _fill(key_rows, _KEY_IDS, 0)
     _fill(click_rows, ("left", "right"), 6)
 
-    # mouse_movement carries exactly one row per sub-bin, at tick*80 + b*10 ms.
-    mouse_by_ts = {int(ts): (dx, dy) for ts, dx, dy in mouse_rows}
-    for s in range(n_sub):
-        dx, dy = mouse_by_ts.get(int(sub_starts[s]), (0.0, 0.0))
-        M[s, 0], M[s, 1] = dx, dy
+    # Containment, not exact-timestamp equality (debug data happens to land exactly on the
+    # 10ms grid, but real PLAICraft timestamps are continuous) -- accumulate each row into
+    # whichever sub-bin's [start, end) contains it. Vectorised via searchsorted/add.at rather
+    # than a python loop over n_sub * n_rows, since the corpus is large.
+    if mouse_rows:
+        ts = np.array([r[0] for r in mouse_rows], dtype=np.float64)
+        dx = np.array([r[1] for r in mouse_rows], dtype=np.float64)
+        dy = np.array([r[2] for r in mouse_rows], dtype=np.float64)
+        bin_idx = np.searchsorted(sub_starts, ts, side="right") - 1
+        clamped = np.clip(bin_idx, 0, n_sub - 1)
+        in_range = (bin_idx >= 0) & (bin_idx < n_sub) & (ts < sub_ends[clamped])
+        bin_idx, dx, dy = bin_idx[in_range], dx[in_range], dy[in_range]
+        np.add.at(M[:, 0], bin_idx, dx)
+        np.add.at(M[:, 1], bin_idx, dy)
 
     K = K.reshape(n_ticks, SUBBINS_PER_TICK, KEYPRESS_DIM)
     M = M.reshape(n_ticks, SUBBINS_PER_TICK, MOUSE_DIM)

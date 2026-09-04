@@ -488,23 +488,15 @@ def _label_panel(panel, text):
     return panel
 
 
-def _render_pair_overlay(frames_gt, frames_pred, actions_gt, actions_pred,
-                         n_observed, out_path, title=None):
-    """Side-by-side mp4: GT | PRED, from already-baked (keypress, mouse) tensors.
-
-    CorpusValidationSet rows (issue #81) have no session db -- decode_debug.
-    render_overlay's get_frame_actions can't draw their bars (it also hardcodes
-    100ms/10Hz frames, wrong for this corpus's 80ms/12.5Hz ticks). Both action
-    tensors are already loaded raw by run_debug_validation's caller, so this
-    reuses the same low-level primitives _render_triple_overlay does, just for
-    2 panels instead of 4.
+def _render_panels(frames_list, actions_list, labels, n_observed, out_path, ncols):
+    """Shared writer for _render_pair_overlay/_render_triple_overlay: one panel per
+    (frames, actions, label), arranged in an `ncols`-wide grid, same imageio/libx264
+    settings as decode_debug.render_overlay -- cv2's mp4v encodes fine and then will
+    not play in wandb.
     """
-    frames_gt = np.asarray(frames_gt)
-    frames_pred = np.asarray(frames_pred)
-    T = frames_gt.shape[0]
-
-    acts = [(_to_display_actions(k), _to_display_actions(m)) for k, m in (actions_gt, actions_pred)]
-    labels = ["GT", "PRED"]
+    frames_list = [np.asarray(f) for f in frames_list]
+    T = frames_list[0].shape[0]
+    acts = [(_to_display_actions(k), _to_display_actions(m)) for k, m in actions_list]
 
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -523,16 +515,34 @@ def _render_pair_overlay(frames_gt, frames_pred, actions_gt, actions_pred,
                 _overlay_frame(_to_uint8_frame(frames[t]),
                                _action_vec_to_bar(dk[t], dm[t]), border=border),
                 lab)
-            for frames, (dk, dm), lab in zip((frames_gt, frames_pred), acts, labels)
+            for frames, (dk, dm), lab in zip(frames_list, acts, labels)
         ]
-        writer.append_data(cv2.hconcat(panels))
+        rows = [cv2.hconcat(panels[i:i + ncols]) for i in range(0, len(panels), ncols)]
+        writer.append_data(rows[0] if len(rows) == 1 else cv2.vconcat(rows))
     writer.close()
     return out_path
 
 
+def _render_pair_overlay(frames_gt, frames_pred, actions_gt, actions_pred,
+                         n_observed, out_path):
+    """Side-by-side mp4: GT | PRED, from already-baked (keypress, mouse) tensors.
+
+    CorpusValidationSet rows (issue #81) have no session db -- decode_debug.
+    render_overlay's get_frame_actions can't draw their bars (it also hardcodes
+    100ms/10Hz frames, wrong for this corpus's 80ms/12.5Hz ticks). Both action
+    tensors are already loaded raw by run_debug_validation's caller, so this
+    reuses the same low-level primitives _render_triple_overlay does, just for
+    2 panels instead of 4.
+    """
+    return _render_panels(
+        (frames_gt, frames_pred), (actions_gt, actions_pred), ["GT", "PRED"],
+        n_observed, out_path, ncols=2,
+    )
+
+
 def _render_triple_overlay(frames_gt, frames_true, frames_swap, frames_zero,
                            actions_gt, actions_true, actions_swap, actions_zero,
-                           n_observed, out_path, title=None, true_label="TRUE"):
+                           n_observed, out_path, true_label="TRUE"):
     """2x2 grid mp4:  GT | TRUE  over  SWAP | ZERO.
 
     GT is included so the generated half can be judged against reality, not only
@@ -548,45 +558,13 @@ def _render_triple_overlay(frames_gt, frames_true, frames_swap, frames_zero,
     second panel carries the ones it GENERATED (label GEN), so GT vs GEN is a
     direct read of action-prediction quality; otherwise it carries the true
     actions it was conditioned on (label TRUE).
-
-    Same imageio/libx264 settings as decode_debug.render_overlay -- cv2's mp4v
-    encodes fine and then will not play in wandb.
     """
-    frames_gt = np.asarray(frames_gt)
-    frames_true = np.asarray(frames_true)
-    frames_swap = np.asarray(frames_swap)
-    frames_zero = np.asarray(frames_zero)
-    T = frames_true.shape[0]
-
-    # actions_* are each a (keypress, mouse) pair.
-    acts = [(_to_display_actions(k), _to_display_actions(m)) for k, m in
-            (actions_gt, actions_true, actions_swap, actions_zero)]
-    labels = ["GT", true_label, "SWAP", "ZERO"]
-
-    out_path = Path(out_path)
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-
-    import imageio
-
-    writer = imageio.get_writer(
-        str(out_path), fps=DECODE_VIDEO_FPS, codec="libx264",
-        macro_block_size=1,
-        ffmpeg_params=["-pix_fmt", "yuv420p"],
+    return _render_panels(
+        (frames_gt, frames_true, frames_swap, frames_zero),
+        (actions_gt, actions_true, actions_swap, actions_zero),
+        ["GT", true_label, "SWAP", "ZERO"],
+        n_observed, out_path, ncols=2,
     )
-    for t in range(T):
-        border = t < n_observed
-        panels = [
-            _label_panel(
-                _overlay_frame(_to_uint8_frame(frames[t]),
-                               _action_vec_to_bar(dk[t], dm[t]), border=border),
-                lab)
-            for frames, (dk, dm), lab in zip(
-                (frames_gt, frames_true, frames_swap, frames_zero), acts, labels)
-        ]
-        writer.append_data(cv2.vconcat([cv2.hconcat(panels[:2]),
-                                        cv2.hconcat(panels[2:])]))
-    writer.close()
-    return out_path
 
 
 @th.no_grad()
@@ -767,7 +745,6 @@ def run_debug_validation(model, diffusion, valset, device, out_dir,
                                           (pred_bar_mouse.cpu().numpy() if pred_bar_mouse is not None else mouse_raw_chunk[j].cpu().numpy())),
                             n_observed=n_obs,
                             out_path=str(mp4),
-                            title=row["prompt"],
                         )
                     else:
                         render_overlay(
@@ -893,7 +870,6 @@ def run_debug_validation(model, diffusion, valset, device, out_dir,
                                           (zero_mouse if zero_mouse is not None else mouse_zero_j[0]).cpu().numpy()),
                             true_label=("GEN" if (true_key is not None or true_mouse is not None) else "TRUE"),
                             n_observed=n_obs, out_path=str(mp4_swap),
-                            title=row["prompt"],
                         )
                         import wandb
                         logger.logkv(f"val/swap_overlay/{slug}", wandb.Video(str(mp4_swap)), distributed=False)

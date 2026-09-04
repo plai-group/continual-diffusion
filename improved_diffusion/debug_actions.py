@@ -14,8 +14,7 @@ KM_CODE_DIM = 36  # 12 FSQ groups x 3 dims (plaicraft-debug#80)
 # Bump when build_action_array's binning rule changes, to force km cache rebuilds.
 SUBBIN_RULE_VERSION = "1"
 
-# The 12.5 Hz action grid (plaicraft-debug#80): one tick per video frame, one
-# tokenizer control-frame every SUBBIN_MS ms within a tick.
+# 12.5 Hz action grid (plaicraft-debug#80): one tick per video frame, one tokenizer control-frame per SUBBIN_MS.
 TICK_MS = 80
 SUBBIN_MS = 10
 SUBBINS_PER_TICK = TICK_MS // SUBBIN_MS  # 8, matches the km tokenizer's block_size

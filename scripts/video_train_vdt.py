@@ -23,9 +23,7 @@ from improved_diffusion.logger import logger
 from improved_diffusion.debug_actions import validate_action_encoding
 from improved_diffusion.km_tokenizer.model import DEFAULT_CHECKPOINT as KM_TOKENIZER_DEFAULT_CHECKPOINT
 
-# plaicraft-debug#80: raw mode's total action contribution is (8+2)/2880 (weight 1.0 on
-# both terms); km_fsq has no separate mouse term (mouse_dim=0), so its single term must
-# carry that whole (8+2)/2880 to match -- weight * 36/2880 == 10/2880.
+# plaicraft-debug#80: km_fsq's single loss term must match raw's combined (8+2)/2880 contribution -- weight * 36/2880 == 10/2880.
 _KM_FSQ_KEYPRESS_LOSS_WEIGHT = 10 / 36
 
 os.environ["MY_WANDB_DIR"] = "none"

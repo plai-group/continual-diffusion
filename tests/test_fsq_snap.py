@@ -23,10 +23,7 @@ def test_snap_is_idempotent_on_exact_lattice_points():
 
 
 def test_snap_matches_fsq_codes_to_indices_then_indices_to_codes():
-    # Comparing against codes_to_indices/indices_to_codes directly, not FSQ.forward: forward's
-    # tanh soft-bound exists for training-time gradient flow and is not exactly idempotent at
-    # the lattice edges, but codes_to_indices/indices_to_codes is the LOSSLESS index<->code map
-    # this snap is meant to match (see the docstring in debug_actions.quantize_km_fsq).
+    # Compare against codes_to_indices/indices_to_codes (the lossless map), not FSQ.forward's non-idempotent tanh soft-bound.
     torch.manual_seed(1)
     fsq = _fsq()
     raw = torch.rand(8, 12, 3) * 2 - 1

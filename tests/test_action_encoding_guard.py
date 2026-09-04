@@ -38,6 +38,39 @@ def test_validate_action_encoding_raw_dims_ok():
     validate_action_encoding("raw", action_dim=8, mouse_dim=2)
 
 
+def test_validate_action_encoding_raw_wrong_fps_raises():
+    # decode_debug's frame-window math is fps-hardcoded to 12.5; raw needs it same as km_fsq.
+    with pytest.raises(ValueError, match="fps"):
+        validate_action_encoding("raw", fps=10.0, action_dim=8, mouse_dim=2)
+
+
+def test_validate_action_encoding_raw_right_fps_ok():
+    validate_action_encoding("raw", fps=12.5, action_dim=8, mouse_dim=2)
+
+
+def test_validate_action_encoding_raw_zero_dims_ok():
+    validate_action_encoding("raw", action_dim=0, mouse_dim=0)  # video-only, no action conditioning
+
+
+def test_validate_action_encoding_raw_zero_dims_skips_fps_check():
+    validate_action_encoding("raw", fps=10.0, action_dim=0, mouse_dim=0)  # video-only: no action data read at all
+
+
+def test_validate_action_encoding_km_fsq_zero_dims_raises():
+    with pytest.raises(ValueError, match="action_dim"):
+        validate_action_encoding("km_fsq", action_dim=0, mouse_dim=0)
+
+
+def test_validate_action_encoding_raw_partial_action_dim_raises():
+    with pytest.raises(ValueError, match="mouse_dim"):
+        validate_action_encoding("raw", action_dim=8, mouse_dim=0)
+
+
+def test_validate_action_encoding_raw_partial_mouse_dim_raises():
+    with pytest.raises(ValueError, match="action_dim"):
+        validate_action_encoding("raw", action_dim=0, mouse_dim=2)
+
+
 def test_validate_action_encoding_raw_wrong_action_dim_raises():
     with pytest.raises(ValueError, match="action_dim"):
         validate_action_encoding("raw", action_dim=36)
@@ -86,8 +119,17 @@ def test_dataset_construction_accepts_km_fsq_on_a_12_5fps_corpus(tmp_path):
     assert ds.action_encoding == "km_fsq"
 
 
-def test_dataset_construction_accepts_raw_regardless_of_fps(tmp_path):
+def test_dataset_construction_rejects_raw_on_a_mismatched_fps_corpus(tmp_path):
+    # decode_debug's frame-window math is fps-hardcoded to 12.5, so raw needs it too now.
     root = _make_corpus(tmp_path, fps=10.0)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        with pytest.raises(ValueError, match="fps"):
+            ContinuousDebugDataset(root, window_length=2, action_encoding="raw")
+
+
+def test_dataset_construction_accepts_raw_on_a_12_5fps_corpus(tmp_path):
+    root = _make_corpus(tmp_path, fps=12.5)
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         ds = ContinuousDebugDataset(root, window_length=2, action_encoding="raw")

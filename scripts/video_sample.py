@@ -22,6 +22,7 @@ from improved_diffusion.script_util import (
     create_model_and_diffusion,
     args_to_dict,
     str2bool,
+    backfill_action_encoding,
 )
 from improved_diffusion.test_util import get_model_results_path, get_eval_run_identifier, Protect
 from improved_diffusion.sampling_schemes import sampling_schemes
@@ -186,8 +187,7 @@ def main_outer(args):
             model_args.input_size = model_args.image_size
         if is_vdt and not hasattr(model_args, "patch_size"):
             model_args.patch_size = 2
-    if not hasattr(model_args, "action_encoding"):  # plaicraft-debug#80: pre-#80 checkpoints are raw
-        model_args.action_encoding = "raw"
+    backfill_action_encoding(model_args)
     model, diffusion = create_model_and_diffusion(model_type=model_args.model_type,
         **args_to_dict(model_args, model_and_diffusion_defaults(model_type=model_args.model_type).keys())
     )

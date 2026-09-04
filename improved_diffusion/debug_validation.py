@@ -39,8 +39,7 @@ from .decode_debug import (
 VIDEO_FPS = 12.5  # plaicraft-debug#80: the corpus's session.fps
 MS_PER_FRAME = 1000.0 / VIDEO_FPS
 
-# 12.5Hz action grid (plaicraft-debug#80): a tick's raw action is broadcast across
-# its 8 sub-bins when encoding an intervention live through the km tokenizer.
+# plaicraft-debug#80: a tick's raw action broadcasts across its 8 sub-bins when live-encoding an intervention.
 SUBBINS_PER_TICK = debug_actions.SUBBINS_PER_TICK
 
 # LPIPS runs a VGG backbone with five 2x downsamples; a 24x40 frame collapses to
@@ -230,8 +229,10 @@ def _get_km_tokenizer(device, checkpoint=None):
 
 
 def _symlog(v):
-    """Metric-time-only compression so mouse_l1/mouse_mse stay on their historical scale
-    even though the underlying targets are raw pixels for both raw and km_fsq (#80's B2)."""
+    """Metric-time compression so mouse_l1/mouse_mse stay on their historical scale.
+    Only needed for km_fsq, whose _decode_km_actions returns raw pixels -- raw mode's
+    mouse is already symlog-scale from debug_actions.load_or_build, so symlogging it
+    again here would double-compress it (#80's B2)."""
     return th.sign(v) * th.log1p(th.abs(v))
 
 
@@ -297,13 +298,7 @@ class _CFGWrapper(nn.Module):
         return eps_uncond + self.w * (eps_cond - eps_uncond), None
 
 
-# _invert_actions/_swap_actions/_zero_actions always operate on the RAW 8+2 tick-resolution
-# arrays (DebugValidationSet.load_all_actions_raw), never on a km_fsq run's native 36-dim
-# codes and never on a decode_codes() round trip. Issue-74's keypress autoencoder decoded
-# latents, intervened, then re-encoded -- feeding the encoder out-of-distribution logits,
-# which made shift/space swaps silently vanish (fixed in 6a38b88). Keeping the raw arrays
-# around and only encoding LIVE, after intervening (see _encode_km_actions), avoids that
-# failure mode structurally rather than by discipline.
+# _invert_actions/_swap_actions/_zero_actions operate only on RAW 8+2 arrays, never km_fsq codes or a decode/re-encode round trip -- issue-74's decode-then-reencode fed the encoder out-of-distribution logits and silently dropped shift/space swaps (fixed in 6a38b88).
 def _invert_actions(keypress, mouse):
     """The OPPOSITE action on every axis.
 
@@ -432,7 +427,7 @@ _QUANTIZE_FNS = {
 }
 
 
-def _action_metrics(p_key, g_key, p_mouse, g_mouse, sl, quantize="none"):
+def _action_metrics(p_key, g_key, p_mouse, g_mouse, sl, quantize="none", is_km_fsq=False):
     """Action metrics over one frame window, plus the all-zeros baseline.
 
     Keypress and mouse are computed independently -- either side may be None
@@ -459,9 +454,10 @@ def _action_metrics(p_key, g_key, p_mouse, g_mouse, sl, quantize="none"):
         fn = int(((g_k == 1) & (p_k == 0)).sum().item())
         out["key_jaccard_distance"] = float(1 - tp / (tp + fp + fn)) if tp + fp + fn > 0 else 0.0
     if p_mouse is not None and g_mouse is not None:
-        # symlog at metric time: p_mouse/g_mouse are raw pixels (#80's B2), but the wandb
-        # metric stays on its historical, dynamic-range-compressed scale.
-        p_m, g_m = _symlog(p_mouse[sl]), _symlog(g_mouse[sl])
+        # km_fsq and raw_fused (caller passes is_km_fsq=True for both) hand us raw-pixel-
+        # scale mouse here and need symlog at metric time; raw mode's mouse is already
+        # symlog-scale (debug_actions.load_or_build), so leave it alone (#80's B2).
+        p_m, g_m = (_symlog(p_mouse[sl]), _symlog(g_mouse[sl])) if is_km_fsq else (p_mouse[sl], g_mouse[sl])
         out["mouse_l1"] = float((p_m - g_m).abs().mean().item())
         out["mouse_mse"] = float(((p_m - g_m) ** 2).mean().item())
         out["mouse_l1_trivial"] = float(g_m.abs().mean().item())
@@ -682,8 +678,7 @@ def run_debug_validation(model, diffusion, valset, device, out_dir,
         samples = samples * latent_mask + x0 * obs_mask
 
         if is_km_fsq:
-            # The "Key design decision": VDT regresses continuous codes; snap to the nearest
-            # FSQ lattice point here, at inference, before decoding -- never during training.
+            # VDT regresses continuous codes; snap to the nearest FSQ lattice point here, at inference, never during training.
             act_for_decode = (debug_actions.quantize_km_fsq(samples_act)
                               if action_quantization == "fsq" and samples_act is not None else samples_act)
             p_key_chunk, p_mouse_chunk = (_decode_km_actions(km_tokenizer, act_for_decode)
@@ -725,7 +720,9 @@ def run_debug_validation(model, diffusion, valset, device, out_dir,
                 for scope, sl in (("next", slice(first_gen, first_gen + 1)),
                                   ("roll", slice(first_gen, None))):
                     rec.update({f"{scope}/{k}": v
-                                for k, v in _action_metrics(p_key, g_key, p_mouse, g_mouse, sl, metrics_quantize).items()})
+                                for k, v in _action_metrics(p_key, g_key, p_mouse, g_mouse, sl,
+                                                             metrics_quantize,
+                                                             is_km_fsq=is_km_fsq or is_raw_fused).items()})
             per_row.append(rec)
 
             slug = valset.slug(row)
@@ -739,10 +736,7 @@ def run_debug_validation(model, diffusion, valset, device, out_dir,
             if log_videos:
                 mp4 = out_dir / f"step{step}_{slug}.mp4"
                 try:
-                    # Top row keeps the recorded actions; this row shows what the model produced (always
-                    # 8+2/raw-pixels here, decoded already for km_fsq), falling back to the raw ground
-                    # truth for any un-generated modality -- never to the native 36-dim km codes, which
-                    # _action_bars cannot draw.
+                    # Bottom row: model output (8+2/raw-pixels, km_fsq already decoded), falling back to raw GT per-modality -- never native 36-dim km codes, which _action_bars can't draw.
                     pred_bar_key = p_key_chunk[j] if p_key_chunk is not None else keypress_raw_chunk[j] if keypress_raw_chunk is not None else None
                     pred_bar_mouse = p_mouse_chunk[j] if p_mouse_chunk is not None else mouse_raw_chunk[j] if mouse_raw_chunk is not None else None
                     if is_corpus_valset:
@@ -778,9 +772,7 @@ def run_debug_validation(model, diffusion, valset, device, out_dir,
                     print(f"[debug_validation] overlay failed for row {row['num']}: {e!r}")
 
             # The swap test (acceptance criterion): true/swapped/zero actions on the same context.
-            # Always intervenes on the RAW 8+2 tick-resolution arrays -- see the note above
-            # _invert_actions -- and, for km_fsq, encodes the (possibly-intervened) result live
-            # through the tokenizer only when building each pass's model_kwargs.
+            # Intervenes on the RAW 8+2 arrays (see the note above _invert_actions), encoding km_fsq live per pass.
             if swap_test and action_conditioned and keypress_raw_chunk is not None and mouse_raw_chunk is not None:
                 try:
                     key_true_j = keypress_raw_chunk[j:j + 1]
@@ -814,7 +806,9 @@ def run_debug_validation(model, diffusion, valset, device, out_dir,
                             actions_in = th.cat([key_raw, debug_actions._symlog(mouse_raw)], dim=-1)
                             mouse_in = key_raw.new_zeros(key_raw.shape[0], key_raw.shape[1], 0)
                         else:
-                            actions_in, mouse_in = key_raw, mouse_raw
+                            # Convert ground-truth raw pixels to the model's native conditioning
+                            # encoding, same as debug_actions.load_or_build does for the main pass.
+                            actions_in, mouse_in = key_raw, _symlog(mouse_raw)
                         with RNG(swap_seed):
                             s, _ = diffusion.heun_sample(
                                 sampling_model, x0_j.shape, noise=shared_noise,

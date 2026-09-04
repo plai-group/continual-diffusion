@@ -13,11 +13,10 @@ KEYPRESS_DIM = 8
 MOUSE_DIM = 2
 KM_CODE_DIM = 36  # 12 FSQ groups x 3 dims (plaicraft-debug#80)
 RAW_FUSED_DIM = 10  # 8 keypress + symlog(dx), symlog(dy); mouse_dim=0 (plaicraft-debug#81)
-# Bump when build_action_array's binning rule changes, to force km cache rebuilds.
-SUBBIN_RULE_VERSION = "1"
+# Bump when build_action_array's binning rule changes, to force raw/km cache rebuilds.
+SUBBIN_RULE_VERSION = "2"  # v2: symlog mouse in load_or_build's raw branch + containment binning
 
-# The 12.5 Hz action grid (plaicraft-debug#80): one tick per video frame, one
-# tokenizer control-frame every SUBBIN_MS ms within a tick.
+# 12.5 Hz action grid (plaicraft-debug#80): one tick per video frame, one tokenizer control-frame per SUBBIN_MS.
 TICK_MS = 80
 SUBBIN_MS = 10
 SUBBINS_PER_TICK = TICK_MS // SUBBIN_MS  # 8, matches the km tokenizer's block_size
@@ -84,19 +83,29 @@ def read_session_fps(session_dir):
 
 def validate_action_encoding(action_encoding, fps=None, action_dim=None, mouse_dim=None):
     """km_fsq needs fps==12.5, action_dim==36, mouse_dim==0; raw needs action_dim==8,
-    mouse_dim==2; raw_fused needs action_dim==10, mouse_dim==0 (no fps gate -- it's just a
-    layout change on raw). Every argument but action_encoding is optional, so this doubles
-    as a dataset-construction guard (fps only) and a CLI guard (dims only)."""
+    mouse_dim==2; raw_fused needs action_dim==10, mouse_dim==0 -- except raw with both dims
+    0, which means no action conditioning at all (the video-only default) and skips every
+    check entirely. All three encodings need the corpus fps to match
+    decode_debug.DECODE_VIDEO_FPS: it (and debug_validation.VIDEO_FPS) are hardcoded to 12.5,
+    and raw_fused reads the same corpus through the same load_or_build_raw cache and the same
+    hardcoded decode path as raw, so a mismatched corpus would silently read wrong overlay
+    windows and start_frame math rather than fail loudly (plaicraft-debug#80's B4 fix)."""
+    from .decode_debug import DECODE_VIDEO_FPS
+
     if action_encoding not in ("raw", "km_fsq", "raw_fused"):
         raise ValueError(f"unknown action_encoding {action_encoding!r}, expected 'raw', 'km_fsq', or 'raw_fused'")
+    if action_encoding == "raw" and action_dim == 0 and mouse_dim == 0:
+        return
     if action_encoding == "km_fsq":
         expected_dim, expected_mouse = KM_CODE_DIM, 0
     elif action_encoding == "raw_fused":
         expected_dim, expected_mouse = RAW_FUSED_DIM, 0
     else:
         expected_dim, expected_mouse = KEYPRESS_DIM, MOUSE_DIM
-    if action_encoding == "km_fsq" and fps is not None and abs(fps - 12.5) > 1e-6:
-        raise ValueError(f"action_encoding='km_fsq' requires session fps==12.5, got {fps}")
+    if fps is not None and abs(fps - DECODE_VIDEO_FPS) > 1e-6:
+        raise ValueError(
+            f"action_encoding={action_encoding!r} requires session fps=={DECODE_VIDEO_FPS}, got {fps}"
+        )
     if action_dim is not None and action_dim != expected_dim:
         raise ValueError(f"action_encoding={action_encoding!r} expects action_dim={expected_dim}, got {action_dim}")
     if mouse_dim is not None and mouse_dim != expected_mouse:
@@ -109,9 +118,10 @@ def build_action_array(session_db_path, n_ticks):
     (n_ticks*8, 2) float32, one row per 10 ms sub-bin.
       keypress 0-5: held keys [w,a,s,d,space,shift] during that sub-bin
       keypress 6-7: held mouse clicks [left, right]
-      mouse 0-1: raw pixel mouseDX, mouseDY summed at that sub-bin (no symlog --
-        the km tokenizer's own feature stem does its own normalization, and raw
-        mode wants pixels directly)
+      mouse 0-1: raw pixel mouseDX, mouseDY summed at that sub-bin -- never symlogged
+        here, the km tokenizer's own feature stem normalizes raw pixels itself, and
+        load_or_build_raw needs this un-symlogged for ground truth. load_or_build applies
+        symlog on top of this, but only for its own raw-mode model-conditioning output.
 
     This is the SAME code regardless of who wrote the DB: debug's key/click
     intervals happen to be tick-aligned, so all 8 sub-bins of a tick end up
@@ -155,11 +165,20 @@ def build_action_array(session_db_path, n_ticks):
     _fill(key_rows, _KEY_IDS, 0)
     _fill(click_rows, ("left", "right"), 6)
 
-    # mouse_movement carries exactly one row per sub-bin, at tick*80 + b*10 ms.
-    mouse_by_ts = {int(ts): (dx, dy) for ts, dx, dy in mouse_rows}
-    for s in range(n_sub):
-        dx, dy = mouse_by_ts.get(int(sub_starts[s]), (0.0, 0.0))
-        M[s, 0], M[s, 1] = dx, dy
+    # Containment, not exact-timestamp equality (debug data happens to land exactly on the
+    # 10ms grid, but real PLAICraft timestamps are continuous) -- accumulate each row into
+    # whichever sub-bin's [start, end) contains it. Vectorised via searchsorted/add.at rather
+    # than a python loop over n_sub * n_rows, since the corpus is large.
+    if mouse_rows:
+        ts = np.array([r[0] for r in mouse_rows], dtype=np.float64)
+        dx = np.array([r[1] for r in mouse_rows], dtype=np.float64)
+        dy = np.array([r[2] for r in mouse_rows], dtype=np.float64)
+        bin_idx = np.searchsorted(sub_starts, ts, side="right") - 1
+        clamped = np.clip(bin_idx, 0, n_sub - 1)
+        in_range = (bin_idx >= 0) & (bin_idx < n_sub) & (ts < sub_ends[clamped])
+        bin_idx, dx, dy = bin_idx[in_range], dx[in_range], dy[in_range]
+        np.add.at(M[:, 0], bin_idx, dx)
+        np.add.at(M[:, 1], bin_idx, dy)
 
     K = K.reshape(n_ticks, SUBBINS_PER_TICK, KEYPRESS_DIM)
     M = M.reshape(n_ticks, SUBBINS_PER_TICK, MOUSE_DIM)
@@ -185,20 +204,36 @@ def _load_cached(cache_path, n_ticks, expected_dim):
     return None  # missing, or stale (tick count or dim mismatch)
 
 
+def _raw_cache_paths(session_dir):
+    return (session_dir / "actions_keypress.npy", session_dir / "actions_mouse.npy",
+            session_dir / "actions_raw.json")
+
+
 def load_or_build_raw(session_dir):
     """Tick-resolution ground truth, for overlays and interventions: (n_ticks, 8) keys
     (OR-reduced over the tick's 8 sub-bins) + (n_ticks, 2) raw-pixel mouse (summed over
-    the tick's 8 sub-bins). Already causally shifted -- see build_action_array."""
+    the tick's 8 sub-bins). Already causally shifted -- see build_action_array.
+
+    Cached to a sidecar recording the binning rule, same pattern as the km codes cache --
+    a pre-#80 cache has the identical (n_ticks, dim) shape (100ms bins, exact-timestamp
+    mouse lookup) so the shape check alone can't tell it apart; a missing or mismatched
+    sidecar is just a stale cache, not corrupt, so it rebuilds rather than fails."""
     session_dir = Path(session_dir)
     sid = session_dir.name
     n_ticks = _n_ticks_from_hdf5(session_dir)
-    keypress_path = session_dir / "actions_keypress.npy"
-    mouse_path = session_dir / "actions_mouse.npy"
+    keypress_path, mouse_path, sidecar_path = _raw_cache_paths(session_dir)
+    expected_sidecar = {"subbin_rule_version": SUBBIN_RULE_VERSION}
 
-    keypress = _load_cached(keypress_path, n_ticks, KEYPRESS_DIM)
-    mouse = _load_cached(mouse_path, n_ticks, MOUSE_DIM)
-    if keypress is not None and mouse is not None:
-        return keypress, mouse
+    if sidecar_path.exists():
+        try:
+            sidecar = json.loads(sidecar_path.read_text())
+        except (json.JSONDecodeError, OSError):
+            sidecar = None
+        if sidecar == expected_sidecar:
+            keypress = _load_cached(keypress_path, n_ticks, KEYPRESS_DIM)
+            mouse = _load_cached(mouse_path, n_ticks, MOUSE_DIM)
+            if keypress is not None and mouse is not None:
+                return keypress, mouse
 
     db_path = session_dir / f"{sid}.db"
     key_sub, mouse_sub = build_action_array(db_path, n_ticks)
@@ -208,6 +243,9 @@ def load_or_build_raw(session_dir):
         tmp_path = path.with_name(f".{path.stem}.{os.getpid()}.tmp.npy")
         np.save(tmp_path, arr)
         os.replace(tmp_path, path)  # atomic within same directory
+    tmp_sidecar = sidecar_path.with_name(f".{sidecar_path.stem}.{os.getpid()}.tmp.json")
+    tmp_sidecar.write_text(json.dumps(expected_sidecar))
+    os.replace(tmp_sidecar, sidecar_path)
 
     return np.load(keypress_path, mmap_mode="r"), np.load(mouse_path, mmap_mode="r")
 
@@ -267,12 +305,14 @@ def _load_or_build_km_codes(session_dir, tokenizer_checkpoint, device):
 
 
 def load_or_build(session_dir, action_encoding="raw", tokenizer_checkpoint=None, device=None):
-    """raw -> (n_ticks, 8) keypress + (n_ticks, 2) mouse, both tick-resolution ground truth.
+    """raw -> (n_ticks, 8) keypress + (n_ticks, 2) symlog-compressed mouse -- the MODEL'S
+    NATIVE CONDITIONING encoding, not ground truth (see load_or_build_raw for that).
     km_fsq -> (n_ticks, 36) quantized codes + (n_ticks, 0) empty mouse (folded into the codes).
     raw_fused -> (n_ticks, 10) [keypress, symlog(mouse)] + (n_ticks, 0) empty mouse; reuses
     load_or_build_raw's cache, so a raw and a raw_fused run share one warmed corpus."""
     if action_encoding == "raw":
-        return load_or_build_raw(session_dir)
+        keypress, mouse = load_or_build_raw(session_dir)
+        return keypress, _symlog(np.asarray(mouse))
     if action_encoding == "km_fsq":
         from .km_tokenizer.model import DEFAULT_CHECKPOINT
 

@@ -43,8 +43,15 @@ def test_validate_action_encoding_raw_fused_rejects_raw_dims():
         validate_action_encoding("raw_fused", action_dim=8, mouse_dim=0)
 
 
-def test_validate_action_encoding_raw_fused_has_no_fps_gate():
-    validate_action_encoding("raw_fused", fps=10.0, action_dim=10, mouse_dim=0)
+def test_validate_action_encoding_raw_fused_wrong_fps_raises():
+    # raw_fused reads the same corpus through the same load_or_build_raw cache and the
+    # same hardcoded-12.5 decode path as raw, so it needs the same fps gate (plaicraft-debug#80).
+    with pytest.raises(ValueError, match="fps"):
+        validate_action_encoding("raw_fused", fps=10.0, action_dim=10, mouse_dim=0)
+
+
+def test_validate_action_encoding_raw_fused_right_fps_ok():
+    validate_action_encoding("raw_fused", fps=12.5, action_dim=10, mouse_dim=0)
 
 
 def test_validate_action_encoding_unknown_mode_still_raises():
@@ -84,7 +91,9 @@ def test_load_or_build_raw_fused_does_not_create_a_third_cache_file(tmp_path):
     session_dir = _make_session(tmp_path, n_ticks=2)
     da.load_or_build(session_dir, action_encoding="raw_fused")
     files = sorted(p.name for p in session_dir.glob("actions_*"))
-    assert files == ["actions_keypress.npy", "actions_mouse.npy"]
+    # Just load_or_build_raw's own pair + its version sidecar (plaicraft-debug#80) --
+    # no separate raw_fused-only cache file.
+    assert files == ["actions_keypress.npy", "actions_mouse.npy", "actions_raw.json"]
 
 
 def test_raw_and_raw_fused_share_the_same_warmed_cache(tmp_path):

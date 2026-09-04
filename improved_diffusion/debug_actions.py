@@ -68,10 +68,12 @@ def read_session_fps(session_dir):
 
 def validate_action_encoding(action_encoding, fps=None, action_dim=None, mouse_dim=None):
     """km_fsq needs fps==12.5, action_dim==36, mouse_dim==0; raw needs action_dim==8,
-    mouse_dim==2. Every argument but action_encoding is optional, so this doubles as a
-    dataset-construction guard (fps only) and a CLI guard (dims only)."""
+    mouse_dim==2 -- except raw with both dims 0, which means no action conditioning
+    at all (the video-only default) and skips the dim check entirely."""
     if action_encoding not in ("raw", "km_fsq"):
         raise ValueError(f"unknown action_encoding {action_encoding!r}, expected 'raw' or 'km_fsq'")
+    if action_encoding == "raw" and action_dim == 0 and mouse_dim == 0:
+        return
     expected_dim, expected_mouse = (KM_CODE_DIM, 0) if action_encoding == "km_fsq" else (KEYPRESS_DIM, MOUSE_DIM)
     if action_encoding == "km_fsq" and fps is not None and abs(fps - 12.5) > 1e-6:
         raise ValueError(f"action_encoding='km_fsq' requires session fps==12.5, got {fps}")

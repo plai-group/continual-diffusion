@@ -342,6 +342,22 @@ def _zero_actions(keypress, mouse, where):
             th.where(where.bool(), th.zeros_like(mouse), mouse))
 
 
+def _zero_single_action(keypress, mouse, boundary_idx):
+    """(B,T,8)+(B,T,2) raw action tensors -> same shapes, with ONLY row `boundary_idx`
+    zeroed; every other row -- including the rest of the generated region -- comes
+    back byte-identical to the input.
+
+    Issue #81: mirrors _swap_single_action's single-row shape so l2_true_swap and
+    l2_true_zero perturb the same one row and stay directly comparable. Deliberately
+    NOT _zero_actions, which zeros an entire region -- that one stays as-is for the
+    legacy prose-prompt DebugValidationSet path, which is not boundary-based.
+    """
+    keypress, mouse = keypress.clone(), mouse.clone()
+    keypress[:, boundary_idx] = 0.0
+    mouse[:, boundary_idx] = 0.0
+    return keypress, mouse
+
+
 def _swap_single_action(keypress, mouse, boundary_idx, swap_kind, swap_dim=None, swap_counterpart_dim=None):
     """(B,T,8)+(B,T,2) raw action tensors -> same shapes, with ONLY row `boundary_idx`
     modified per swap_kind; every other row -- including the rest of the generated
@@ -792,7 +808,10 @@ def run_debug_validation(model, diffusion, valset, device, out_dir,
                         )
                     else:
                         key_swap_j, mouse_swap_j = _swap_actions(key_true_j, mouse_true_j, intervene_on)
-                    key_zero_j, mouse_zero_j = _zero_actions(key_true_j, mouse_true_j, intervene_on)
+                    if is_corpus_valset:
+                        key_zero_j, mouse_zero_j = _zero_single_action(key_true_j, mouse_true_j, boundary_idx=n_obs)
+                    else:
+                        key_zero_j, mouse_zero_j = _zero_actions(key_true_j, mouse_true_j, intervene_on)
                     # Same starting noise for all three passes, so only the actions tensor differs.
                     shared_noise = th.randn(*x0_j.shape, device=device)
                     # heun_sample's churn draws from the global RNG each step; reseed per pass too.

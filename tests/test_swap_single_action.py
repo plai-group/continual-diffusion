@@ -1,11 +1,14 @@
 """Issue #81: _swap_single_action -- the targeted, boundary-tick-only intervention
 used against CorpusValidationSet's exercises. Unlike _swap_actions (whole-region
 flip), only row `boundary_idx` may change; every other row, including the rest of
-the generated region, must come back byte-identical to the input."""
+the generated region, must come back byte-identical to the input.
+
+_zero_single_action mirrors that same single-row shape for the zero intervention,
+so l2_true_swap and l2_true_zero are directly comparable magnitudes."""
 import pytest
 import torch
 
-from improved_diffusion.debug_validation import _swap_single_action
+from improved_diffusion.debug_validation import _swap_single_action, _zero_single_action
 
 
 def _sample():
@@ -64,4 +67,22 @@ def test_inputs_not_mutated():
     keypress, mouse = _sample()
     k0, m0 = keypress.clone(), mouse.clone()
     _swap_single_action(keypress, mouse, 1, "mouse_dx")
+    assert torch.equal(keypress, k0) and torch.equal(mouse, m0)
+
+
+def test_zero_touches_only_boundary_row():
+    keypress, mouse = _sample()
+    boundary = 2
+    out_k, out_m = _zero_single_action(keypress, mouse, boundary)
+    assert torch.all(out_k[:, boundary] == 0.0)
+    assert torch.all(out_m[:, boundary] == 0.0)
+    other = _other_rows(keypress.shape[1], boundary)
+    assert torch.equal(out_k[:, other], keypress[:, other])
+    assert torch.equal(out_m[:, other], mouse[:, other])
+
+
+def test_zero_inputs_not_mutated():
+    keypress, mouse = _sample()
+    k0, m0 = keypress.clone(), mouse.clone()
+    _zero_single_action(keypress, mouse, 1)
     assert torch.equal(keypress, k0) and torch.equal(mouse, m0)

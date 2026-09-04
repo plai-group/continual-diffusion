@@ -55,6 +55,16 @@ class CorpusValidationSet:
         self.rows = []
         for i, name in enumerate(names):
             ex = by_name[name]
+            window_start = int(window_start_ticks[i])
+            boundary_tick = int(boundary_ticks[i])
+            offset = boundary_tick - window_start
+            # Raises, not warns: swap hardcodes boundary_idx=n_observed; mismatch would intervene on the wrong tick silently (plaicraft-debug#81).
+            if offset != self.n_observed:
+                raise ValueError(
+                    f"exercise {name!r}: boundary_tick - window_start = {offset}, "
+                    f"expected n_observed={self.n_observed} "
+                    f"(window_start={window_start}, boundary_tick={boundary_tick})"
+                )
             self.rows.append(dict(
                 num=int(ex["index"]),
                 name=name,
@@ -67,8 +77,8 @@ class CorpusValidationSet:
                 swap_kind=ex["swap_kind"],
                 swap_dim=ex.get("swap_dim"),
                 swap_counterpart_dim=ex.get("swap_counterpart_dim"),
-                window_start=int(window_start_ticks[i]),
-                boundary_tick=int(boundary_ticks[i]),
+                window_start=window_start,
+                boundary_tick=boundary_tick,
             ))
 
     def slug(self, row):

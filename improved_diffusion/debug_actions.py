@@ -11,8 +11,8 @@ import torch
 KEYPRESS_DIM = 8
 MOUSE_DIM = 2
 KM_CODE_DIM = 36  # 12 FSQ groups x 3 dims (plaicraft-debug#80)
-# Bump when build_action_array's binning rule changes, to force km cache rebuilds.
-SUBBIN_RULE_VERSION = "1"
+# Bump when build_action_array's binning rule changes, to force raw/km cache rebuilds.
+SUBBIN_RULE_VERSION = "2"  # v2: symlog mouse in load_or_build's raw branch + containment binning
 
 # 12.5 Hz action grid (plaicraft-debug#80): one tick per video frame, one tokenizer control-frame per SUBBIN_MS.
 TICK_MS = 80
@@ -180,20 +180,36 @@ def _load_cached(cache_path, n_ticks, expected_dim):
     return None  # missing, or stale (tick count or dim mismatch)
 
 
+def _raw_cache_paths(session_dir):
+    return (session_dir / "actions_keypress.npy", session_dir / "actions_mouse.npy",
+            session_dir / "actions_raw.json")
+
+
 def load_or_build_raw(session_dir):
     """Tick-resolution ground truth, for overlays and interventions: (n_ticks, 8) keys
     (OR-reduced over the tick's 8 sub-bins) + (n_ticks, 2) raw-pixel mouse (summed over
-    the tick's 8 sub-bins). Already causally shifted -- see build_action_array."""
+    the tick's 8 sub-bins). Already causally shifted -- see build_action_array.
+
+    Cached to a sidecar recording the binning rule, same pattern as the km codes cache --
+    a pre-#80 cache has the identical (n_ticks, dim) shape (100ms bins, exact-timestamp
+    mouse lookup) so the shape check alone can't tell it apart; a missing or mismatched
+    sidecar is just a stale cache, not corrupt, so it rebuilds rather than fails."""
     session_dir = Path(session_dir)
     sid = session_dir.name
     n_ticks = _n_ticks_from_hdf5(session_dir)
-    keypress_path = session_dir / "actions_keypress.npy"
-    mouse_path = session_dir / "actions_mouse.npy"
+    keypress_path, mouse_path, sidecar_path = _raw_cache_paths(session_dir)
+    expected_sidecar = {"subbin_rule_version": SUBBIN_RULE_VERSION}
 
-    keypress = _load_cached(keypress_path, n_ticks, KEYPRESS_DIM)
-    mouse = _load_cached(mouse_path, n_ticks, MOUSE_DIM)
-    if keypress is not None and mouse is not None:
-        return keypress, mouse
+    if sidecar_path.exists():
+        try:
+            sidecar = json.loads(sidecar_path.read_text())
+        except (json.JSONDecodeError, OSError):
+            sidecar = None
+        if sidecar == expected_sidecar:
+            keypress = _load_cached(keypress_path, n_ticks, KEYPRESS_DIM)
+            mouse = _load_cached(mouse_path, n_ticks, MOUSE_DIM)
+            if keypress is not None and mouse is not None:
+                return keypress, mouse
 
     db_path = session_dir / f"{sid}.db"
     key_sub, mouse_sub = build_action_array(db_path, n_ticks)
@@ -203,6 +219,9 @@ def load_or_build_raw(session_dir):
         tmp_path = path.with_name(f".{path.stem}.{os.getpid()}.tmp.npy")
         np.save(tmp_path, arr)
         os.replace(tmp_path, path)  # atomic within same directory
+    tmp_sidecar = sidecar_path.with_name(f".{sidecar_path.stem}.{os.getpid()}.tmp.json")
+    tmp_sidecar.write_text(json.dumps(expected_sidecar))
+    os.replace(tmp_sidecar, sidecar_path)
 
     return np.load(keypress_path, mmap_mode="r"), np.load(mouse_path, mmap_mode="r")
 

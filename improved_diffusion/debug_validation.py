@@ -342,6 +342,45 @@ def _zero_actions(keypress, mouse, where):
             th.where(where.bool(), th.zeros_like(mouse), mouse))
 
 
+def _zero_single_action(keypress, mouse, boundary_idx):
+    """(B,T,8)+(B,T,2) raw action tensors -> same shapes, with ONLY row `boundary_idx`
+    zeroed; every other row -- including the rest of the generated region -- comes
+    back byte-identical to the input.
+
+    Issue #81: mirrors _swap_single_action's single-row shape so l2_true_swap and
+    l2_true_zero perturb the same one row and stay directly comparable. Deliberately
+    NOT _zero_actions, which zeros an entire region -- that one stays as-is for the
+    legacy prose-prompt DebugValidationSet path, which is not boundary-based.
+    """
+    keypress, mouse = keypress.clone(), mouse.clone()
+    keypress[:, boundary_idx] = 0.0
+    mouse[:, boundary_idx] = 0.0
+    return keypress, mouse
+
+
+def _swap_single_action(keypress, mouse, boundary_idx, swap_kind, swap_dim=None, swap_counterpart_dim=None):
+    """(B,T,8)+(B,T,2) raw action tensors -> same shapes, with ONLY row `boundary_idx`
+    modified per swap_kind; every other row -- including the rest of the generated
+    region -- comes back byte-identical to the input.
+
+    Issue #81: one flipped decision at the action boundary, matching a
+    CorpusValidationSet exercise's own swap_kind/swap_dim/swap_counterpart_dim.
+    Deliberately NOT _swap_actions, which flips an entire region.
+    """
+    keypress, mouse = keypress.clone(), mouse.clone()
+    if swap_kind == "keypress":
+        a = keypress[:, boundary_idx, swap_dim].clone()
+        keypress[:, boundary_idx, swap_dim] = keypress[:, boundary_idx, swap_counterpart_dim]
+        keypress[:, boundary_idx, swap_counterpart_dim] = a
+    elif swap_kind == "mouse_dx":
+        mouse[:, boundary_idx, 0] = -mouse[:, boundary_idx, 0]
+    elif swap_kind == "mouse_dy":
+        mouse[:, boundary_idx, 1] = -mouse[:, boundary_idx, 1]
+    else:
+        raise ValueError(f"unknown swap_kind {swap_kind!r}, expected keypress/mouse_dx/mouse_dy")
+    return keypress, mouse
+
+
 #: order of the 6 key dims in the 8-d keypress vector; names must match the
 #: labels decode_debug draws, i.e. the values of its KEY_ID_TO_NAME.
 _ACTION_KEY_NAMES = ["w", "a", "s", "d", "space", "Shift_L"]
@@ -431,8 +470,9 @@ def _action_metrics(p_key, g_key, p_mouse, g_mouse, sl, quantize="none", is_km_f
         fn = int(((g_k == 1) & (p_k == 0)).sum().item())
         out["key_jaccard_distance"] = float(1 - tp / (tp + fp + fn)) if tp + fp + fn > 0 else 0.0
     if p_mouse is not None and g_mouse is not None:
-        # km_fsq decodes to raw pixels and needs symlog at metric time; raw mode's mouse
-        # is already symlog-scale (debug_actions.load_or_build), so leave it alone (#80's B2).
+        # km_fsq and raw_fused (caller passes is_km_fsq=True for both) hand us raw-pixel-
+        # scale mouse here and need symlog at metric time; raw mode's mouse is already
+        # symlog-scale (debug_actions.load_or_build), so leave it alone (#80's B2).
         p_m, g_m = (_symlog(p_mouse[sl]), _symlog(g_mouse[sl])) if is_km_fsq else (p_mouse[sl], g_mouse[sl])
         out["mouse_l1"] = float((p_m - g_m).abs().mean().item())
         out["mouse_mse"] = float(((p_m - g_m) ** 2).mean().item())
@@ -448,38 +488,15 @@ def _label_panel(panel, text):
     return panel
 
 
-def _render_triple_overlay(frames_gt, frames_true, frames_swap, frames_zero,
-                           actions_gt, actions_true, actions_swap, actions_zero,
-                           n_observed, out_path, title=None, true_label="TRUE"):
-    """2x2 grid mp4:  GT | TRUE  over  SWAP | ZERO.
-
-    GT is included so the generated half can be judged against reality, not only
-    against the other two continuations -- past frame n_observed the true/swap/
-    zero rows are all model output and share no ground truth.
-
-    Laid out as a grid rather than 4 stacked rows because stacking gives a
-    1280x3472 video, which wandb renders unusably small.
-
-    Each panel's action bar comes from that panel's own action tensor, so the
-    swap panel visibly shows the swapped keys / reversed mouse it was given.
-    GT carries the recorded actions. When the model generates actions, the
-    second panel carries the ones it GENERATED (label GEN), so GT vs GEN is a
-    direct read of action-prediction quality; otherwise it carries the true
-    actions it was conditioned on (label TRUE).
-
-    Same imageio/libx264 settings as decode_debug.render_overlay -- cv2's mp4v
-    encodes fine and then will not play in wandb.
+def _render_panels(frames_list, actions_list, labels, n_observed, out_path, ncols):
+    """Shared writer for _render_pair_overlay/_render_triple_overlay: one panel per
+    (frames, actions, label), arranged in an `ncols`-wide grid, same imageio/libx264
+    settings as decode_debug.render_overlay -- cv2's mp4v encodes fine and then will
+    not play in wandb.
     """
-    frames_gt = np.asarray(frames_gt)
-    frames_true = np.asarray(frames_true)
-    frames_swap = np.asarray(frames_swap)
-    frames_zero = np.asarray(frames_zero)
-    T = frames_true.shape[0]
-
-    # actions_* are each a (keypress, mouse) pair.
-    acts = [(_to_display_actions(k), _to_display_actions(m)) for k, m in
-            (actions_gt, actions_true, actions_swap, actions_zero)]
-    labels = ["GT", true_label, "SWAP", "ZERO"]
+    frames_list = [np.asarray(f) for f in frames_list]
+    T = frames_list[0].shape[0]
+    acts = [(_to_display_actions(k), _to_display_actions(m)) for k, m in actions_list]
 
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -498,13 +515,56 @@ def _render_triple_overlay(frames_gt, frames_true, frames_swap, frames_zero,
                 _overlay_frame(_to_uint8_frame(frames[t]),
                                _action_vec_to_bar(dk[t], dm[t]), border=border),
                 lab)
-            for frames, (dk, dm), lab in zip(
-                (frames_gt, frames_true, frames_swap, frames_zero), acts, labels)
+            for frames, (dk, dm), lab in zip(frames_list, acts, labels)
         ]
-        writer.append_data(cv2.vconcat([cv2.hconcat(panels[:2]),
-                                        cv2.hconcat(panels[2:])]))
+        rows = [cv2.hconcat(panels[i:i + ncols]) for i in range(0, len(panels), ncols)]
+        writer.append_data(rows[0] if len(rows) == 1 else cv2.vconcat(rows))
     writer.close()
     return out_path
+
+
+def _render_pair_overlay(frames_gt, frames_pred, actions_gt, actions_pred,
+                         n_observed, out_path):
+    """Side-by-side mp4: GT | PRED, from already-baked (keypress, mouse) tensors.
+
+    CorpusValidationSet rows (issue #81) have no session db -- decode_debug.
+    render_overlay's get_frame_actions can't draw their bars (it also hardcodes
+    100ms/10Hz frames, wrong for this corpus's 80ms/12.5Hz ticks). Both action
+    tensors are already loaded raw by run_debug_validation's caller, so this
+    reuses the same low-level primitives _render_triple_overlay does, just for
+    2 panels instead of 4.
+    """
+    return _render_panels(
+        (frames_gt, frames_pred), (actions_gt, actions_pred), ["GT", "PRED"],
+        n_observed, out_path, ncols=2,
+    )
+
+
+def _render_triple_overlay(frames_gt, frames_true, frames_swap, frames_zero,
+                           actions_gt, actions_true, actions_swap, actions_zero,
+                           n_observed, out_path, true_label="TRUE"):
+    """2x2 grid mp4:  GT | TRUE  over  SWAP | ZERO.
+
+    GT is included so the generated half can be judged against reality, not only
+    against the other two continuations -- past frame n_observed the true/swap/
+    zero rows are all model output and share no ground truth.
+
+    Laid out as a grid rather than 4 stacked rows because stacking gives a
+    1280x3472 video, which wandb renders unusably small.
+
+    Each panel's action bar comes from that panel's own action tensor, so the
+    swap panel visibly shows the swapped keys / reversed mouse it was given.
+    GT carries the recorded actions. When the model generates actions, the
+    second panel carries the ones it GENERATED (label GEN), so GT vs GEN is a
+    direct read of action-prediction quality; otherwise it carries the true
+    actions it was conditioned on (label TRUE).
+    """
+    return _render_panels(
+        (frames_gt, frames_true, frames_swap, frames_zero),
+        (actions_gt, actions_true, actions_swap, actions_zero),
+        ["GT", true_label, "SWAP", "ZERO"],
+        n_observed, out_path, ncols=2,
+    )
 
 
 @th.no_grad()
@@ -535,10 +595,14 @@ def run_debug_validation(model, diffusion, valset, device, out_dir,
     action_quantization = getattr(diffusion, "action_quantization", "none")
     action_encoding = getattr(diffusion, "action_encoding", "raw")
     is_km_fsq = action_encoding == "km_fsq"
+    is_raw_fused = action_encoding == "raw_fused"
     km_tokenizer = _get_km_tokenizer(device, getattr(valset, "tokenizer_checkpoint", None)) if is_km_fsq else None
     sampling_model = _CFGWrapper(model, cfg_scale) if cfg_scale != 1.0 else model
 
     T, n_obs = valset.T, valset.n_observed
+    # CorpusValidationSet (issue #81) rows carry swap_kind: their swap test targets
+    # only the single boundary action, not the whole generated region.
+    is_corpus_valset = bool(valset.rows) and "swap_kind" in valset.rows[0]
     x0_all = valset.load_all()  # (N, T, 3, H, W)
     n_rows = x0_all.shape[0]
     if actions and action_conditioned:
@@ -616,6 +680,13 @@ def run_debug_validation(model, diffusion, valset, device, out_dir,
             g_key_chunk, g_mouse_chunk = (_decode_km_actions(km_tokenizer, keypress_chunk)
                                           if keypress_chunk is not None else (None, None))
             metrics_quantize = "none"  # already hard-thresholded booleans; nothing left to snap
+        elif is_raw_fused:
+            # 10-dim fused token: first 8 dims are keypress, last 2 are symlog(mouse).
+            p_key_chunk, p_mouse_chunk = ((samples_act[..., :8], debug_actions._inv_symlog(samples_act[..., 8:]))
+                                          if samples_act is not None else (None, None))
+            g_key_chunk, g_mouse_chunk = ((keypress_chunk[..., :8], debug_actions._inv_symlog(keypress_chunk[..., 8:]))
+                                          if keypress_chunk is not None else (None, None))
+            metrics_quantize = action_quantization
         else:
             p_key_chunk, g_key_chunk = samples_act, keypress_chunk
             p_mouse_chunk, g_mouse_chunk = samples_mouse, mouse_chunk
@@ -644,7 +715,8 @@ def run_debug_validation(model, diffusion, valset, device, out_dir,
                                   ("roll", slice(first_gen, None))):
                     rec.update({f"{scope}/{k}": v
                                 for k, v in _action_metrics(p_key, g_key, p_mouse, g_mouse, sl,
-                                                             metrics_quantize, is_km_fsq=is_km_fsq).items()})
+                                                             metrics_quantize,
+                                                             is_km_fsq=is_km_fsq or is_raw_fused).items()})
             per_row.append(rec)
 
             slug = valset.slug(row)
@@ -661,17 +733,31 @@ def run_debug_validation(model, diffusion, valset, device, out_dir,
                     # Bottom row: model output (8+2/raw-pixels, km_fsq already decoded), falling back to raw GT per-modality -- never native 36-dim km codes, which _action_bars can't draw.
                     pred_bar_key = p_key_chunk[j] if p_key_chunk is not None else keypress_raw_chunk[j] if keypress_raw_chunk is not None else None
                     pred_bar_mouse = p_mouse_chunk[j] if p_mouse_chunk is not None else mouse_raw_chunk[j] if mouse_raw_chunk is not None else None
-                    render_overlay(
-                        gt_frames=gt.cpu().numpy(),
-                        pred_frames=pred.cpu().numpy(),
-                        pred_actions=(_action_bars(pred_bar_key, pred_bar_mouse)
-                                      if pred_bar_key is not None and pred_bar_mouse is not None else None),
-                        session_db_path=str(row["session_db"]),
-                        start_frame_idx=row["window_start"],
-                        out_path=str(mp4),
-                        n_observed=n_obs,
-                        title=row["prompt"],
-                    )
+                    if is_corpus_valset:
+                        # No session db to read GT actions from (frozen npz package,
+                        # issue #81), and get_frame_actions hardcodes 10Hz framing anyway
+                        # -- draw both rows from the already-loaded raw tensors instead.
+                        _render_pair_overlay(
+                            frames_gt=gt.cpu().numpy(),
+                            frames_pred=pred.cpu().numpy(),
+                            actions_gt=(keypress_raw_chunk[j].cpu().numpy(), mouse_raw_chunk[j].cpu().numpy()),
+                            actions_pred=((pred_bar_key.cpu().numpy() if pred_bar_key is not None else keypress_raw_chunk[j].cpu().numpy()),
+                                          (pred_bar_mouse.cpu().numpy() if pred_bar_mouse is not None else mouse_raw_chunk[j].cpu().numpy())),
+                            n_observed=n_obs,
+                            out_path=str(mp4),
+                        )
+                    else:
+                        render_overlay(
+                            gt_frames=gt.cpu().numpy(),
+                            pred_frames=pred.cpu().numpy(),
+                            pred_actions=(_action_bars(pred_bar_key, pred_bar_mouse)
+                                          if pred_bar_key is not None and pred_bar_mouse is not None else None),
+                            session_db_path=str(row["session_db"]),
+                            start_frame_idx=row["window_start"],
+                            out_path=str(mp4),
+                            n_observed=n_obs,
+                            title=row["prompt"],
+                        )
                     import wandb
                     logger.logkv(f"val/overlay/{slug}", wandb.Video(str(mp4)), distributed=False)
                 except Exception as e:
@@ -691,8 +777,18 @@ def run_debug_validation(model, diffusion, valset, device, out_dir,
                     # Rewrite only the actions driving the generated frames: rows n_obs..T-1, the frame-mask complement, not the action-mask complement (which lags one row) -- leave the history true.
                     intervene_on = 1.0 - obs_mask_j.reshape(
                         obs_mask_j.shape[0], obs_mask_j.shape[1], 1)
-                    key_swap_j, mouse_swap_j = _swap_actions(key_true_j, mouse_true_j, intervene_on)
-                    key_zero_j, mouse_zero_j = _zero_actions(key_true_j, mouse_true_j, intervene_on)
+                    if is_corpus_valset:
+                        key_swap_j, mouse_swap_j = _swap_single_action(
+                            key_true_j, mouse_true_j, boundary_idx=n_obs,
+                            swap_kind=row["swap_kind"], swap_dim=row.get("swap_dim"),
+                            swap_counterpart_dim=row.get("swap_counterpart_dim"),
+                        )
+                    else:
+                        key_swap_j, mouse_swap_j = _swap_actions(key_true_j, mouse_true_j, intervene_on)
+                    if is_corpus_valset:
+                        key_zero_j, mouse_zero_j = _zero_single_action(key_true_j, mouse_true_j, boundary_idx=n_obs)
+                    else:
+                        key_zero_j, mouse_zero_j = _zero_actions(key_true_j, mouse_true_j, intervene_on)
                     # Same starting noise for all three passes, so only the actions tensor differs.
                     shared_noise = th.randn(*x0_j.shape, device=device)
                     # heun_sample's churn draws from the global RNG each step; reseed per pass too.
@@ -701,6 +797,9 @@ def run_debug_validation(model, diffusion, valset, device, out_dir,
                     def _sample_with_actions(key_raw, mouse_raw):
                         if is_km_fsq:
                             actions_in = _encode_km_actions(km_tokenizer, key_raw, mouse_raw)
+                            mouse_in = key_raw.new_zeros(key_raw.shape[0], key_raw.shape[1], 0)
+                        elif is_raw_fused:
+                            actions_in = th.cat([key_raw, debug_actions._symlog(mouse_raw)], dim=-1)
                             mouse_in = key_raw.new_zeros(key_raw.shape[0], key_raw.shape[1], 0)
                         else:
                             # Convert ground-truth raw pixels to the model's native conditioning
@@ -733,6 +832,8 @@ def run_debug_validation(model, diffusion, valset, device, out_dir,
                             # Same snap-then-decode as the main pass, still batch=1 here.
                             act_out = debug_actions.quantize_km_fsq(key_out) if action_quantization == "fsq" else key_out
                             key_out, mouse_out = _decode_km_actions(km_tokenizer, act_out)
+                        elif is_raw_fused and key_out is not None:
+                            key_out, mouse_out = key_out[..., :8], debug_actions._inv_symlog(key_out[..., 8:])
                         return (video, key_out[0] if key_out is not None else None,
                                 mouse_out[0] if mouse_out is not None else None)
 
@@ -769,7 +870,6 @@ def run_debug_validation(model, diffusion, valset, device, out_dir,
                                           (zero_mouse if zero_mouse is not None else mouse_zero_j[0]).cpu().numpy()),
                             true_label=("GEN" if (true_key is not None or true_mouse is not None) else "TRUE"),
                             n_observed=n_obs, out_path=str(mp4_swap),
-                            title=row["prompt"],
                         )
                         import wandb
                         logger.logkv(f"val/swap_overlay/{slug}", wandb.Video(str(mp4_swap)), distributed=False)

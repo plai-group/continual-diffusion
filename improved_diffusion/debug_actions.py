@@ -1,4 +1,5 @@
 # Per-tick action arrays for plaicraft-debug sessions, cached to <session_dir>/actions_{keypress,mouse}.npy.
+# Three action_encodings: raw (8+2, two heads), km_fsq (36+0, one head), raw_fused (10+0, one head, symlog mouse).
 import json
 import os
 import sqlite3
@@ -11,6 +12,7 @@ import torch
 KEYPRESS_DIM = 8
 MOUSE_DIM = 2
 KM_CODE_DIM = 36  # 12 FSQ groups x 3 dims (plaicraft-debug#80)
+RAW_FUSED_DIM = 10  # 8 keypress + symlog(dx), symlog(dy); mouse_dim=0 (plaicraft-debug#81)
 # Bump when build_action_array's binning rule changes, to force raw/km cache rebuilds.
 SUBBIN_RULE_VERSION = "2"  # v2: symlog mouse in load_or_build's raw branch + containment binning
 
@@ -21,12 +23,6 @@ SUBBINS_PER_TICK = TICK_MS // SUBBIN_MS  # 8, matches the km tokenizer's block_s
 
 # Fixed key order for dims 0-5: [w, a, s, d, space, shift]
 _KEY_IDS = ["87", "65", "83", "68", "32", "340"]
-
-
-def _symlog(v):
-    """Compress unbounded pixel sums to ~+-5 so the model's mouse conditioning input
-    matches the 2c02s2pu-era scale (plaicraft-debug#80's B2 regression)."""
-    return np.sign(v) * np.log1p(np.abs(v))
 
 
 def quantize_keypress(x):
@@ -59,6 +55,20 @@ def quantize_km_fsq(x):
     return codes.reshape(orig_shape)
 
 
+def _symlog(v):
+    """sign(v)*log1p(|v|), dispatching on numpy vs torch input. Compresses +/-150px mouse to +/-5.0."""
+    if torch.is_tensor(v):
+        return torch.sign(v) * torch.log1p(torch.abs(v))
+    return np.sign(v) * np.log1p(np.abs(v))
+
+
+def _inv_symlog(v):
+    """sign(v)*expm1(|v|), the exact inverse of _symlog. Dispatches on numpy vs torch input."""
+    if torch.is_tensor(v):
+        return torch.sign(v) * torch.expm1(torch.abs(v))
+    return np.sign(v) * np.expm1(np.abs(v))
+
+
 def read_session_fps(session_dir):
     """The session table's fps column -- the DB's own record of its tick rate."""
     session_dir = Path(session_dir)
@@ -73,18 +83,25 @@ def read_session_fps(session_dir):
 
 def validate_action_encoding(action_encoding, fps=None, action_dim=None, mouse_dim=None):
     """km_fsq needs fps==12.5, action_dim==36, mouse_dim==0; raw needs action_dim==8,
-    mouse_dim==2 -- except raw with both dims 0, which means no action conditioning
-    at all (the video-only default) and skips every check entirely. Both encodings need
-    the corpus fps to match decode_debug.DECODE_VIDEO_FPS: it (and debug_validation.VIDEO_FPS)
-    are hardcoded to 12.5, so a mismatched raw corpus would silently read wrong overlay
+    mouse_dim==2; raw_fused needs action_dim==10, mouse_dim==0 -- except raw with both dims
+    0, which means no action conditioning at all (the video-only default) and skips every
+    check entirely. All three encodings need the corpus fps to match
+    decode_debug.DECODE_VIDEO_FPS: it (and debug_validation.VIDEO_FPS) are hardcoded to 12.5,
+    and raw_fused reads the same corpus through the same load_or_build_raw cache and the same
+    hardcoded decode path as raw, so a mismatched corpus would silently read wrong overlay
     windows and start_frame math rather than fail loudly (plaicraft-debug#80's B4 fix)."""
     from .decode_debug import DECODE_VIDEO_FPS
 
-    if action_encoding not in ("raw", "km_fsq"):
-        raise ValueError(f"unknown action_encoding {action_encoding!r}, expected 'raw' or 'km_fsq'")
+    if action_encoding not in ("raw", "km_fsq", "raw_fused"):
+        raise ValueError(f"unknown action_encoding {action_encoding!r}, expected 'raw', 'km_fsq', or 'raw_fused'")
     if action_encoding == "raw" and action_dim == 0 and mouse_dim == 0:
         return
-    expected_dim, expected_mouse = (KM_CODE_DIM, 0) if action_encoding == "km_fsq" else (KEYPRESS_DIM, MOUSE_DIM)
+    if action_encoding == "km_fsq":
+        expected_dim, expected_mouse = KM_CODE_DIM, 0
+    elif action_encoding == "raw_fused":
+        expected_dim, expected_mouse = RAW_FUSED_DIM, 0
+    else:
+        expected_dim, expected_mouse = KEYPRESS_DIM, MOUSE_DIM
     if fps is not None and abs(fps - DECODE_VIDEO_FPS) > 1e-6:
         raise ValueError(
             f"action_encoding={action_encoding!r} requires session fps=={DECODE_VIDEO_FPS}, got {fps}"
@@ -290,7 +307,9 @@ def _load_or_build_km_codes(session_dir, tokenizer_checkpoint, device):
 def load_or_build(session_dir, action_encoding="raw", tokenizer_checkpoint=None, device=None):
     """raw -> (n_ticks, 8) keypress + (n_ticks, 2) symlog-compressed mouse -- the MODEL'S
     NATIVE CONDITIONING encoding, not ground truth (see load_or_build_raw for that).
-    km_fsq -> (n_ticks, 36) quantized codes + (n_ticks, 0) empty mouse (folded into the codes)."""
+    km_fsq -> (n_ticks, 36) quantized codes + (n_ticks, 0) empty mouse (folded into the codes).
+    raw_fused -> (n_ticks, 10) [keypress, symlog(mouse)] + (n_ticks, 0) empty mouse; reuses
+    load_or_build_raw's cache, so a raw and a raw_fused run share one warmed corpus."""
     if action_encoding == "raw":
         keypress, mouse = load_or_build_raw(session_dir)
         return keypress, _symlog(np.asarray(mouse))
@@ -301,4 +320,8 @@ def load_or_build(session_dir, action_encoding="raw", tokenizer_checkpoint=None,
         codes = _load_or_build_km_codes(session_dir, checkpoint, device)
         n_ticks = codes.shape[0]
         return codes, np.zeros((n_ticks, 0), dtype=np.float32)
-    raise ValueError(f"unknown action_encoding {action_encoding!r}, expected 'raw' or 'km_fsq'")
+    if action_encoding == "raw_fused":
+        keypress, mouse = load_or_build_raw(session_dir)
+        fused = np.concatenate([keypress, _symlog(mouse)], axis=1).astype(np.float32)
+        return fused, np.zeros((fused.shape[0], 0), dtype=np.float32)
+    raise ValueError(f"unknown action_encoding {action_encoding!r}, expected 'raw', 'km_fsq', or 'raw_fused'")

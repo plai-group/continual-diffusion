@@ -8,6 +8,7 @@ pure-array tests with an end-to-end check through the REAL trained tokenizer:
 encode a synthetic session, decode it, and confirm keys recover exactly and
 mouse recovers to within a couple of pixels.
 """
+import json
 import sqlite3
 import tempfile
 from pathlib import Path
@@ -156,6 +157,44 @@ def test_load_or_build_raw_aggregates_or_and_sum_per_tick(tmp_path):
     assert keypress[0].sum() == 0  # no prior tick
     assert keypress[1, 0] == 1.0   # OR-reduced: w held during SOME sub-bin of raw tick 0
     assert np.allclose(mouse[1], [8.0, -8.0])  # summed over raw tick 0's 8 sub-bins
+
+
+def _make_session_dir(tmp_path, n_ticks=3):
+    session_dir = tmp_path / "sess"
+    (session_dir / "encoded_video_hdf5").mkdir(parents=True)
+    import h5py
+    with h5py.File(session_dir / "encoded_video_hdf5" / "sess_encoded_video.hdf5", "w") as f:
+        f.create_dataset("frames", data=np.zeros((n_ticks, 3, 2, 2), dtype=np.float32))
+    _make_db(session_dir / "sess.db", n_ticks, mouse_fn=lambda t, b: (1, -1))
+    return session_dir
+
+
+def test_load_or_build_raw_writes_a_version_sidecar(tmp_path):
+    session_dir = _make_session_dir(tmp_path)
+    da.load_or_build_raw(session_dir)
+    _, _, sidecar_path = da._raw_cache_paths(session_dir)
+    assert sidecar_path.exists()
+    assert json.loads(sidecar_path.read_text()) == {"subbin_rule_version": da.SUBBIN_RULE_VERSION}
+
+
+def test_load_or_build_raw_rebuilds_on_stale_sidecar_version(tmp_path):
+    session_dir = _make_session_dir(tmp_path)
+    keypress_path, mouse_path, sidecar_path = da._raw_cache_paths(session_dir)
+    keypress_path.parent.mkdir(parents=True, exist_ok=True)
+    # A pre-#80 cache: same shape (100ms bins, symlog mouse), no sidecar at all.
+    np.save(keypress_path, np.zeros((3, da.KEYPRESS_DIM), dtype=np.float32))
+    np.save(mouse_path, np.full((3, da.MOUSE_DIM), 999.0, dtype=np.float32))
+    keypress, mouse = da.load_or_build_raw(session_dir)  # must rebuild, not trust the stale cache
+    mouse = np.array(mouse)  # materialize: a lingering mmap would alias the next in-place np.save below
+    assert not np.allclose(mouse[1], 999.0)
+    assert json.loads(sidecar_path.read_text()) == {"subbin_rule_version": da.SUBBIN_RULE_VERSION}
+
+    # An explicitly stale sidecar (an older SUBBIN_RULE_VERSION) must also rebuild, not raise.
+    sidecar_path.write_text(json.dumps({"subbin_rule_version": "0"}))
+    np.save(mouse_path, np.full((3, da.MOUSE_DIM), -999.0, dtype=np.float32))
+    keypress2, mouse2 = da.load_or_build_raw(session_dir)
+    assert not np.allclose(mouse2[1], -999.0)
+    assert np.array_equal(mouse, mouse2)
 
     # cached: a second call must return identical arrays without rebuilding differently.
     keypress2, mouse2 = da.load_or_build_raw(session_dir)

@@ -68,11 +68,7 @@ class CorpusValidationSet:
             window_start = int(window_start_ticks[i])
             boundary_tick = int(boundary_ticks[i])
             offset = boundary_tick - window_start
-            # Load-bearing contract (plaicraft-debug#81): the swap intervention hardcodes
-            # boundary_idx=n_observed (debug_validation.py), which is only correct if the
-            # producer put the boundary this many ticks after window_start. A silent
-            # mismatch here means every metric still computes but the swap test (AC2)
-            # is intervening on the wrong tick with no error -- so this must raise, not warn.
+            # Raises, not warns: the swap hardcodes boundary_idx=n_observed, so a mismatch here intervenes on the wrong tick while every metric still computes (plaicraft-debug#81).
             if offset != self.n_observed:
                 raise ValueError(
                     f"exercise {name!r}: boundary_tick - window_start = {offset}, "
@@ -82,9 +78,7 @@ class CorpusValidationSet:
             self.rows.append(dict(
                 num=int(ex["index"]),
                 name=name,
-                # prompt/test_type: run_debug_validation reads these directly (its
-                # per-row loop is shared with DebugValidationSet, which is prose-prompt
-                # driven -- an exercise's name stands in for both here).
+                # prompt/test_type: run_debug_validation's per-row loop is shared with the prose-prompt DebugValidationSet, so the exercise name stands in for both.
                 prompt=name,
                 test_type="exercise",
                 session_id=session_ids[i],

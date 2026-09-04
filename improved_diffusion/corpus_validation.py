@@ -12,6 +12,8 @@ from pathlib import Path
 import numpy as np
 import torch as th
 
+from . import debug_actions
+
 
 class CorpusValidationSet:
     """The 13 frozen exercises plus the frames/actions each one needs."""
@@ -84,9 +86,15 @@ class CorpusValidationSet:
         same convention as debug_actions.load_or_build). Built lazily on first use via
         scripts/build_debug_validation_km_codes.build_km_codes and cached in
         validation_dir/km_codes.npz; a stale or missing cache is rebuilt automatically.
+        raw_fused -> (13, T, 10) [keypress, symlog(mouse)] + (13, T, 0) empty mouse; the
+        npz's mouse array is raw pixels, so this symlog-compresses it, no tokenizer involved.
         """
         if self.action_encoding == "raw":
             return self.load_all_actions_raw()
+        if self.action_encoding == "raw_fused":
+            fused = np.concatenate([self._keypress, debug_actions._symlog(self._mouse)], axis=-1).astype(np.float32)
+            empty_mouse = np.zeros((*fused.shape[:-1], 0), dtype=np.float32)
+            return th.from_numpy(fused), th.from_numpy(empty_mouse)
         if self.action_encoding == "km_fsq":
             from scripts.build_debug_validation_km_codes import build_km_codes
             from improved_diffusion.km_tokenizer.model import DEFAULT_CHECKPOINT
@@ -96,7 +104,7 @@ class CorpusValidationSet:
             km_codes = np.asarray(np.load(codes_path)["km_codes"], dtype=np.float32)
             empty_mouse = np.zeros((km_codes.shape[0], km_codes.shape[1], 0), dtype=np.float32)
             return th.from_numpy(km_codes), th.from_numpy(empty_mouse)
-        raise ValueError(f"unknown action_encoding {self.action_encoding!r}, expected 'raw' or 'km_fsq'")
+        raise ValueError(f"unknown action_encoding {self.action_encoding!r}, expected 'raw', 'km_fsq', or 'raw_fused'")
 
     def load_all_actions_raw(self):
         """(keypress: (13, T, 8), mouse: (13, T, 2)) float32, straight from the npz.

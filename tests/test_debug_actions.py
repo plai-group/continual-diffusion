@@ -117,16 +117,21 @@ def test_load_or_build_raw_aggregates_or_and_sum_per_tick(tmp_path):
     assert np.array_equal(mouse, mouse2)
 
 
-def test_load_or_build_dispatches_to_raw(tmp_path):
+def test_load_or_build_dispatches_to_raw_keys_and_symlogs_mouse(tmp_path):
+    """load_or_build's raw branch is the MODEL's conditioning encoding (plaicraft-debug#80's
+    B2 fix): keys match load_or_build_raw exactly, but mouse is symlog-compressed on top --
+    load_or_build_raw stays the un-symlogged ground truth for overlays/interventions."""
     session_dir = tmp_path / "sess"
     (session_dir / "encoded_video_hdf5").mkdir(parents=True)
     import h5py
     with h5py.File(session_dir / "encoded_video_hdf5" / "sess_encoded_video.hdf5", "w") as f:
         f.create_dataset("frames", data=np.zeros((2, 3, 2, 2), dtype=np.float32))
-    _make_db(session_dir / "sess.db", 2)
+    _make_db(session_dir / "sess.db", 2, mouse_fn=lambda t, b: (2, -2))
     a = da.load_or_build(session_dir)
     b = da.load_or_build_raw(session_dir)
-    assert np.array_equal(a[0], b[0]) and np.array_equal(a[1], b[1])
+    assert np.array_equal(a[0], b[0])  # keypress: identical
+    assert not np.array_equal(a[1], b[1])  # mouse: symlog-compressed, not identical
+    assert np.allclose(a[1], da._symlog(np.asarray(b[1])))
 
 
 def test_km_tokenizer_round_trip_recovers_keys_exactly_and_mouse_near_zero():

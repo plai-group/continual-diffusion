@@ -23,6 +23,12 @@ SUBBINS_PER_TICK = TICK_MS // SUBBIN_MS  # 8, matches the km tokenizer's block_s
 _KEY_IDS = ["87", "65", "83", "68", "32", "340"]
 
 
+def _symlog(v):
+    """Compress unbounded pixel sums to ~+-5 so the model's mouse conditioning input
+    matches the 2c02s2pu-era scale (plaicraft-debug#80's B2 regression)."""
+    return np.sign(v) * np.log1p(np.abs(v))
+
+
 def quantize_keypress(x):
     """Snap a continuous (..., 8) keypress prediction to the nearest of the 256 valid
     multi-hot vectors. Every codebook entry is a corner of the unit hypercube, so
@@ -88,9 +94,10 @@ def build_action_array(session_db_path, n_ticks):
     (n_ticks*8, 2) float32, one row per 10 ms sub-bin.
       keypress 0-5: held keys [w,a,s,d,space,shift] during that sub-bin
       keypress 6-7: held mouse clicks [left, right]
-      mouse 0-1: raw pixel mouseDX, mouseDY summed at that sub-bin (no symlog --
-        the km tokenizer's own feature stem does its own normalization, and raw
-        mode wants pixels directly)
+      mouse 0-1: raw pixel mouseDX, mouseDY summed at that sub-bin -- never symlogged
+        here, the km tokenizer's own feature stem normalizes raw pixels itself, and
+        load_or_build_raw needs this un-symlogged for ground truth. load_or_build applies
+        symlog on top of this, but only for its own raw-mode model-conditioning output.
 
     This is the SAME code regardless of who wrote the DB: debug's key/click
     intervals happen to be tick-aligned, so all 8 sub-bins of a tick end up
@@ -246,10 +253,12 @@ def _load_or_build_km_codes(session_dir, tokenizer_checkpoint, device):
 
 
 def load_or_build(session_dir, action_encoding="raw", tokenizer_checkpoint=None, device=None):
-    """raw -> (n_ticks, 8) keypress + (n_ticks, 2) mouse, both tick-resolution ground truth.
+    """raw -> (n_ticks, 8) keypress + (n_ticks, 2) symlog-compressed mouse -- the MODEL'S
+    NATIVE CONDITIONING encoding, not ground truth (see load_or_build_raw for that).
     km_fsq -> (n_ticks, 36) quantized codes + (n_ticks, 0) empty mouse (folded into the codes)."""
     if action_encoding == "raw":
-        return load_or_build_raw(session_dir)
+        keypress, mouse = load_or_build_raw(session_dir)
+        return keypress, _symlog(np.asarray(mouse))
     if action_encoding == "km_fsq":
         from .km_tokenizer.model import DEFAULT_CHECKPOINT
 

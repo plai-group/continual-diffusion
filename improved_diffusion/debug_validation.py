@@ -229,8 +229,10 @@ def _get_km_tokenizer(device, checkpoint=None):
 
 
 def _symlog(v):
-    """Metric-time-only compression so mouse_l1/mouse_mse stay on their historical scale
-    even though the underlying targets are raw pixels for both raw and km_fsq (#80's B2)."""
+    """Metric-time compression so mouse_l1/mouse_mse stay on their historical scale.
+    Only needed for km_fsq, whose _decode_km_actions returns raw pixels -- raw mode's
+    mouse is already symlog-scale from debug_actions.load_or_build, so symlogging it
+    again here would double-compress it (#80's B2)."""
     return th.sign(v) * th.log1p(th.abs(v))
 
 
@@ -402,7 +404,7 @@ _QUANTIZE_FNS = {
 }
 
 
-def _action_metrics(p_key, g_key, p_mouse, g_mouse, sl, quantize="none"):
+def _action_metrics(p_key, g_key, p_mouse, g_mouse, sl, quantize="none", is_km_fsq=False):
     """Action metrics over one frame window, plus the all-zeros baseline.
 
     Keypress and mouse are computed independently -- either side may be None
@@ -429,8 +431,9 @@ def _action_metrics(p_key, g_key, p_mouse, g_mouse, sl, quantize="none"):
         fn = int(((g_k == 1) & (p_k == 0)).sum().item())
         out["key_jaccard_distance"] = float(1 - tp / (tp + fp + fn)) if tp + fp + fn > 0 else 0.0
     if p_mouse is not None and g_mouse is not None:
-        # symlog at metric time: p_mouse/g_mouse are raw pixels (#80's B2), but the wandb metric stays compressed.
-        p_m, g_m = _symlog(p_mouse[sl]), _symlog(g_mouse[sl])
+        # km_fsq decodes to raw pixels and needs symlog at metric time; raw mode's mouse
+        # is already symlog-scale (debug_actions.load_or_build), so leave it alone (#80's B2).
+        p_m, g_m = (_symlog(p_mouse[sl]), _symlog(g_mouse[sl])) if is_km_fsq else (p_mouse[sl], g_mouse[sl])
         out["mouse_l1"] = float((p_m - g_m).abs().mean().item())
         out["mouse_mse"] = float(((p_m - g_m) ** 2).mean().item())
         out["mouse_l1_trivial"] = float(g_m.abs().mean().item())
@@ -640,7 +643,8 @@ def run_debug_validation(model, diffusion, valset, device, out_dir,
                 for scope, sl in (("next", slice(first_gen, first_gen + 1)),
                                   ("roll", slice(first_gen, None))):
                     rec.update({f"{scope}/{k}": v
-                                for k, v in _action_metrics(p_key, g_key, p_mouse, g_mouse, sl, metrics_quantize).items()})
+                                for k, v in _action_metrics(p_key, g_key, p_mouse, g_mouse, sl,
+                                                             metrics_quantize, is_km_fsq=is_km_fsq).items()})
             per_row.append(rec)
 
             slug = valset.slug(row)
@@ -699,7 +703,9 @@ def run_debug_validation(model, diffusion, valset, device, out_dir,
                             actions_in = _encode_km_actions(km_tokenizer, key_raw, mouse_raw)
                             mouse_in = key_raw.new_zeros(key_raw.shape[0], key_raw.shape[1], 0)
                         else:
-                            actions_in, mouse_in = key_raw, mouse_raw
+                            # Convert ground-truth raw pixels to the model's native conditioning
+                            # encoding, same as debug_actions.load_or_build does for the main pass.
+                            actions_in, mouse_in = key_raw, _symlog(mouse_raw)
                         with RNG(swap_seed):
                             s, _ = diffusion.heun_sample(
                                 sampling_model, x0_j.shape, noise=shared_noise,

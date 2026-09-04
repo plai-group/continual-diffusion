@@ -38,12 +38,21 @@ def test_get_km_tokenizer_is_cached_singleton():
     assert t1 is t2
 
 
-def test_action_metrics_symlogs_mouse_for_comparable_scale():
+def test_action_metrics_symlogs_mouse_for_comparable_scale_on_km_fsq():
+    # km_fsq decodes to raw pixels, so _action_metrics symlogs them at metric time.
     p_mouse = torch.tensor([[100.0, -100.0]])
     g_mouse = torch.tensor([[0.0, 0.0]])
-    out = dv._action_metrics(None, None, p_mouse, g_mouse, slice(None))
+    out = dv._action_metrics(None, None, p_mouse, g_mouse, slice(None), is_km_fsq=True)
     expected_l1 = float(torch.log1p(torch.tensor(100.0)))
     assert abs(out["mouse_l1"] - expected_l1) < 1e-4
+
+
+def test_action_metrics_does_not_symlog_mouse_on_raw():
+    # raw mode's mouse is already symlog-scale from debug_actions.load_or_build.
+    p_mouse = torch.tensor([[3.0, -3.0]])
+    g_mouse = torch.tensor([[0.0, 0.0]])
+    out = dv._action_metrics(None, None, p_mouse, g_mouse, slice(None), is_km_fsq=False)
+    assert abs(out["mouse_l1"] - 3.0) < 1e-6
 
 
 def test_decode_then_encode_km_actions_round_trip():

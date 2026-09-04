@@ -70,9 +70,7 @@ class CorpusValidationSet:
             self.rows.append(dict(
                 num=int(ex["index"]),
                 name=name,
-                # prompt/test_type: run_debug_validation reads these directly (its
-                # per-row loop is shared with DebugValidationSet, which is prose-prompt
-                # driven -- an exercise's name stands in for both here).
+                # prompt/test_type: run_debug_validation's per-row loop is shared with the prose-prompt DebugValidationSet, so the exercise name stands in for both.
                 prompt=name,
                 test_type="exercise",
                 session_id=session_ids[i],

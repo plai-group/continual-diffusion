@@ -342,6 +342,12 @@ def args_to_dict(args, keys):
     return {k: getattr(args, k) for k in keys}
 
 
+def backfill_action_encoding(model_args):
+    """Pre-#80 checkpoints have no action_encoding saved; default them to raw (plaicraft-debug#80)."""
+    if not hasattr(model_args, "action_encoding"):
+        model_args.action_encoding = "raw"
+
+
 def str2bool(v):
     """
     https://stackoverflow.com/questions/15008758/parsing-boolean-values-with-argparse

@@ -200,7 +200,8 @@ def vdt_model_and_diffusion_defaults():
         mouse_token_cond=False,
         keypress_loss_weight=1.0,
         mouse_loss_weight=1.0,
-        action_quantization="none",  # "none" | "codebook"; see plaicraft-debug#77
+        action_quantization="none",  # "none" | "codebook" | "fsq"; see plaicraft-debug#77, #80
+        action_encoding="raw",  # "raw" | "km_fsq"; see plaicraft-debug#80
     )
 
 
@@ -232,6 +233,7 @@ def create_vdt_model_and_diffusion(
     keypress_loss_weight=1.0,
     mouse_loss_weight=1.0,
     action_quantization="none",
+    action_encoding="raw",
 ):
     diffusion = create_gaussian_diffusion(
         steps=diffusion_steps,
@@ -248,6 +250,7 @@ def create_vdt_model_and_diffusion(
     diffusion.keypress_loss_weight = keypress_loss_weight
     diffusion.mouse_loss_weight = mouse_loss_weight
     diffusion.action_quantization = action_quantization
+    diffusion.action_encoding = action_encoding
     model = create_vdt_model(
         model_name=model_name,
         input_size=input_size,
@@ -337,6 +340,12 @@ def add_dict_to_argparser(parser, default_dict):
 
 def args_to_dict(args, keys):
     return {k: getattr(args, k) for k in keys}
+
+
+def backfill_action_encoding(model_args):
+    """Pre-#80 checkpoints have no action_encoding saved; default them to raw (plaicraft-debug#80)."""
+    if not hasattr(model_args, "action_encoding"):
+        model_args.action_encoding = "raw"
 
 
 def str2bool(v):

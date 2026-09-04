@@ -22,6 +22,7 @@ from improved_diffusion import dist_util
 from improved_diffusion.debug_validation import DebugValidationSet, run_debug_validation
 from improved_diffusion.script_util import (
     args_to_dict,
+    backfill_action_encoding,
     create_model_and_diffusion,
     model_and_diffusion_defaults,
 )
@@ -42,6 +43,7 @@ def main():
     margs = dict(data["config"])
     margs.setdefault("model_type", "vdt")
     ns = argparse.Namespace(**margs)
+    backfill_action_encoding(ns)  # pre-#80 checkpoints have no action_encoding saved
     model, diffusion = create_model_and_diffusion(
         model_type=ns.model_type,
         **args_to_dict(ns, model_and_diffusion_defaults(model_type=ns.model_type).keys()),
@@ -51,7 +53,11 @@ def main():
     step = data.get("step", 0)
     print(f"loaded {args.checkpoint} (step {step}), T={ns.T}")
 
-    valset = DebugValidationSet(args.db, args.root, T=ns.T, n_observed=ns.T // 2)
+    valset = DebugValidationSet(
+        args.db, args.root, T=ns.T, n_observed=ns.T // 2,
+        action_encoding=getattr(ns, "action_encoding", "raw"),
+        tokenizer_checkpoint=getattr(ns, "km_tokenizer_checkpoint", None),
+    )
     print(f"validation rows: {len(valset.rows)}")
     for r in valset.rows:
         print(f"  {r['num']:2d} {r['prompt'][:38]:38s} R_start={r['r_start_ms']:7d} win={r['window_start']}")

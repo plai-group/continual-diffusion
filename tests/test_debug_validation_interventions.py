@@ -19,7 +19,7 @@ helper here takes and returns a (keypress, mouse) pair.
 import torch
 
 from improved_diffusion.action_masks import frame_mask_to_action_mask
-from improved_diffusion.debug_validation import _invert_actions, _swap_actions, _zero_actions
+from improved_diffusion.debug_validation import _action_metrics, _invert_actions, _swap_actions, _zero_actions
 
 
 T, n_obs = 20, 10
@@ -97,6 +97,20 @@ def test_zero_follows_the_same_mask():
     assert zeroed_m[:, n_obs:].eq(0).all()
     assert torch.equal(zeroed_k[:, :n_obs], k[:, :n_obs])
     assert torch.equal(zeroed_m[:, :n_obs], m[:, :n_obs])
+
+
+def test_action_metrics_key_jaccard_distance_hand_computed():
+    # gt holds {0,1,2}, pred holds {1,2,3} -> tp=2, fp=1, fn=1, distance=1-2/4=0.5.
+    gt = torch.tensor([[1., 1., 1., 0., 0., 0., 0., 0.]])
+    pred = torch.tensor([[0., 1., 1., 1., 0., 0., 0., 0.]])
+    out = _action_metrics(pred, gt, None, None, slice(0, 1))
+    assert out["key_jaccard_distance"] == 0.5
+
+
+def test_action_metrics_key_jaccard_distance_no_keys_held_is_zero():
+    z = torch.zeros(1, 8)
+    out = _action_metrics(z, z, None, None, slice(0, 1))
+    assert out["key_jaccard_distance"] == 0.0
 
 
 def test_interventions_do_not_mutate_their_input():

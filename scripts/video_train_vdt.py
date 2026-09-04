@@ -20,6 +20,11 @@ from improved_diffusion.script_util import (
 )
 from improved_diffusion.train_util import TrainLoop
 from improved_diffusion.logger import logger
+from improved_diffusion.debug_actions import validate_action_encoding
+from improved_diffusion.km_tokenizer.model import DEFAULT_CHECKPOINT as KM_TOKENIZER_DEFAULT_CHECKPOINT
+
+# plaicraft-debug#80: km_fsq's single loss term must match raw's combined (8+2)/2880 contribution -- weight * 36/2880 == 10/2880.
+_KM_FSQ_KEYPRESS_LOSS_WEIGHT = 10 / 36
 
 os.environ["MY_WANDB_DIR"] = "none"
 if "--unobserve" in sys.argv:
@@ -48,6 +53,13 @@ def init_wandb(config, id):
         print(f"Node list: {os.environ['SLURM_JOB_NODELIST']}")
     logger.logkv("num_nodes", num_nodes)
     print(f"Number of nodes: {num_nodes}")
+
+
+def resolve_keypress_loss_weight(args):
+    """Sentinel default: unset (None) picks 10/36 for km_fsq, 1.0 otherwise; an explicit value always wins."""
+    if args.keypress_loss_weight is None:
+        args.keypress_loss_weight = _KM_FSQ_KEYPRESS_LOSS_WEIGHT if args.action_encoding == "km_fsq" else 1.0
+    return args.keypress_loss_weight
 
 
 def num_available_cores():
@@ -92,6 +104,9 @@ def main():
     }
     args.model_type = 'vdt'
 
+    validate_action_encoding(args.action_encoding, action_dim=args.action_dim, mouse_dim=args.mouse_dim)
+    resolve_keypress_loss_weight(args)
+
     dist_util.setup_dist()
     resume = bool(args.resume_id)
     init_wandb(config=args, id=args.resume_id if resume else None)
@@ -115,6 +130,8 @@ def main():
         n_sequential=args.n_sample_stm,
         save_every=args.save_interval,
         frame_range=(0, args.upper_frame_range),
+        action_encoding=args.action_encoding,
+        tokenizer_checkpoint=args.km_tokenizer_checkpoint,
     )
 
     # Issue-58: fixed prompt set from the plaicraft-debug validation recording.
@@ -124,6 +141,7 @@ def main():
         valset = DebugValidationSet(
             args.debug_validation_db, args.debug_validation_root,
             T=args.T, n_observed=args.T // 2,
+            action_encoding=args.action_encoding, tokenizer_checkpoint=args.km_tokenizer_checkpoint,
         )
         out_dir = args.debug_validation_out or os.path.join("results", "debug_validation")
         print(f"debug validation: {len(valset.rows)} rows -> {out_dir}")
@@ -204,10 +222,13 @@ def create_argparser():
         generate_actions=False,
         # Warm start from a different architecture: step counter stays 0, optimizer/EMA stay fresh (--resume_checkpoint loads strict and reads the step from the filename).
         init_from_checkpoint="",
+        km_tokenizer_checkpoint=str(KM_TOKENIZER_DEFAULT_CHECKPOINT),
     )
     defaults.update(model_and_diffusion_defaults(model_type='vdt'))
+    defaults.pop("keypress_loss_weight")  # sentinel-resolved post-parse, once action_encoding is known (plaicraft-debug#80)
     parser = argparse.ArgumentParser()
     add_dict_to_argparser(parser, defaults)
+    parser.add_argument("--keypress_loss_weight", type=float, default=None)
     return parser
 
 

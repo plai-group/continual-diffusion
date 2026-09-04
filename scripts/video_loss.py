@@ -23,6 +23,7 @@ from improved_diffusion.script_util import (
     create_model_and_diffusion,
     args_to_dict,
     str2bool,
+    backfill_action_encoding,
 )
 from improved_diffusion.test_util import get_model_results_path, get_eval_run_identifier, Protect
 from improved_diffusion.sampling_schemes import sampling_schemes
@@ -103,6 +104,7 @@ def main(args):
             model_args.input_size = model_args.image_size
         if is_vdt and not hasattr(model_args, "patch_size"):
             model_args.patch_size = 2
+    backfill_action_encoding(model_args)
     model, diffusion = create_model_and_diffusion(model_type=model_args.model_type,
         **args_to_dict(model_args, model_and_diffusion_defaults(model_type=model_args.model_type).keys())
     )
@@ -120,7 +122,9 @@ def main(args):
     # Load the dataset (to get observations from)
     eval_dataset_args = dict(dataset_name=model_args.dataset, T=args.T, train=args.eval_on_train,
                              eval_dataset_config=args.eval_dataset_config, spacing_kwargs=dict(n_data=args.num_sampled_videos),
-                             frame_range=(args.lower_frame_range, args.upper_frame_range))
+                             frame_range=(args.lower_frame_range, args.upper_frame_range),
+                             action_encoding=getattr(model_args, "action_encoding", "raw"),
+                             tokenizer_checkpoint=getattr(model_args, "km_tokenizer_checkpoint", None))
     dataset = get_eval_dataset(**eval_dataset_args)
     dataset = th.utils.data.Subset(dataset=dataset, indices=args.indices)
     dataloader = th.utils.data.DataLoader(dataset, batch_size=args.batch_size, shuffle=False, drop_last=False)

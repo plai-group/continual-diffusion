@@ -51,6 +51,8 @@ class CorpusValidationSet:
         window_start_ticks = npz["window_start_ticks"]
         boundary_ticks = npz["boundary_ticks"]
 
+        self._validate_shapes(names, session_ids, window_start_ticks, boundary_ticks)
+
         by_name = {e["name"]: e for e in self.manifest["exercises"]}
         self.rows = []
         for i, name in enumerate(names):
@@ -84,6 +86,33 @@ class CorpusValidationSet:
                 window_start=window_start,
                 boundary_tick=boundary_tick,
             ))
+
+    def _validate_shapes(self, names, session_ids, window_start_ticks, boundary_ticks):
+        """A producer that emits a mismatched package must fail loudly here, not
+        misbehave later -- the manifest-vs-constructor checks above don't touch the
+        npz arrays themselves."""
+        n_exercises = len(self.manifest["exercises"])
+        row_counts = {
+            "frames": self._frames.shape[0], "keypress": self._keypress.shape[0],
+            "mouse": self._mouse.shape[0], "names": len(names), "session_ids": len(session_ids),
+            "window_start_ticks": window_start_ticks.shape[0], "boundary_ticks": boundary_ticks.shape[0],
+        }
+        if len(set(row_counts.values())) != 1:
+            raise ValueError(f"row-count mismatch across validation.npz arrays: {row_counts}")
+        n_rows = next(iter(row_counts.values()))
+        if n_rows != n_exercises:
+            raise ValueError(
+                f"validation.npz has {n_rows} rows but manifest lists {n_exercises} exercises"
+            )
+        for name, arr in (("frames", self._frames), ("keypress", self._keypress), ("mouse", self._mouse)):
+            if arr.shape[1] != self.T:
+                raise ValueError(
+                    f"{name}.shape={arr.shape} has T={arr.shape[1]}, expected manifest T={self.T}"
+                )
+        if self._keypress.shape[-1] != 8:
+            raise ValueError(f"keypress.shape={self._keypress.shape} must have 8 columns (raw keypress dim)")
+        if self._mouse.shape[-1] != 2:
+            raise ValueError(f"mouse.shape={self._mouse.shape} must have 2 columns (raw mouse dim)")
 
     def slug(self, row):
         return f"{row['num']:02d}_{row['name']}"

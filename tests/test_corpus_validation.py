@@ -109,3 +109,53 @@ def test_wrong_boundary_offset_raises(tmp_path):
     with pytest.raises(ValueError) as exc:
         CorpusValidationSet(vdir)
     assert "strafe-left" in str(exc.value) and str(N_OBS) in str(exc.value)
+
+
+def test_row_count_mismatch_raises(tmp_path):
+    vdir, *_ = _make_fixture(tmp_path)
+    npz = dict(np.load(vdir / "validation.npz"))
+    npz["session_ids"] = npz["session_ids"][:-1]  # drop one row, others keep 3
+    np.savez(vdir / "validation.npz", **npz)
+    with pytest.raises(ValueError) as exc:
+        CorpusValidationSet(vdir)
+    assert "row-count mismatch" in str(exc.value)
+
+
+def test_row_count_vs_manifest_mismatch_raises(tmp_path):
+    vdir, *_ = _make_fixture(tmp_path)
+    manifest = json.loads((vdir / "manifest.json").read_text())
+    manifest["exercises"] = manifest["exercises"][:-1]  # manifest now lists 2, npz still has 3
+    (vdir / "manifest.json").write_text(json.dumps(manifest))
+    with pytest.raises(ValueError) as exc:
+        CorpusValidationSet(vdir)
+    assert "3" in str(exc.value) and "2" in str(exc.value)
+
+
+def test_frames_time_dim_mismatch_raises(tmp_path):
+    vdir, *_ = _make_fixture(tmp_path)
+    npz = dict(np.load(vdir / "validation.npz"))
+    npz["frames"] = npz["frames"][:, :-1]  # T-1 instead of T
+    np.savez(vdir / "validation.npz", **npz)
+    with pytest.raises(ValueError) as exc:
+        CorpusValidationSet(vdir)
+    assert "frames" in str(exc.value)
+
+
+def test_keypress_wrong_column_count_raises(tmp_path):
+    vdir, *_ = _make_fixture(tmp_path)
+    npz = dict(np.load(vdir / "validation.npz"))
+    npz["keypress"] = npz["keypress"][..., :-1]  # 7 columns instead of 8
+    np.savez(vdir / "validation.npz", **npz)
+    with pytest.raises(ValueError) as exc:
+        CorpusValidationSet(vdir)
+    assert "keypress" in str(exc.value)
+
+
+def test_mouse_wrong_column_count_raises(tmp_path):
+    vdir, *_ = _make_fixture(tmp_path)
+    npz = dict(np.load(vdir / "validation.npz"))
+    npz["mouse"] = np.concatenate([npz["mouse"], npz["mouse"][..., :1]], axis=-1)  # 3 columns instead of 2
+    np.savez(vdir / "validation.npz", **npz)
+    with pytest.raises(ValueError) as exc:
+        CorpusValidationSet(vdir)
+    assert "mouse" in str(exc.value)

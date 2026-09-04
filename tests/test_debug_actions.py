@@ -92,6 +92,52 @@ def test_mouse_subbins_are_not_broadcast_and_shift_correctly():
     assert np.array_equal(block1, expected)
 
 
+def test_mouse_containment_sums_multiple_non_grid_rows_in_the_same_subbin():
+    """Real PLAICraft timestamps are continuous, not grid-aligned -- containment must bin
+    by [start, end) overlap, not exact-timestamp equality (plaicraft-debug#80's B3 fix)."""
+    n_ticks = 2
+    with tempfile.TemporaryDirectory() as d:
+        db_path = Path(d) / "s.db"
+        con = sqlite3.connect(str(db_path))
+        con.execute("CREATE TABLE keyboard (key_id TEXT, start_timestamp INTEGER, end_timestamp INTEGER)")
+        con.execute("CREATE TABLE mouse_click (mouse_key_type TEXT, start_timestamp INTEGER, end_timestamp INTEGER)")
+        con.execute("CREATE TABLE mouse_movement (timestamp REAL, mouseDX REAL, mouseDY REAL)")
+        # three non-grid rows, all inside raw tick 0's sub-bin 0 ([0, 10)).
+        for ts, dx, dy in ((0.0, 1, -1), (3.5, 2, -2), (9.9, 3, -3)):
+            con.execute("INSERT INTO mouse_movement VALUES (?, ?, ?)", (ts, dx, dy))
+        con.execute("INSERT INTO mouse_movement VALUES (10.0, 100, 100)")  # sub-bin 1, must not bleed into bin 0
+        con.commit()
+        con.close()
+        _, mouse_sub = da.build_action_array(db_path, n_ticks)
+    block1 = mouse_sub.reshape(n_ticks, da.SUBBINS_PER_TICK, da.MOUSE_DIM)[1]  # == raw tick 0
+    assert np.allclose(block1[0], [6.0, -6.0])
+    assert np.allclose(block1[1], [100.0, 100.0])
+    assert np.allclose(block1[2:], 0.0)
+
+
+def test_mouse_binning_matches_exact_timestamp_lookup_when_tick_aligned():
+    """Guards the vectorised containment rewrite: on grid-aligned debug data (the only kind
+    on-disk sessions actually have), results must match the old exact-timestamp dict lookup
+    byte-for-byte (plaicraft-debug#80's B3 fix)."""
+    n_ticks = 3
+    mouse_fn = lambda t, b: (t * 8 + b, -(t * 8 + b))
+    with tempfile.TemporaryDirectory() as d:
+        db_path = Path(d) / "s.db"
+        _make_db(db_path, n_ticks, mouse_fn=mouse_fn)
+        _, mouse_sub = da.build_action_array(db_path, n_ticks)
+        con = sqlite3.connect(str(db_path))
+        rows = con.execute("SELECT timestamp, mouseDX, mouseDY FROM mouse_movement").fetchall()
+        con.close()
+    by_ts = {int(ts): (dx, dy) for ts, dx, dy in rows}
+    n_sub = n_ticks * da.SUBBINS_PER_TICK
+    expected_raw = np.zeros((n_sub, da.MOUSE_DIM), dtype=np.float32)
+    for s in range(n_sub):
+        expected_raw[s] = by_ts.get(int(s * da.SUBBIN_MS), (0.0, 0.0))
+    expected = np.zeros_like(expected_raw)
+    expected[da.SUBBINS_PER_TICK:] = expected_raw[:-da.SUBBINS_PER_TICK]  # whole-tick causal shift
+    assert np.array_equal(mouse_sub, expected)
+
+
 def test_load_or_build_raw_aggregates_or_and_sum_per_tick(tmp_path):
     session_dir = tmp_path / "sess"
     (session_dir / "encoded_video_hdf5").mkdir(parents=True)

@@ -96,3 +96,16 @@ def test_missing_npz_raises(tmp_path):
     vdir.mkdir()
     with pytest.raises(FileNotFoundError):
         CorpusValidationSet(vdir)
+
+
+def test_wrong_boundary_offset_raises(tmp_path):
+    # Corrupt one row's boundary tick so it no longer sits n_observed ticks after
+    # window_start -- the swap intervention would silently hit the wrong frame.
+    vdir, *_ = _make_fixture(tmp_path)
+    npz = dict(np.load(vdir / "validation.npz"))
+    npz["boundary_ticks"] = npz["boundary_ticks"].copy()
+    npz["boundary_ticks"][1] += 1
+    np.savez(vdir / "validation.npz", **npz)
+    with pytest.raises(ValueError) as exc:
+        CorpusValidationSet(vdir)
+    assert "strafe-left" in str(exc.value) and str(N_OBS) in str(exc.value)

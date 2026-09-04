@@ -55,6 +55,20 @@ class CorpusValidationSet:
         self.rows = []
         for i, name in enumerate(names):
             ex = by_name[name]
+            window_start = int(window_start_ticks[i])
+            boundary_tick = int(boundary_ticks[i])
+            offset = boundary_tick - window_start
+            # Load-bearing contract (plaicraft-debug#81): the swap intervention hardcodes
+            # boundary_idx=n_observed (debug_validation.py), which is only correct if the
+            # producer put the boundary this many ticks after window_start. A silent
+            # mismatch here means every metric still computes but the swap test (AC2)
+            # is intervening on the wrong tick with no error -- so this must raise, not warn.
+            if offset != self.n_observed:
+                raise ValueError(
+                    f"exercise {name!r}: boundary_tick - window_start = {offset}, "
+                    f"expected n_observed={self.n_observed} "
+                    f"(window_start={window_start}, boundary_tick={boundary_tick})"
+                )
             self.rows.append(dict(
                 num=int(ex["index"]),
                 name=name,
@@ -67,8 +81,8 @@ class CorpusValidationSet:
                 swap_kind=ex["swap_kind"],
                 swap_dim=ex.get("swap_dim"),
                 swap_counterpart_dim=ex.get("swap_counterpart_dim"),
-                window_start=int(window_start_ticks[i]),
-                boundary_tick=int(boundary_ticks[i]),
+                window_start=window_start,
+                boundary_tick=boundary_tick,
             ))
 
     def slug(self, row):

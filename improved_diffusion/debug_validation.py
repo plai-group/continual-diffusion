@@ -431,8 +431,9 @@ def _action_metrics(p_key, g_key, p_mouse, g_mouse, sl, quantize="none", is_km_f
         fn = int(((g_k == 1) & (p_k == 0)).sum().item())
         out["key_jaccard_distance"] = float(1 - tp / (tp + fp + fn)) if tp + fp + fn > 0 else 0.0
     if p_mouse is not None and g_mouse is not None:
-        # km_fsq decodes to raw pixels and needs symlog at metric time; raw mode's mouse
-        # is already symlog-scale (debug_actions.load_or_build), so leave it alone (#80's B2).
+        # km_fsq and raw_fused both hand us raw-pixel mouse here (km_fsq decodes to pixels,
+        # raw_fused inverts its symlog above) and need symlog at metric time; raw mode's is
+        # already symlog-scale from debug_actions.load_or_build, so leave it alone (#80's B2).
         p_m, g_m = (_symlog(p_mouse[sl]), _symlog(g_mouse[sl])) if is_km_fsq else (p_mouse[sl], g_mouse[sl])
         out["mouse_l1"] = float((p_m - g_m).abs().mean().item())
         out["mouse_mse"] = float(((p_m - g_m) ** 2).mean().item())
@@ -535,6 +536,7 @@ def run_debug_validation(model, diffusion, valset, device, out_dir,
     action_quantization = getattr(diffusion, "action_quantization", "none")
     action_encoding = getattr(diffusion, "action_encoding", "raw")
     is_km_fsq = action_encoding == "km_fsq"
+    is_raw_fused = action_encoding == "raw_fused"
     km_tokenizer = _get_km_tokenizer(device, getattr(valset, "tokenizer_checkpoint", None)) if is_km_fsq else None
     sampling_model = _CFGWrapper(model, cfg_scale) if cfg_scale != 1.0 else model
 
@@ -616,6 +618,13 @@ def run_debug_validation(model, diffusion, valset, device, out_dir,
             g_key_chunk, g_mouse_chunk = (_decode_km_actions(km_tokenizer, keypress_chunk)
                                           if keypress_chunk is not None else (None, None))
             metrics_quantize = "none"  # already hard-thresholded booleans; nothing left to snap
+        elif is_raw_fused:
+            # 10-dim fused token: first 8 dims are keypress, last 2 are symlog(mouse).
+            p_key_chunk, p_mouse_chunk = ((samples_act[..., :8], debug_actions._inv_symlog(samples_act[..., 8:]))
+                                          if samples_act is not None else (None, None))
+            g_key_chunk, g_mouse_chunk = ((keypress_chunk[..., :8], debug_actions._inv_symlog(keypress_chunk[..., 8:]))
+                                          if keypress_chunk is not None else (None, None))
+            metrics_quantize = action_quantization
         else:
             p_key_chunk, g_key_chunk = samples_act, keypress_chunk
             p_mouse_chunk, g_mouse_chunk = samples_mouse, mouse_chunk
@@ -644,7 +653,8 @@ def run_debug_validation(model, diffusion, valset, device, out_dir,
                                   ("roll", slice(first_gen, None))):
                     rec.update({f"{scope}/{k}": v
                                 for k, v in _action_metrics(p_key, g_key, p_mouse, g_mouse, sl,
-                                                             metrics_quantize, is_km_fsq=is_km_fsq).items()})
+                                                             metrics_quantize,
+                                                             is_km_fsq=is_km_fsq or is_raw_fused).items()})
             per_row.append(rec)
 
             slug = valset.slug(row)
@@ -702,6 +712,9 @@ def run_debug_validation(model, diffusion, valset, device, out_dir,
                         if is_km_fsq:
                             actions_in = _encode_km_actions(km_tokenizer, key_raw, mouse_raw)
                             mouse_in = key_raw.new_zeros(key_raw.shape[0], key_raw.shape[1], 0)
+                        elif is_raw_fused:
+                            actions_in = th.cat([key_raw, debug_actions._symlog(mouse_raw)], dim=-1)
+                            mouse_in = key_raw.new_zeros(key_raw.shape[0], key_raw.shape[1], 0)
                         else:
                             # Convert ground-truth raw pixels to the model's native conditioning
                             # encoding, same as debug_actions.load_or_build does for the main pass.
@@ -733,6 +746,8 @@ def run_debug_validation(model, diffusion, valset, device, out_dir,
                             # Same snap-then-decode as the main pass, still batch=1 here.
                             act_out = debug_actions.quantize_km_fsq(key_out) if action_quantization == "fsq" else key_out
                             key_out, mouse_out = _decode_km_actions(km_tokenizer, act_out)
+                        elif is_raw_fused and key_out is not None:
+                            key_out, mouse_out = key_out[..., :8], debug_actions._inv_symlog(key_out[..., 8:])
                         return (video, key_out[0] if key_out is not None else None,
                                 mouse_out[0] if mouse_out is not None else None)
 

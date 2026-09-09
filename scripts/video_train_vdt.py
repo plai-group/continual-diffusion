@@ -56,7 +56,8 @@ def init_wandb(config, id):
 
 
 def resolve_keypress_loss_weight(args):
-    """Sentinel default: unset (None) picks 10/36 for km_fsq, 1.0 otherwise; an explicit value always wins."""
+    """Sentinel default: unset (None) picks 10/36 for km_fsq, 1.0 otherwise; an explicit value always wins.
+    raw_fused takes the 1.0 branch by construction -- its single 10-dim term is already 10/10."""
     if args.keypress_loss_weight is None:
         args.keypress_loss_weight = _KM_FSQ_KEYPRESS_LOSS_WEIGHT if args.action_encoding == "km_fsq" else 1.0
     return args.keypress_loss_weight

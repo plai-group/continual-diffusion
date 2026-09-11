@@ -64,3 +64,22 @@ def test_baserate_finite_for_always_pressed_key():
     ce = keypress_ce_baserate(y)
     assert torch.isfinite(ce)
     assert ce.item() == 0.0
+
+
+def test_probabilities_outside_unit_interval_stay_finite():
+    # raw/raw_fused are MSE regression heads, not squashed ones -- they overshoot past
+    # 1 and undershoot below 0 routinely, and only the clamp keeps log() finite.
+    y = torch.tensor([[1., 0., 1., 0.]])
+    p = torch.tensor([[1.3, -0.2, 1.0, 0.0]])
+    ce = keypress_cross_entropy(p, y)
+    assert torch.isfinite(ce)
+    assert 0 <= ce.item() < 1e-3  # every dim is correct once clamped
+
+
+def test_confident_wrong_prediction_outside_unit_interval_is_bounded():
+    # The clamp also caps the worst case: an overshooting false press must not be inf.
+    y = torch.zeros(1, 4)
+    p = torch.full((1, 4), 1.4)
+    ce = keypress_cross_entropy(p, y)
+    assert torch.isfinite(ce)
+    assert ce.item() < 4 * -torch.log(torch.tensor(EPS)).item() + 1e-3

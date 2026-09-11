@@ -81,8 +81,8 @@ def build_km_codes(validation_dir, tokenizer_checkpoint, device, force=False):
 
 def render_gt_overlays(validation_dir, out_dir=None):
     """GT-only overlay mp4s built straight from the npz's own baked actions -- no
-    session db read, unlike decode_debug.render_overlay (the frozen npz is self-
-    contained and the held-out sessions may not even be staged locally)."""
+    session db read needed (the frozen npz is self-contained and the held-out
+    sessions may not even be staged locally)."""
     validation_dir = Path(validation_dir)
     valset = CorpusValidationSet(validation_dir)
     frames = valset.load_all().numpy()

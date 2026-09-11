@@ -69,7 +69,8 @@ class _VideoFeatures:
         videos = videos[:, idx]
         out = []
         for i in range(0, n, batch_size):
-            v = videos[i : i + batch_size].to(self.device)
+            # .float(): heun_sample integrates in float64, and S3D's weights are float32.
+            v = videos[i : i + batch_size].to(self.device, dtype=torch.float32)
             v = (v + 1.0) / 2.0
             b, tt, c, h, w = v.shape
             v = v.reshape(b * tt, c, h, w)

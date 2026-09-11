@@ -83,3 +83,31 @@ def test_confident_wrong_prediction_outside_unit_interval_is_bounded():
     ce = keypress_cross_entropy(p, y)
     assert torch.isfinite(ce)
     assert ce.item() < 4 * -torch.log(torch.tensor(EPS)).item() + 1e-3
+
+
+def test_explicit_baserate_is_nonzero_on_a_single_frame():
+    # The regression guard: q derived from one frame equals that frame, so the
+    # entropy collapses to exactly 0 and the anchor becomes unbeatable.
+    y = torch.tensor([[1., 0., 1., 0., 0., 0., 0., 0.]])
+    q = torch.tensor([0.19, 0.03, 0.05, 0.03, 0.02, 0.03, 0.05, 0.045])
+    assert keypress_ce_baserate(y).item() == 0.0
+    assert keypress_ce_baserate(y, q).item() > 1.0
+
+
+def test_baserate_equals_cross_entropy_of_a_constant_marginal_predictor():
+    # Pins what the anchor means: the CE a head that ignores the frames and always
+    # emits q would have paid on this window.
+    g = torch.Generator().manual_seed(7)
+    y = (torch.rand(9, 8, generator=g) > 0.7).float()
+    q = torch.full((8,), 0.3)
+    assert abs(keypress_ce_baserate(y, q).item()
+               - keypress_cross_entropy(q.expand_as(y), y).item()) < 1e-5
+
+
+def test_explicit_baserate_with_a_never_pressed_key_stays_finite():
+    # q_k == 0 can only pair with y_k == 0 (nothing in the pool pressed it), so xlogy
+    # takes the term to 0 rather than -inf.
+    y = torch.tensor([[1., 0., 0.], [0., 0., 0.]])
+    q = torch.tensor([0.5, 0.25, 0.0])
+    ce = keypress_ce_baserate(y, q)
+    assert torch.isfinite(ce)

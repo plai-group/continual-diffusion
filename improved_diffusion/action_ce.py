@@ -26,10 +26,18 @@ def keypress_cross_entropy(p, y):
     return F.binary_cross_entropy(p, y, reduction="none").sum(dim=-1).mean()
 
 
-def keypress_ce_baserate(y):
-    """Same CE, scored against y's own per-key base rate, the true p across all actions/frames."""
-    q = y.reshape(-1, y.shape[-1]).mean(dim=0)
+def keypress_ce_baserate(y, q=None):
+    """Same CE, scored against the per-key base rate q -- what a predictor that ignores
+    the frames entirely would have paid on y. Pass q measured over the whole validation
+    set; deriving it from y alone is degenerate on a short window (a single frame gives
+    q == y, hence exactly 0).
+
+    The validation pool over-states the rare keys relative to the training policy -- the
+    exercises are curated, and five keys are held through exactly one exercise each -- so
+    read this as an anchor to beat, not as the policy's press rate."""
+    if q is None:
+        q = y.reshape(-1, y.shape[-1]).mean(dim=0)
     q = q.clamp(0.0, 1.0)
-    # xlogy is used to guard against log(0) errors. 
+    # xlogy is used to guard against log(0) errors.
     per_frame = -(torch.special.xlogy(y, q) + torch.special.xlogy(1 - y, 1 - q)).sum(dim=-1)
     return per_frame.mean()

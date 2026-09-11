@@ -115,3 +115,11 @@ def test_fvd_repeats_zero_disables_the_video_distances(harness, tmp_path):
     agg = harness(tmp_path, fvd_repeats=0)["aggregate"]
     assert "val/video/fvd" not in agg
     assert "val/video/psnr" in agg  # the frame metrics share the prefix and must survive
+
+
+def test_key_ce_baserate_is_nonzero_at_both_scopes(harness, tmp_path):
+    # The next scope slices a single frame. Deriving q from that slice made this
+    # exactly 0.0 at val/action/key_ce_baserate, so the anchor could never be beaten.
+    agg = harness(tmp_path)["aggregate"]
+    assert agg["val/action/key_ce_baserate"] > 0.0
+    assert agg["val/action_roll/key_ce_baserate"] > 0.0

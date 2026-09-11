@@ -438,7 +438,7 @@ _QUANTIZE_FNS = {
 
 
 def _action_metrics(p_key, g_key, p_mouse, g_mouse, sl, quantize="none", is_km_fsq=False,
-                    p_key_prob=None, g_key_true=None):
+                    p_key_prob=None, g_key_true=None, key_baserate_q=None):
     """Action metrics over one frame window, plus the all-zeros baseline.
 
     Keypress and mouse are computed independently -- either side may be None
@@ -480,7 +480,9 @@ def _action_metrics(p_key, g_key, p_mouse, g_mouse, sl, quantize="none", is_km_f
         out["mouse_mse_trivial"] = float((g_m ** 2).mean().item())
     if p_key_prob is not None and g_key_true is not None:
         out["key_cross_entropy"] = float(action_ce.keypress_cross_entropy(p_key_prob[sl], g_key_true[sl]))
-        out["key_ce_baserate"] = float(action_ce.keypress_ce_baserate(g_key_true[sl]))
+        # q spans the whole validation set: measured from sl it is degenerate (0.0 at the
+        # one-frame next scope) and window-biased at roll.
+        out["key_ce_baserate"] = float(action_ce.keypress_ce_baserate(g_key_true[sl], key_baserate_q))
     return out
 
 
@@ -596,6 +598,10 @@ def run_debug_validation(model, diffusion, valset, device, out_dir,
     else:
         keypress_all, mouse_all = None, None
         keypress_raw_all, mouse_raw_all = None, None
+    # The unconditional keypress distribution over the whole pool: the fixed anchor CE has
+    # to beat. Every row and every frame, observed half included -- it is the same policy.
+    key_baserate_q = (keypress_raw_all.reshape(-1, keypress_raw_all.shape[-1]).mean(dim=0).to(device)
+                      if keypress_raw_all is not None else None)
 
     per_row, agg, swap_rows, feats_real, feats_fake = [], {}, [], [], []
     for lo in range(0, n_rows, chunk_size):
@@ -730,7 +736,8 @@ def run_debug_validation(model, diffusion, valset, device, out_dir,
                                                              metrics_quantize,
                                                              is_km_fsq=is_km_fsq or is_raw_fused,
                                                              p_key_prob=p_key_prob,
-                                                             g_key_true=g_key_true).items()})
+                                                             g_key_true=g_key_true,
+                                                             key_baserate_q=key_baserate_q).items()})
             per_row.append(rec)
 
             slug = valset.slug(row)

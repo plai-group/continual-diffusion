@@ -24,7 +24,7 @@ import torch as th
 import torch.nn as nn
 
 from . import debug_actions
-from . import action_ce
+from . import action_ce, frechet_video_distance
 from .action_masks import frame_mask_to_action_mask
 from .gaussian_diffusion import _unpack_action_mouse_out
 from .logger import logger
@@ -557,7 +557,7 @@ def run_debug_validation(model, diffusion, valset, device, out_dir,
                          step=0, chunk_size=3, log_videos=True,
                          per_task_scalars=False, actions=True,
                          swap_test=True, cfg_scale=1.0,
-                         teacher_force_actions=True):
+                         teacher_force_actions=True, fvd_repeats=4):
     """Sample every validation row, render overlays, log metrics to wandb.
 
     Returns the aggregate metric dict (also logged via ``logger.logkv``).
@@ -597,7 +597,7 @@ def run_debug_validation(model, diffusion, valset, device, out_dir,
         keypress_all, mouse_all = None, None
         keypress_raw_all, mouse_raw_all = None, None
 
-    per_row, agg, swap_rows = [], {}, []
+    per_row, agg, swap_rows, feats_real, feats_fake = [], {}, [], [], []
     for lo in range(0, n_rows, chunk_size):
         hi = min(lo + chunk_size, n_rows)
         x0 = x0_all[lo:hi].to(device)
@@ -638,15 +638,20 @@ def run_debug_validation(model, diffusion, valset, device, out_dir,
 
         # Match the schedule's true max sigma; see the note in train_util.log_samples.
         sched_sigma_max = float(diffusion.timestep2sigma(diffusion.num_timesteps - 1))
-        samples, _ = diffusion.heun_sample(
-            sampling_model,
-            x0.shape,
-            sigma_max=sched_sigma_max,
-            clip_denoised=True,
-            model_kwargs=model_kwargs,
-            latent_mask=latent_mask.cpu(),
-            return_decoded=False,
-        )
+
+        def _sample_chunk():
+            out, _ = diffusion.heun_sample(
+                sampling_model,
+                x0.shape,
+                sigma_max=sched_sigma_max,
+                clip_denoised=True,
+                model_kwargs=model_kwargs,
+                latent_mask=latent_mask.cpu(),
+                return_decoded=False,
+            )
+            return out
+
+        samples = _sample_chunk()
         samples_act, samples_mouse = None, None
         if isinstance(samples, tuple):
             samples_video, second = samples
@@ -655,6 +660,22 @@ def run_debug_validation(model, diffusion, valset, device, out_dir,
         samples = samples.to(device)
         # Keep the observed half exactly as given; only the generated half is model output.
         samples = samples * latent_mask + x0 * obs_mask
+
+        # x0/samples are rebound each iteration, so features must be taken here, not at aggregation.
+        if fvd_repeats:
+            try:
+                extract = frechet_video_distance._get_video_features(device)
+                feats_real.append(extract(x0[:, n_obs:]))
+                feats_fake.append(extract(samples[:, n_obs:]))
+                # Extra fake draws only: widens the generated side and is what makes kvd_std
+                # informative (it is degenerate when both sides are the same size).
+                for _ in range(fvd_repeats - 1):
+                    extra = _sample_chunk()
+                    extra = (extra[0] if isinstance(extra, tuple) else extra).to(device)
+                    feats_fake.append(extract((extra * latent_mask + x0 * obs_mask)[:, n_obs:]))
+            except Exception as e:
+                print(f"[debug_validation] fvd features skipped at step {step}: {e!r}")
+                fvd_repeats = 0
 
         if is_km_fsq:
             # VDT regresses continuous codes; snap to the nearest FSQ lattice point here, at inference, never during training.
@@ -849,6 +870,20 @@ def run_debug_validation(model, diffusion, valset, device, out_dir,
             vals = [r[f"{scope}/{k}"] for r in per_row if f"{scope}/{k}" in r]
             if vals:
                 agg[f"{prefix}/{k}"] = float(np.mean(vals))
+
+    # Pool-level, so set directly rather than through ACT_METRIC_KEYS. fvd's covariance is
+    # rank-deficient at 13 real clips -- read it as a trend; kvd is the unbiased estimator.
+    if len(feats_real) and len(feats_fake):
+        try:
+            import numpy as _np
+            d = frechet_video_distance.video_distances(_np.concatenate(feats_real),
+                                                       _np.concatenate(feats_fake))
+            agg["val/video/fvd"] = d["fvd"]
+            agg["val/video/kvd"] = d["kvd"]
+            # Spread across resamples of the generated side only, not a standard error.
+            agg["val/video/kvd_subset_spread"] = d["kvd_std"]
+        except Exception as e:
+            print(f"[debug_validation] fvd skipped at step {step}: {e!r}")
 
     if swap_rows:
         agg["val/swap/l2_true_vs_swap"] = float(np.mean([r["l2_true_swap"] for r in swap_rows]))

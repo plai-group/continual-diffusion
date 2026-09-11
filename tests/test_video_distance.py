@@ -61,7 +61,7 @@ def test_fvd_grows_with_distributional_shift():
 def test_get_video_features_is_cached_singleton(monkeypatch):
     # Stub the constructor so this never downloads or builds real S3D weights.
     monkeypatch.setattr(fvd, "_VideoFeatures", lambda device: object())
-    fvd._FEATURES = None
+    monkeypatch.setattr(fvd, "_FEATURES", None)
     f1 = fvd._get_video_features("cpu")
     f2 = fvd._get_video_features("cpu")
     assert f1 is f2

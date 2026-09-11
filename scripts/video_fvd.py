@@ -5,7 +5,6 @@ import os
 from pathlib import Path
 import json
 from collections import defaultdict
-import tensorflow.compat.v1 as tf
 from tqdm import tqdm
 
 # Metrics
@@ -13,9 +12,6 @@ from improved_diffusion.video_datasets import get_eval_dataset, eval_dataset_con
 import improved_diffusion.frechet_video_distance as fvd
 from improved_diffusion.test_util import parse_eval_run_identifier, Protect
 from improved_diffusion.script_util import str2bool
-from improved_diffusion.metrics import mmd
-
-tf.disable_eager_execution() # Required for our FVD computation code
 
 
 class SampleDataset(th.utils.data.Dataset):
@@ -98,58 +94,17 @@ class DecodedDataset(th.utils.data.Dataset):
         th.cuda.empty_cache()
 
 
-class FVD:
-    def __init__(self, batch_size, T, frame_shape):
-        self.batch_size = batch_size
-        self.vid = tf.placeholder("uint8", [self.batch_size, T, *frame_shape])
-        self.vid_feature_vec = fvd.create_id3_embedding(fvd.preprocess(self.vid, (224, 224)), batch_size=self.batch_size)
-        self.sess = tf.Session()
-        self.sess.run(tf.global_variables_initializer())
-        self.sess.run(tf.tables_initializer())
-
-    def extract_features(self, vid):
-        def pad_along_axis(array: np.ndarray, target_length: int, axis: int = 0) -> np.ndarray:
-            # From here: https://stackoverflow.com/questions/19349410/how-to-pad-with-zeros-a-tensor-along-some-axis-python
-            pad_size = target_length - array.shape[axis]
-            if pad_size <= 0:
-                return array
-            npad = [(0, 0)] * array.ndim
-            npad[axis] = (0, pad_size)
-            return np.pad(array, pad_width=npad, mode='constant', constant_values=0)
-        # vid is expected to have a shape of BxTxCxHxW
-        B = vid.shape[0]
-        vid = np.moveaxis(vid, 2, 4)  # B, T, H, W, C
-        vid = pad_along_axis(vid, target_length=self.batch_size, axis=0)
-        features = self.sess.run(self.vid_feature_vec, feed_dict={self.vid: vid})
-        features = features[:B]
-        return features
-
-    @staticmethod
-    def compute_fvd(vid1_features, vid2_features):
-        return fvd.fid_features_to_metric(vid1_features, vid2_features)
-
-
-def extract_features(test_dataset, sample_dataset, T, num_videos, batch_size=16):
-    _, C, H, W = sample_dataset[0][0].shape
-    fvd_handler = FVD(batch_size=batch_size, T=T, frame_shape=[H, W, C])
+def extract_features(test_dataset, sample_dataset, T, num_videos, device, batch_size=16):
+    video_features = fvd._get_video_features(device)
     test_loader = th.utils.data.DataLoader(test_dataset, batch_size=batch_size, shuffle=False, drop_last=False)
     sample_loader = th.utils.data.DataLoader(sample_dataset, batch_size=batch_size, shuffle=False, drop_last=False)
     assert len(test_dataset) == num_videos, f"{len(test_dataset)} != {num_videos}"
     assert len(sample_dataset) == num_videos, f"{len(sample_dataset)} != {num_videos}"
-    with tf.Graph().as_default():
-        all_test_features = []
-        all_pred_features = []
-        for (test_batch, _), (sample_batch, _) in zip(tqdm(test_loader), sample_loader):
-            scale = lambda x: ((x.numpy()+1)*255/2).astype(np.uint8)  # scale from [-1, 1] to [0, 255]
-            test_batch = scale(test_batch)
-            sample_batch = scale(sample_batch)
-            test_features = fvd_handler.extract_features(test_batch)
-            sample_features = fvd_handler.extract_features(sample_batch)
-            all_test_features.append(test_features)
-            all_pred_features.append(sample_features)
-        all_test_features = np.concatenate(all_test_features, axis=0)
-        all_pred_features = np.concatenate(all_pred_features, axis=0)
-    return all_test_features, all_pred_features
+    all_test_features, all_pred_features = [], []
+    for (test_batch, _), (sample_batch, _) in zip(tqdm(test_loader), sample_loader):
+        all_test_features.append(video_features(test_batch))  # already [-1,1] float, (N,T,3,H,W)
+        all_pred_features.append(video_features(sample_batch))
+    return np.concatenate(all_test_features, axis=0), np.concatenate(all_pred_features, axis=0)
 
 
 if __name__ == "__main__":
@@ -162,6 +117,7 @@ if __name__ == "__main__":
     parser.add_argument("--sample_idx", type=int, default=0, help="sample seed")
     parser.add_argument("--decode_chunk_size", type=int, default=5)
     parser.add_argument("--decode_cache_dir", type=str, default="./tmp/decoded_ground_truth")
+    parser.add_argument("--device", type=str, default="cuda" if th.cuda.is_available() else "cpu")
     args = parser.parse_args()
 
     parsed = parse_eval_run_identifier(os.path.basename(args.eval_dir))
@@ -174,9 +130,9 @@ if __name__ == "__main__":
     fvd_save_path = Path(args.eval_dir) / f"fvd-{args.num_videos}-{args.sample_idx}.txt"
     kvd_save_path = Path(args.eval_dir) / f"kvd-{args.num_videos}-{args.sample_idx}.txt"
     if fvd_save_path.exists() and kvd_save_path.exists():
-        fvd = np.loadtxt(fvd_save_path).squeeze()
-        kvd = np.loadtxt(kvd_save_path).squeeze()
-        print(f"FVD and KVD are already computed: {fvd}, {kvd}")
+        fvd_val = np.loadtxt(fvd_save_path).squeeze()
+        kvd_val = np.loadtxt(kvd_save_path).squeeze()
+        print(f"FVD and KVD are already computed: {fvd_val}, {kvd_val}")
         exit()
 
     # Load model args
@@ -208,9 +164,9 @@ if __name__ == "__main__":
         indices=subset_indices,
     )
 
-    test_features, gen_features = extract_features(test_dataset, sample_dataset, T=T, num_videos=args.num_videos, batch_size=args.batch_size)
-    fvd_val = FVD.compute_fvd(test_features, gen_features)
-    kvd_val = mmd.mmd2_poly(test_features, gen_features)
+    test_features, gen_features = extract_features(test_dataset, sample_dataset, T=T, num_videos=args.num_videos, device=args.device, batch_size=args.batch_size)
+    dists = fvd.video_distances(test_features, gen_features)
+    fvd_val, kvd_val = dists["fvd"], dists["kvd"]
     np.savetxt(fvd_save_path, np.array([fvd_val]))
     np.savetxt(kvd_save_path, np.array([kvd_val]))
-    print(f"FVD: {fvd}")
+    print(f"FVD: {fvd_val}, KVD: {kvd_val}")

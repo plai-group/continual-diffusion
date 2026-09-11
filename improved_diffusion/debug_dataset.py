@@ -8,6 +8,7 @@ import torch
 from torch.utils.data import Dataset
 
 from improved_diffusion.debug_actions import load_or_build as load_or_build_actions
+from improved_diffusion.debug_actions import read_session_fps, validate_action_encoding
 
 
 class ContinuousDebugDataset(Dataset):
@@ -26,11 +27,14 @@ class ContinuousDebugDataset(Dataset):
 
     N_TEST_SESSIONS = 20
 
-    def __init__(self, dataset_path, window_length=20, frame_range=(0, None)):
+    def __init__(self, dataset_path, window_length=20, frame_range=(0, None),
+                 action_encoding="raw", tokenizer_checkpoint=None):
         self.dataset_path = Path(dataset_path)
         self.window_length = self.T = window_length
         self.is_test = False
         self.original_frame_range = frame_range
+        self.action_encoding = action_encoding
+        self.tokenizer_checkpoint = tokenizer_checkpoint
 
         self._h5_handles = {}
         self._keypress_arrays = {}
@@ -39,10 +43,18 @@ class ContinuousDebugDataset(Dataset):
 
         self._validate_parameters()
         self._initialize_file_index_mapping()
+        self._validate_action_encoding()
 
     def _validate_parameters(self):
         assert isinstance(self.window_length, int) and self.window_length > 0, \
             f"window_length must be a positive integer, but got {self.window_length}."
+
+    def _validate_action_encoding(self):
+        """km_fsq needs a 12.5Hz corpus; check every session's fps, not just the first --
+        a mixed-fps corpus would otherwise fail silently, per-session, deep in training."""
+        for _fs, _fe, path in self.file_boundaries:
+            fps = read_session_fps(path.parent.parent)
+            validate_action_encoding(self.action_encoding, fps=fps)
 
     # ------------------------------------------------------------------ #
     # session discovery / index mapping
@@ -151,7 +163,10 @@ class ContinuousDebugDataset(Dataset):
             self._handle_pid = pid
         session_dir = str(session_dir)
         if session_dir not in self._keypress_arrays:
-            keypress, mouse = load_or_build_actions(session_dir)
+            keypress, mouse = load_or_build_actions(
+                session_dir, action_encoding=self.action_encoding,
+                tokenizer_checkpoint=self.tokenizer_checkpoint,
+            )
             self._keypress_arrays[session_dir] = keypress
             self._mouse_arrays[session_dir] = mouse
         return self._keypress_arrays[session_dir], self._mouse_arrays[session_dir]

@@ -68,6 +68,20 @@ def test_action_metrics_skips_quantize_keypress_when_disabled():
     assert calls == [], "quantize=False must preserve the old inline >0.5 path"
 
 
+def test_action_metrics_dispatches_to_quantize_km_fsq_when_fsq():
+    g = torch.Generator().manual_seed(0)
+    p_key = torch.rand(1, 4, 36, generator=g)
+    g_key = torch.rand(1, 4, 36, generator=g)
+    calls = []
+    orig = debug_actions.quantize_km_fsq
+    debug_actions.quantize_km_fsq = lambda x: calls.append(x) or orig(x)
+    try:
+        _action_metrics(p_key, g_key, None, None, slice(None), quantize="fsq")
+    finally:
+        debug_actions.quantize_km_fsq = orig
+    assert len(calls) == 2
+
+
 def test_action_quantization_flag_defaults_to_none_and_round_trips():
     _, diffusion_default = create_vdt_model_and_diffusion(
         model_name="VDT-S", patch_size=4, input_size=(32, 32), in_channels=3,
@@ -89,3 +103,14 @@ def test_action_quantization_flag_defaults_to_none_and_round_trips():
         action_quantization="codebook",
     )
     assert diffusion_codebook.action_quantization == "codebook"
+
+    _, diffusion_fsq = create_vdt_model_and_diffusion(
+        model_name="VDT-S", patch_size=4, input_size=(32, 32), in_channels=3,
+        num_frames=8, learn_sigma=False, sigma_small=False, diffusion_steps=100,
+        diffusion_space_kwargs=dict(diffusion_space="pixel", pre_encoded=False),
+        noise_schedule="linear", timestep_respacing="", use_kl=False,
+        predict_xstart=False, rescale_timesteps=True, rescale_learned_sigmas=True,
+        use_checkpoint=False, use_edm_scaling=False, action_dim=36, generate_actions=True,
+        action_quantization="fsq",
+    )
+    assert diffusion_fsq.action_quantization == "fsq"

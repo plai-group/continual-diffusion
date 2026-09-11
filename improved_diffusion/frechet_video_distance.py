@@ -124,7 +124,9 @@ def frechet_statistics_to_frechet_metric(stat_1, stat_2):
 
     # Product might be almost singular
     covmean, _ = scipy.linalg.sqrtm(sigma1.dot(sigma2), disp=False)
-    if not np.isfinite(covmean).all():
+    if not np.isfinite(covmean).all() or (
+        np.iscomplexobj(covmean) and not np.allclose(np.diagonal(covmean).imag, 0, atol=1e-3)
+    ):
         print(
             f'WARNING: fid calculation produces singular product; '
             f'adding {eps} to diagonal of cov estimates'

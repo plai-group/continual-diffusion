@@ -7,6 +7,7 @@ module still imports without TF, that its Frechet/kernel math is sane on tiny
 hand-built feature matrices, and that the small in-training validation pool
 (N=13) doesn't trip kid_features_to_metric's kid_subset_size>=1000 assert.
 """
+import numpy as np
 import torch
 
 import improved_diffusion.frechet_video_distance as fvd
@@ -21,17 +22,30 @@ def test_video_distances_identical_features_are_near_zero():
     x = torch.randn(30, 8, generator=g).numpy()
     out = fvd.video_distances(x, x)
     assert abs(out["fvd"]) < 1e-6
-    # kid's without-replacement subsetting has a small inherent bias at tiny N; still tiny next to a real shift (~1e5, see test_fvd_grows_with_distributional_shift).
-    assert abs(out["kvd"]) < 2.0
+    # kvd is deliberately NOT ~0 here. subset_size == N makes kid draw the whole pool
+    # for both sides, so K_XY carries the self-similarities Kt_XX/Kt_YY exclude -- a
+    # negative ~1/N artifact of scoring a set against itself, which cannot arise in
+    # production because real and fake are always different point sets.
+    assert out["kvd"] < 0
 
 
-def test_video_distances_handles_small_pool_size():
-    # 13 is the real in-training validation pool size; kid_subset_size defaults to 1000.
+def test_kvd_is_unbiased_on_disjoint_samples():
+    # The production geometry: two different point sets from one distribution -> ~0.
+    g = torch.Generator().manual_seed(4)
+    pool = torch.randn(512, 64, generator=g).numpy()
+    out = fvd.video_distances(pool[:256], pool[256:])
+    assert abs(out["kvd"]) < 0.05
+
+
+def test_video_distances_handles_small_asymmetric_pool():
+    # Production shapes: 13 real validation clips vs n_rows * fvd_repeats generated
+    # ones, at S3D's real 1024-d. kid_subset_size defaults to 1000 and hard-asserts
+    # both inputs are at least that large, so the min() clamp is load-bearing here.
     g = torch.Generator().manual_seed(1)
-    x = torch.randn(13, 8, generator=g).numpy()
-    y = torch.randn(13, 8, generator=g).numpy()
+    x = torch.randn(13, 1024, generator=g).numpy()
+    y = torch.randn(52, 1024, generator=g).numpy()
     out = fvd.video_distances(x, y)
-    assert "fvd" in out and "kvd" in out and "kvd_std" in out
+    assert all(np.isfinite(out[k]) for k in ("fvd", "kvd", "kvd_std"))
 
 
 def test_fvd_grows_with_distributional_shift():

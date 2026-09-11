@@ -6,9 +6,7 @@ sessions debug_dataset.py withholds), not the validation recording -- so this
 measures "can VDT model this world" without the OBS-vs-headless domain gap, and
 without depending on actions the model was never shown.
 
-FVD is deliberately not used: frechet_video_distance.py needs tensorflow==2.15
-(no py3.12 wheel), TF1 hub.Module, and the retired tfhub.dev. JEDi is this
-repo's current, torch-only equivalent.
+FVD uses torchvision S3D (Kinetics-400), torch-native (plaicraft-debug#86).
 
 Usage:
   python scripts/video_metrics_debug.py --checkpoint checkpoints/ema_0.9999_NNNN.pt \\
@@ -104,6 +102,18 @@ def compute_fid(gt, pred, device, batch_size=64):
     return float(diff.dot(diff) + np.trace(s1) + np.trace(s2) - 2 * np.trace(covmean))
 
 
+def compute_fvd(gt, pred, device):
+    """FVD/KVD (torchvision S3D features). Only the generated half is scored on the pred side."""
+    from improved_diffusion.frechet_video_distance import _get_video_features, video_distances
+
+    def feats(arr):
+        # (N, T, 3, H, W) uint8 [0,255] -> [-1,1] float, then S3D features
+        x = th.from_numpy(arr).float().div(127.5).sub(1.0)
+        return _get_video_features(device)(x)
+
+    return video_distances(feats(gt), feats(pred))
+
+
 def compute_jedi(gt, pred, feature_path, num_videos, batch_size=16):
     """JEDi (V-JEPA feature space). Needs the V-JEPA weights cached locally."""
     from videojedi import JEDiMetric
@@ -159,6 +169,10 @@ def main():
     # Score only the generated half; including observed frames would flatter the model.
     res["fid_generated_half"] = compute_fid(gt[:, n_obs:], pred[:, n_obs:], args.device)
     print("FID (generated half):", res["fid_generated_half"])
+
+    fvd_out = compute_fvd(gt[:, n_obs:], pred[:, n_obs:], args.device)
+    res["fvd_generated_half"], res["kvd_generated_half"] = fvd_out["fvd"], fvd_out["kvd"]
+    print("FVD/KVD (generated half):", res["fvd_generated_half"], res["kvd_generated_half"])
 
     if args.jedi:
         try:

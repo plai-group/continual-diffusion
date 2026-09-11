@@ -191,6 +191,17 @@ def vdt_model_and_diffusion_defaults():
         rescale_learned_sigmas=True,
         use_checkpoint=False,
         use_edm_scaling=False,
+        action_dim=0,
+        mouse_dim=0,
+        action_dropout_prob=0.0,
+        generate_actions=False,
+        action_token_cond=False,
+        generate_mouse=False,
+        mouse_token_cond=False,
+        keypress_loss_weight=1.0,
+        mouse_loss_weight=1.0,
+        action_quantization="none",  # "none" | "codebook" | "fsq"; see plaicraft-debug#77, #80
+        action_encoding="raw",  # "raw" | "km_fsq" | "raw_fused"; see plaicraft-debug#80, #81
     )
 
 
@@ -212,6 +223,17 @@ def create_vdt_model_and_diffusion(
     rescale_learned_sigmas,
     use_checkpoint,
     use_edm_scaling,
+    action_dim=0,
+    mouse_dim=0,
+    action_dropout_prob=0.0,
+    generate_actions=False,
+    action_token_cond=False,
+    generate_mouse=False,
+    mouse_token_cond=False,
+    keypress_loss_weight=1.0,
+    mouse_loss_weight=1.0,
+    action_quantization="none",
+    action_encoding="raw",
 ):
     diffusion = create_gaussian_diffusion(
         steps=diffusion_steps,
@@ -225,6 +247,10 @@ def create_vdt_model_and_diffusion(
         timestep_respacing=timestep_respacing,
         diffusion_space_kwargs=diffusion_space_kwargs,
     )
+    diffusion.keypress_loss_weight = keypress_loss_weight
+    diffusion.mouse_loss_weight = mouse_loss_weight
+    diffusion.action_quantization = action_quantization
+    diffusion.action_encoding = action_encoding
     model = create_vdt_model(
         model_name=model_name,
         input_size=input_size,
@@ -232,6 +258,13 @@ def create_vdt_model_and_diffusion(
         in_channels=in_channels,
         num_frames=num_frames,
         learn_sigma=learn_sigma,
+        action_dim=action_dim,
+        mouse_dim=mouse_dim,
+        action_dropout_prob=action_dropout_prob,
+        generate_actions=generate_actions,
+        action_token_cond=action_token_cond,
+        generate_mouse=generate_mouse,
+        mouse_token_cond=mouse_token_cond,
     )
     return model, diffusion
 
@@ -307,6 +340,12 @@ def add_dict_to_argparser(parser, default_dict):
 
 def args_to_dict(args, keys):
     return {k: getattr(args, k) for k in keys}
+
+
+def backfill_action_encoding(model_args):
+    """Pre-#80 checkpoints have no action_encoding saved; default them to raw (plaicraft-debug#80)."""
+    if not hasattr(model_args, "action_encoding"):
+        model_args.action_encoding = "raw"
 
 
 def str2bool(v):

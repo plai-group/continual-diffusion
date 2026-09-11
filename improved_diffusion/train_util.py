@@ -23,6 +23,7 @@ from .fp16_util import (
     unflatten_master_params,
     zero_grad,
 )
+from .action_masks import frame_mask_to_action_mask
 from .nn import update_ema
 from .resample import LossAwareSampler, UniformSampler
 from .rng_util import rng_decorator, RNG
@@ -63,7 +64,10 @@ class TrainLoop:
         args,
         clip_grad=None,
         optimizer='adam',
+        debug_validation=None,
     ):
+        # (valset, out_dir) for the issue-58 plaicraft-debug validation set, or None.
+        self.debug_validation = debug_validation
         self.args = args
         self.model = model
         self.diffusion = diffusion
@@ -89,6 +93,8 @@ class TrainLoop:
         self.pad_with_random_frames = pad_with_random_frames
         self.enc_dec_chunk_size = enc_dec_chunk_size
         self.vis_batch = None
+        self.vis_actions = None
+        self.vis_mouse = None
         self.max_frames = max_frames
         self.gradient_clip_norm = float(clip_grad) if clip_grad is not None else None
 
@@ -115,7 +121,10 @@ class TrainLoop:
         if dist.get_rank() == 0:
             Path(get_blob_logdir(self.args.resume_id)).mkdir(parents=True, exist_ok=True)
 
-        if self.args.resume_id != '':
+        # resume_id resumes the *wandb run* as well as the weights. To carry
+        # weights into a NEW wandb run, pass --resume_checkpoint instead; the
+        # EMA/optimizer restore below must fire for that path too.
+        if self.args.resume_id != '' or self.resume_checkpoint:
             self._load_optimizer_state()
             # Model was resumed, either due to a restart or a checkpoint
             # being specified at the command line.
@@ -163,12 +172,44 @@ class TrainLoop:
                     resume_checkpoint, map_location=dist_util.dev()
                 )['state_dict']
             )
+        elif getattr(self.args, 'init_from_checkpoint', ''):
+            self._warm_start(self.args.init_from_checkpoint)
+
+    def _warm_start(self, path):
+        """Initialise the trunk from a checkpoint of a DIFFERENT architecture.
+
+        Unlike a resume this keeps self.step at 0 and leaves the optimizer and
+        EMA fresh -- the point is to inherit trained weights, not to continue a
+        run. resume_checkpoint cannot do it: it is a strict load and it parses
+        the step out of the filename.
+        """
+        print(f"warm start from: {path}")
+        sd = dist_util.load_state_dict(path, map_location=dist_util.dev())['state_dict']
+        missing, unexpected = self.model.load_state_dict(sd, strict=False)
+        print(f"  reused {len(sd) - len(unexpected)}/{len(sd)} donor tensors; "
+              f"{len(missing)} missing, {len(unexpected)} unexpected")
+        if missing:
+            print(f"  missing:    {sorted(missing)}")
+        if unexpected:
+            print(f"  unexpected: {sorted(unexpected)}")
+
+        # The donor trunk never saw an extra sequence token; zeroing makes the new token a constant rather than full-scale noise in converged attention.
+        zeroed = []
+        for name, p in self.model.named_parameters():
+            if name in missing and ('action_x_embedder' in name
+                                    or 'action_pos_embed' in name):
+                with th.no_grad():
+                    p.zero_()
+                zeroed.append(name)
+        if zeroed:
+            print(f"  zero-initialised action-token path: {sorted(zeroed)}")
 
     def _load_ema_parameters(self, rate):
         ema_params = copy.deepcopy(self.master_params)
 
         main_checkpoint = find_resume_checkpoint(self.args) or self.resume_checkpoint
-        ema_checkpoint = find_ema_checkpoint(main_checkpoint, self.step, rate)
+        # -1 for the same reason as in _load_optimizer_state.
+        ema_checkpoint = find_ema_checkpoint(main_checkpoint, self.step - 1, rate)
         if ema_checkpoint:
             print(f"loading EMA from checkpoint: {ema_checkpoint}...")
             state_dict = dist_util.load_state_dict(
@@ -181,7 +222,11 @@ class TrainLoop:
     def _load_optimizer_state(self):
         main_checkpoint = find_resume_checkpoint(self.args) or self.resume_checkpoint
         opt_checkpoint = bf.join(
-            bf.dirname(main_checkpoint), f"opt{self.step:06}.pt"
+            # self.step was already advanced to (saved step + 1) in
+            # _load_and_sync_parameters, but the file is named for the saved
+            # step. Without the -1 this silently finds nothing and resumes
+            # with a fresh optimizer.
+            bf.dirname(main_checkpoint), f"opt{self.step - 1:06d}.pt"
         )
         if bf.exists(opt_checkpoint):
             print(f"loading optimizer state from checkpoint: {opt_checkpoint}")
@@ -325,17 +370,24 @@ class TrainLoop:
         return new_batch, new_tensors, indices
 
     def get_next_batch(self):
-        frames, absolute_index_map = next(self.data)
+        batch = next(self.data)
+        if len(batch) == 4:
+            frames, absolute_index_map, actions, mouse = batch
+        else:
+            frames, absolute_index_map = batch
+            actions, mouse = None, None
         if self.vis_batch is None or self.vis_batch.size(1) < self.max_frames:
             with RNG(0):  # Initialize datapoint to log here in case data is deterministic
                 self.vis_batch = frames
-        return frames, absolute_index_map
+                self.vis_actions = actions
+                self.vis_mouse = mouse
+        return frames, absolute_index_map, actions, mouse
 
     def run_loop(self):
         last_sample_time = None
         while not self.lr_anneal_steps or self.step < self.lr_anneal_steps:
             try:
-                frames, absolute_index_map = self.get_next_batch()
+                frames, absolute_index_map, actions, mouse = self.get_next_batch()
                 # print(f"rank: {dist.get_rank()}, indices: {absolute_index_map[:,0].tolist()}, device: {dist_util.dev()}")
             except RuntimeError as e:
                 print(e)
@@ -343,7 +395,7 @@ class TrainLoop:
                 break
 
             for _ in range(self.steps_per_experience):
-                self.run_step(frames, None, absolute_index_map)
+                self.run_step(frames, None, absolute_index_map, actions, mouse)
                 if self.step % self.log_interval == 0:
                     logger.dumpkvs()
                 if self.step % self.save_interval == 0:
@@ -359,9 +411,9 @@ class TrainLoop:
                 self.step += 1
         self.save()
 
-    def run_step(self, batch1, batch2, absolute_index_map=None):
+    def run_step(self, batch1, batch2, absolute_index_map=None, actions=None, mouse=None):
         t0 = time()
-        self.forward_backward(batch1, batch2, absolute_index_map)
+        self.forward_backward(batch1, batch2, absolute_index_map, actions, mouse)
         if self.use_fp16:
             self.optimize_fp16()
         else:
@@ -369,7 +421,7 @@ class TrainLoop:
         self.log_step()
         logger.logkv("timing/step_time", time() - t0)
     
-    def forward_backward(self, batch1, batch2, absolute_index_map=None):
+    def forward_backward(self, batch1, batch2, absolute_index_map=None, actions=None, mouse=None):
         zero_grad(self.master_params)
 
         batch_size = batch1.shape[0]
@@ -377,8 +429,23 @@ class TrainLoop:
         for i in range(0, batch_size, self.microbatch):
             micro1 = batch1[i : i + self.microbatch]
             micro2 = batch2[i : i + self.microbatch] if batch2 is not None else None
+            micro_actions = actions[i : i + self.microbatch] if actions is not None else None
+            micro_mouse = mouse[i : i + self.microbatch] if mouse is not None else None
             if self.masking_mode == "autoregressive":
                 micro, frame_indices, obs_mask, latent_mask = self.get_autoregressive_masks(micro1)
+                # frame_indices (local, into micro1's T dim) must be the identity
+                # here, or the causal-shift action cache gathered below (and the
+                # RPE frame_indices used elsewhere) would be silently mis-paired
+                # with frames.
+                expected = th.arange(frame_indices.shape[1], device=frame_indices.device)
+                expected = expected.unsqueeze(0).expand_as(frame_indices)
+                if not th.equal(frame_indices, expected):
+                    raise ValueError(
+                        "get_autoregressive_masks did not return an identity frame "
+                        f"selection: frame_indices={frame_indices[0].tolist()} but "
+                        f"expected arange({frame_indices.shape[1]}). Action gathering "
+                        "below assumes this identity; fix the mismatch before proceeding."
+                    )
             elif self.masking_mode == "none":
                 micro, frame_indices, obs_mask, latent_mask = self.get_joint_masks(micro1)
             elif self.masking_mode == "flexible":
@@ -387,6 +454,16 @@ class TrainLoop:
                 micro, frame_indices, obs_mask, latent_mask = self.get_autoregressive_flexible_masks(micro1)
             else:
                 raise ValueError(f"Unknown masking mode: {self.masking_mode}")
+
+            if micro_actions is not None:
+                # Gather with the SAME local frame_indices used to select/reorder
+                # frames, BEFORE frame_indices is overwritten with absolute indices
+                # below -- otherwise actions silently mis-pair with frames.
+                gather_idx = frame_indices.unsqueeze(-1).expand(-1, -1, micro_actions.shape[-1])
+                micro_actions = th.gather(micro_actions, 1, gather_idx)
+            if micro_mouse is not None:
+                gather_idx = frame_indices.unsqueeze(-1).expand(-1, -1, micro_mouse.shape[-1])
+                micro_mouse = th.gather(micro_mouse, 1, gather_idx)
 
             if absolute_index_map is not None:
                 # Convert frame indices to indices in one long video frame for RPE attention to work with.
@@ -397,6 +474,30 @@ class TrainLoop:
             obs_mask = obs_mask.to(dist_util.dev())
             latent_mask = latent_mask.to(dist_util.dev())
 
+            model_kwargs = {'frame_indices': frame_indices, 'obs_mask': obs_mask,
+                             'latent_mask': latent_mask, 'x0': micro}
+            generates_actions = getattr(self.model, 'generate_actions', False) or getattr(self.args, 'generate_actions', False)
+            generates_mouse = getattr(self.model, 'generate_mouse', False) or getattr(self.args, 'generate_mouse', False)
+            # Keypress and mouse currently always share one frame mask; compute once, reuse for both.
+            act_mask = frame_mask_to_action_mask(obs_mask) if (generates_actions or generates_mouse) else None
+            latent_act_mask_shared = frame_mask_to_action_mask(latent_mask) if (generates_actions or generates_mouse) else None
+            if micro_actions is not None:
+                micro_act_dev = micro_actions.to(dist_util.dev(), dtype=th.float32)
+                model_kwargs['actions'] = micro_act_dev
+                if generates_actions:
+                    model_kwargs['obs_action_mask'] = act_mask
+                    model_kwargs['latent_action_mask'] = latent_act_mask_shared
+                    model_kwargs['actions0'] = micro_act_dev
+                    model_kwargs['keypress_loss_weight'] = getattr(self.args, 'keypress_loss_weight', 1.0)
+            if micro_mouse is not None:
+                micro_mouse_dev = micro_mouse.to(dist_util.dev(), dtype=th.float32)
+                model_kwargs['mouse'] = micro_mouse_dev
+                if generates_mouse:
+                    model_kwargs['obs_mouse_mask'] = act_mask
+                    model_kwargs['latent_mouse_mask'] = latent_act_mask_shared
+                    model_kwargs['mouse0'] = micro_mouse_dev
+                    model_kwargs['mouse_loss_weight'] = getattr(self.args, 'mouse_loss_weight', 1.0)
+
             last_batch = (i + self.microbatch) >= batch1.shape[0]
             t, weights = self.schedule_sampler.sample(micro.shape[0], dist_util.dev())
 
@@ -405,8 +506,7 @@ class TrainLoop:
                 self.ddp_model,
                 micro,
                 t,
-                model_kwargs={'frame_indices': frame_indices, 'obs_mask': obs_mask,
-                              'latent_mask': latent_mask, 'x0': micro},
+                model_kwargs=model_kwargs,
                 latent_mask=(1-obs_mask) if self.pad_with_random_frames else latent_mask,
                 eval_mask=latent_mask,
             )
@@ -462,7 +562,10 @@ class TrainLoop:
     def _log_grad_norm(self):
         sqsum = 0.0
         for p in self.master_params:
-            if not p.requires_grad:
+            # p.grad is None for any parameter not reached by the backward pass.
+            # clip_grad_norm_ already filters these; this did not, so a single
+            # unused parameter crashed the first optimizer step.
+            if not p.requires_grad or p.grad is None:
                 continue
             sqsum += (p.grad ** 2).sum().item()
         logger.logkv_mean("grad_norm", np.sqrt(sqsum))
@@ -556,25 +659,59 @@ class TrainLoop:
                 self.vis_batch, None, gather=True,
                  set_masks={'obs': obs_mask, 'latent': latent_mask}
             )
+            # Cap sigma_max at what the VP schedule actually reaches. The default
+            # (1000) sits far above it, so those steps all snap to t=999 and get
+            # deduped -- silently spending ~a third of the sampling budget on
+            # noise levels training never saw. See gaussian_diffusion.heun_sample.
+            sched_sigma_max = float(self.diffusion.timestep2sigma(self.diffusion.num_timesteps - 1))
+            model_kwargs = {
+                'frame_indices': frame_indices.to(dist_util.dev()),
+                'x0': batch.to(dist_util.dev()),
+                'obs_mask': obs_mask.to(dist_util.dev()),
+                'latent_mask': latent_mask.to(dist_util.dev())}
+            if self.vis_actions is not None:
+                # Gather with the SAME local frame_indices used to select/reorder
+                # vis_batch's frames (mirrors forward_backward's action gather),
+                # so an action-conditioned model sees real actions here instead of
+                # going off-distribution on a null action it never trained on.
+                gather_idx = frame_indices.unsqueeze(-1).expand(-1, -1, self.vis_actions.shape[-1])
+                model_kwargs['actions'] = th.gather(self.vis_actions, 1, gather_idx).to(dist_util.dev(), dtype=th.float32)
+            if self.vis_mouse is not None:
+                gather_idx = frame_indices.unsqueeze(-1).expand(-1, -1, self.vis_mouse.shape[-1])
+                model_kwargs['mouse'] = th.gather(self.vis_mouse, 1, gather_idx).to(dist_util.dev(), dtype=th.float32)
             samples, _ = self.diffusion.heun_sample(
                 self.model,
                 batch.shape,
+                sigma_max=sched_sigma_max,
                 clip_denoised=True,
-                model_kwargs={
-                    'frame_indices': frame_indices.to(dist_util.dev()),
-                    'x0': batch.to(dist_util.dev()),
-                    'obs_mask': obs_mask.to(dist_util.dev()),
-                    'latent_mask': latent_mask.to(dist_util.dev())},
+                model_kwargs=model_kwargs,
                 latent_mask=latent_mask,
                 return_attn_weights=True,
                 return_decoded=False,
             )
+            if isinstance(samples, tuple):
+                samples, _ = samples
             # NOTE: Don't decode latent samples
             samples = (samples.cpu() * latent_mask + batch * obs_mask).float()
             _mark_as_observed(samples[:, :n_obs])
             samples = ((samples + 1) * 127.5).clamp(0, 255).to(th.uint8).cpu().numpy()
             for i, video in enumerate(samples):
                 logger.logkv(f'video-{i}', wandb.Video(video), distributed=False)
+
+            # Issue-58 plaicraft-debug validation: same EMA weights, same eval mode,
+            # same 10/10 split the model was trained on. Never let it kill a run.
+            if self.debug_validation is not None:
+                from .debug_validation import run_debug_validation
+                valset, val_out_dir, per_task = self.debug_validation
+                try:
+                    run_debug_validation(
+                        self.model, self.diffusion, valset, dist_util.dev(),
+                        out_dir=val_out_dir, step=self.step,
+                        per_task_scalars=per_task,
+                    )
+                except Exception as e:
+                    print(f"[debug_validation] skipped at step {self.step}: {e!r}")
+
             logger.logkv("timing/sampling_time", time() - sample_start, distributed=False)
 
             # restore model to original state

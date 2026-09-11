@@ -146,6 +146,14 @@ class _WrappedModel:
         self.rescale_timesteps = rescale_timesteps
         self.original_num_steps = original_num_steps
 
+    def __getattr__(self, name):
+        # Guard "model" and dunders: on copy/pickle paths that skip __init__, self.model is unset and would re-enter __getattr__ forever.
+        if name == "model" or (name.startswith("__") and name.endswith("__")):
+            raise AttributeError(name)
+        model = self.__dict__.get("model")
+        if model is None:
+            raise AttributeError(name)
+        return getattr(model, name)
 
     def __call__(self, x, timesteps, **kwargs):
         ts = timesteps

@@ -22,6 +22,7 @@ from improved_diffusion.script_util import (
     create_model_and_diffusion,
     args_to_dict,
     str2bool,
+    backfill_action_encoding,
 )
 from improved_diffusion.test_util import get_model_results_path, get_eval_run_identifier, Protect
 from improved_diffusion.sampling_schemes import sampling_schemes
@@ -186,6 +187,7 @@ def main_outer(args):
             model_args.input_size = model_args.image_size
         if is_vdt and not hasattr(model_args, "patch_size"):
             model_args.patch_size = 2
+    backfill_action_encoding(model_args)
     model, diffusion = create_model_and_diffusion(model_type=model_args.model_type,
         **args_to_dict(model_args, model_and_diffusion_defaults(model_type=model_args.model_type).keys())
     )
@@ -213,7 +215,9 @@ def main_outer(args):
                              eval_dataset_config=args.eval_dataset_config,
                              spacing_kwargs=dict(n_data=args.num_sampled_videos),
                              frame_range=(args.lower_frame_range, args.upper_frame_range),
-                             custom_clip_path=args.custom_clip_path)
+                             custom_clip_path=args.custom_clip_path,
+                             action_encoding=getattr(model_args, "action_encoding", "raw"),
+                             tokenizer_checkpoint=getattr(model_args, "km_tokenizer_checkpoint", None))
     dataset = get_eval_dataset(**eval_dataset_args)
 
     (args.eval_dir / samples_prefix).mkdir(parents=True, exist_ok=True)

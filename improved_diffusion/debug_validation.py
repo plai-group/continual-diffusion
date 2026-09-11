@@ -884,11 +884,13 @@ def run_debug_validation(model, diffusion, valset, device, out_dir,
                 agg[f"{prefix}/{k}"] = float(np.mean(vals))
 
     # Pool-level, so set directly rather than through ACT_METRIC_KEYS. fvd's covariance is
-    # rank-deficient at 13 real clips against 1024-d features, which puts a large floor
-    # under it: two draws from the SAME distribution measure 1911 at 13-vs-52, not 0, and
-    # that floor is a function of n_rows and fvd_repeats. Comparable across steps of one
-    # run, never across runs with different valset sizes (13-row CorpusValidationSet vs
-    # 8-row DebugValidationSet). kvd is the unbiased estimator and carries no such floor.
+    # rank-deficient at 13 real clips against 1024-d features, so it carries a positive
+    # offset that scales with n_rows and fvd_repeats: comparable across steps of one run,
+    # never across runs with different valset sizes (13-row CorpusValidationSet vs 8-row
+    # DebugValidationSet). Measured 13.0-13.6 across the three encodings at step 995000;
+    # small because real and generated share conditioning. On uncorrelated features of the
+    # same shape it reaches ~1900, which bounds the offset rather than describing it.
+    # kvd is the unbiased estimator and carries no such offset.
     if len(feats_real) and len(feats_fake):
         try:
             d = frechet_video_distance.video_distances(np.concatenate(feats_real),

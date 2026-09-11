@@ -21,6 +21,9 @@ EPS = 1e-6
 
 def keypress_cross_entropy(p, y):
     """Bernoulli CE of probabilities p against multi-hot y, summed over keys, meaned over frames."""
+    # heun_sample integrates in float64, so p arrives Double while the GT multi-hot is
+    # float32; binary_cross_entropy demands an exact match rather than promoting.
+    y = y.to(p.dtype)
     # clamp to EPS so that if model predicts 0 or 1, we don't get log(0) errors.
     p = p.clamp(EPS, 1 - EPS)
     return F.binary_cross_entropy(p, y, reduction="none").sum(dim=-1).mean()
@@ -37,7 +40,7 @@ def keypress_ce_baserate(y, q=None):
     read this as an anchor to beat, not as the policy's press rate."""
     if q is None:
         q = y.reshape(-1, y.shape[-1]).mean(dim=0)
-    q = q.clamp(0.0, 1.0)
+    q = q.to(y.dtype).clamp(0.0, 1.0)
     # xlogy is used to guard against log(0) errors.
     per_frame = -(torch.special.xlogy(y, q) + torch.special.xlogy(1 - y, 1 - q)).sum(dim=-1)
     return per_frame.mean()

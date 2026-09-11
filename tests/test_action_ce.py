@@ -111,3 +111,19 @@ def test_explicit_baserate_with_a_never_pressed_key_stays_finite():
     q = torch.tensor([0.5, 0.25, 0.0])
     ce = keypress_ce_baserate(y, q)
     assert torch.isfinite(ce)
+
+
+def test_cross_entropy_accepts_float64_probabilities():
+    # heun_sample integrates in float64, so raw/raw_fused hand CE a Double p against a
+    # float32 GT multi-hot. binary_cross_entropy raises on the mismatch rather than
+    # promoting, which took down the whole validation pass.
+    y = torch.tensor([[1., 0., 1., 0.]], dtype=torch.float32)
+    p = torch.tensor([[0.9, 0.1, 0.8, 0.2]], dtype=torch.float64)
+    ce = keypress_cross_entropy(p, y)
+    assert torch.isfinite(ce) and ce.item() > 0
+
+
+def test_baserate_accepts_a_mismatched_q_dtype():
+    y = torch.tensor([[1., 0., 1., 0.]], dtype=torch.float64)
+    q = torch.tensor([0.2, 0.1, 0.3, 0.05], dtype=torch.float32)
+    assert torch.isfinite(keypress_ce_baserate(y, q))

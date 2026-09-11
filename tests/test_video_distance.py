@@ -65,3 +65,23 @@ def test_get_video_features_is_cached_singleton(monkeypatch):
     f1 = fvd._get_video_features("cpu")
     f2 = fvd._get_video_features("cpu")
     assert f1 is f2
+
+
+def test_features_cast_float64_input_to_float32():
+    # heun_sample's generated half arrives as Double; S3D's weights are float32 and
+    # conv3d refuses the mismatch. Built without __init__ so no weights are downloaded.
+    seen = {}
+
+    class _Net:
+        def __call__(self, v):
+            seen["dtype"] = v.dtype
+            return torch.zeros(v.shape[0], 8, 1, 1, 1)
+
+    f = object.__new__(fvd._VideoFeatures)
+    f.device, f.net = "cpu", _Net()
+    f.mean = torch.tensor(fvd._VideoFeatures.MEAN).view(1, 3, 1, 1, 1)
+    f.std = torch.tensor(fvd._VideoFeatures.STD).view(1, 3, 1, 1, 1)
+
+    out = f(torch.rand(2, 10, 3, 24, 40, dtype=torch.float64) * 2 - 1)
+    assert seen["dtype"] == torch.float32
+    assert out.shape == (2, 8)

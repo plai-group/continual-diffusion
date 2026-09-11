@@ -59,10 +59,13 @@ class _StubDiffusion:
         return 1000.0
 
     def heun_sample(self, model, shape, **kwargs):
+        # float64 on purpose: the real sampler integrates in double (gaussian_diffusion.py
+        # "Use float64 for accuracy"), so everything downstream sees Double against float32
+        # ground truth. A float32 stub hides two dtype faults this harness must catch.
         # Global RNG, so repeat draws for the fake FVD pool genuinely differ.
-        video = torch.rand(*shape) * 2 - 1
-        act = torch.rand(shape[0], shape[1], 8)
-        mouse = torch.randn(shape[0], shape[1], 2)
+        video = (torch.rand(*shape) * 2 - 1).double()
+        act = torch.rand(shape[0], shape[1], 8).double()
+        mouse = torch.randn(shape[0], shape[1], 2).double()
         return (video, (act, mouse)), None
 
 

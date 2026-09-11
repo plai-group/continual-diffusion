@@ -123,3 +123,23 @@ def test_key_ce_baserate_is_nonzero_at_both_scopes(harness, tmp_path):
     agg = harness(tmp_path)["aggregate"]
     assert agg["val/action/key_ce_baserate"] > 0.0
     assert agg["val/action_roll/key_ce_baserate"] > 0.0
+
+
+def test_failed_extraction_publishes_no_video_distances(monkeypatch, harness, tmp_path):
+    # CUDA OOM is the realistic trigger -- S3D upsamples to 224x224 alongside the
+    # training model. Leaving the partial pool in place would log an FVD over half the
+    # rows, and the floor shifts with pool size, so it reads as a regression.
+    calls = {"n": 0}
+
+    def flaky(videos, batch_size=16):
+        calls["n"] += 1
+        if calls["n"] > 3:
+            raise RuntimeError("CUDA out of memory")
+        return _features(videos)
+
+    monkeypatch.setattr(fvdmod, "_FEATURES", flaky)
+    agg = harness(tmp_path)["aggregate"]
+    assert calls["n"] > 3  # the failure really fired mid-loop
+    for k in ("val/video/fvd", "val/video/kvd", "val/video/kvd_subset_spread"):
+        assert k not in agg, k
+    assert "val/video/psnr" in agg  # the run still completes and still logs everything else

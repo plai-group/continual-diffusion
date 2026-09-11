@@ -681,6 +681,11 @@ def run_debug_validation(model, diffusion, valset, device, out_dir,
                     feats_fake.append(extract((extra * latent_mask + x0 * obs_mask)[:, n_obs:]))
             except Exception as e:
                 print(f"[debug_validation] fvd features skipped at step {step}: {e!r}")
+                # Drop what was collected: a pool truncated mid-loop is indistinguishable
+                # from a full one at aggregation, and its floor shifts (see below), so it
+                # would read as a quality regression. Better no number than a wrong one.
+                feats_real.clear()
+                feats_fake.clear()
                 fvd_repeats = 0
 
         if is_km_fsq:
@@ -879,12 +884,15 @@ def run_debug_validation(model, diffusion, valset, device, out_dir,
                 agg[f"{prefix}/{k}"] = float(np.mean(vals))
 
     # Pool-level, so set directly rather than through ACT_METRIC_KEYS. fvd's covariance is
-    # rank-deficient at 13 real clips -- read it as a trend; kvd is the unbiased estimator.
+    # rank-deficient at 13 real clips against 1024-d features, which puts a large floor
+    # under it: two draws from the SAME distribution measure 1911 at 13-vs-52, not 0, and
+    # that floor is a function of n_rows and fvd_repeats. Comparable across steps of one
+    # run, never across runs with different valset sizes (13-row CorpusValidationSet vs
+    # 8-row DebugValidationSet). kvd is the unbiased estimator and carries no such floor.
     if len(feats_real) and len(feats_fake):
         try:
-            import numpy as _np
-            d = frechet_video_distance.video_distances(_np.concatenate(feats_real),
-                                                       _np.concatenate(feats_fake))
+            d = frechet_video_distance.video_distances(np.concatenate(feats_real),
+                                                      np.concatenate(feats_fake))
             agg["val/video/fvd"] = d["fvd"]
             agg["val/video/kvd"] = d["kvd"]
             # Spread across resamples of the generated side only, not a standard error.

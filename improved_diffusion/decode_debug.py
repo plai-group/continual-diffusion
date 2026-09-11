@@ -1,14 +1,8 @@
 # improved_diffusion/decode_debug.py
 #
-# Self-contained overlay-video renderer for the plaicraft-debug pixel-space
-# world. Visually reproduces plaicraft-model-pi0's inference/decode_debug.py
-# (top action bar + GT-over-Pred video), but with none of that repo's
-# coupling: no VAE, no audio, no keypress-autoencoder. Actions are read
-# straight from the raw sqlite session DB (keyboard / mouse_click /
-# mouse_movement tables) since both the GT and prediction rows show the
-# SAME ground-truth action bar.
-import sqlite3
-from pathlib import Path
+# Drawing primitives (action bar + frame upscaling) for plaicraft-debug's
+# validation overlays, ported from plaicraft-model-pi0's decode_debug.py
+# but with none of that repo's coupling: no VAE, no audio, no keypress-autoencoder.
 
 import cv2
 import numpy as np
@@ -37,47 +31,6 @@ KEY_ID_TO_NAME = {
     "87": "w", "65": "a", "83": "s", "68": "d",
     "32": "space", "340": "Shift_L",
 }
-
-
-# ------------------------------------------------------------------ #
-#  Action lookup: read straight from the raw sqlite session DB.
-# ------------------------------------------------------------------ #
-def get_frame_actions(session_db_path, start_frame_idx, n_frames):
-    """
-    Return a list of length n_frames of per-frame action dicts:
-      {"keys": [key_name, ...], "clicks": [button, ...], "mouseDX": float, "mouseDY": float}
-    Frame i (absolute index start_frame_idx + i) covers
-    [ (start_frame_idx+i)*100, (start_frame_idx+i+1)*100 ) ms.
-    """
-    con = sqlite3.connect(str(session_db_path))
-    cur = con.cursor()
-    cur.execute("SELECT key_id, start_timestamp, end_timestamp FROM keyboard")
-    key_rows = cur.fetchall()
-    cur.execute("SELECT mouse_key_type, start_timestamp, end_timestamp FROM mouse_click")
-    click_rows = cur.fetchall()
-    cur.execute("SELECT timestamp, mouseDX, mouseDY FROM mouse_movement")
-    mouse_by_ts = {int(ts): (dx, dy) for ts, dx, dy in cur.fetchall()}
-    con.close()
-
-    actions = []
-    for i in range(n_frames):
-        abs_idx = start_frame_idx + i
-        win_start = abs_idx * FRAME_DURATION_MS
-        win_end = win_start + FRAME_DURATION_MS
-
-        keys = [
-            KEY_ID_TO_NAME.get(key_id, f"Key_{key_id}")
-            for key_id, s, e in key_rows
-            if s < win_end and e > win_start
-        ]
-        clicks = [
-            btn for btn, s, e in click_rows
-            if s < win_end and e > win_start
-        ]
-        dx, dy = mouse_by_ts.get(int(win_start), (0.0, 0.0))
-
-        actions.append({"keys": keys, "clicks": clicks, "mouseDX": dx, "mouseDY": dy})
-    return actions
 
 
 # ------------------------------------------------------------------ #
@@ -164,53 +117,3 @@ def _to_uint8_frame(frame_chw):
     arr = np.transpose(arr, (1, 2, 0))  # HWC
     arr = cv2.resize(arr, DECODE_FINAL_FRAME_SIZE, interpolation=cv2.INTER_NEAREST)
     return arr
-
-
-# ------------------------------------------------------------------ #
-#  Public API
-# ------------------------------------------------------------------ #
-def render_overlay(gt_frames, pred_frames, session_db_path, start_frame_idx,
-                   out_path, n_observed=10, title=None, pred_actions=None):
-    """
-    gt_frames, pred_frames: (T, 3, 24, 40) float arrays/tensors in [-1, 1]
-    start_frame_idx: index of frame 0 of this window within the session (for action lookup)
-    n_observed: first N frames are context; drawn with a red border
-    pred_actions: optional list of T action-bar dicts to draw on the PREDICTED
-        row, in the same shape get_frame_actions returns. Pass this when the
-        model generates its own actions; without it both rows are painted with
-        the recorded actions and the generated ones are never visible.
-    Writes an mp4 to out_path at DECODE_VIDEO_FPS. Returns out_path.
-    """
-    gt_frames = np.asarray(gt_frames)
-    pred_frames = np.asarray(pred_frames)
-    T = gt_frames.shape[0]
-    actions = get_frame_actions(session_db_path, start_frame_idx, T)
-    if pred_actions is None:
-        pred_actions = actions
-
-    out_path = Path(out_path)
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-
-    # Encode H.264 via imageio/ffmpeg, NOT cv2.VideoWriter. cv2's "mp4v" is
-    # MPEG-4 Part 2, which browsers cannot decode in an HTML5 <video> element --
-    # so the file uploads to wandb fine and then will not play. cv2's "avc1" is
-    # not an option: this container's OpenCV has no H.264 encoder built in
-    # ("Could not find encoder for codec_id=27").
-    import imageio
-
-    writer = imageio.get_writer(
-        str(out_path), fps=DECODE_VIDEO_FPS, codec="libx264",
-        macro_block_size=1,  # frame is 1280x1736; don't let ffmpeg resize it
-        ffmpeg_params=["-pix_fmt", "yuv420p"],  # required for browser playback
-    )
-    for t in range(T):
-        border = t < n_observed
-        gt_content = _to_uint8_frame(gt_frames[t])
-        pred_content = _to_uint8_frame(pred_frames[t])
-        gt_overlay = _overlay_frame(gt_content, actions[t], border=True)
-        pred_overlay = _overlay_frame(pred_content, pred_actions[t], border=border)
-        combined = cv2.vconcat([gt_overlay, pred_overlay])
-        writer.append_data(combined)  # imageio expects RGB, which is what we have
-
-    writer.close()
-    return out_path

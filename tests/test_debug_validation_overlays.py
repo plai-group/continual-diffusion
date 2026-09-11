@@ -1,11 +1,10 @@
-"""Overlay action bars: each row must draw the actions it was actually
+"""Swap overlay action bars: each panel must draw the actions it was actually
 generated with, so a model that generates its own actions can be read off the
-video instead of having the recorded actions painted over every row."""
+video instead of having the recorded actions painted over every panel."""
 
 import numpy as np
 
 from improved_diffusion import debug_validation as dv
-from improved_diffusion import decode_debug as dd
 
 
 T, H, W = 6, 24, 40
@@ -86,51 +85,6 @@ def test_swap_overlay_draws_gt_and_generated_separately(monkeypatched=None):
     print("  [PASS] swap overlay draws GT and generated actions from separate arrays")
 
 
-def test_val_overlay_pred_row_uses_generated_actions():
-    rec = _BarRecorder()
-    orig_overlay = dd._overlay_frame
-    orig_get = dd.get_frame_actions
-    orig_writer = dd_get_writer()
-    dd._overlay_frame = rec
-    dd.get_frame_actions = lambda *a, **k: dv._action_bars(*_actions(11))
-    try:
-        pred_bars = dv._action_bars(*_actions(12))
-        dd.render_overlay(
-            gt_frames=_frames(), pred_frames=_frames(),
-            session_db_path="unused", start_frame_idx=0,
-            out_path="/dev/null", n_observed=3, pred_actions=pred_bars,
-        )
-    finally:
-        dd._overlay_frame, dd.get_frame_actions = orig_overlay, orig_get
-        dd_restore_writer(orig_writer)
-
-    assert len(rec.bars) == 2 * T
-    row_gt, row_pred = rec.bars[0::2], rec.bars[1::2]
-    assert row_pred == pred_bars, "predicted row must draw the generated actions"
-    assert row_gt != row_pred, "both rows drew the same bars -- regression"
-    print("  [PASS] val/overlay predicted row draws generated actions")
-
-
-def test_val_overlay_defaults_to_recorded_actions():
-    """Without pred_actions (the action-conditioned runs) behaviour is unchanged."""
-    rec = _BarRecorder()
-    orig_overlay, orig_get = dd._overlay_frame, dd.get_frame_actions
-    orig_writer = dd_get_writer()
-    dd._overlay_frame = rec
-    dd.get_frame_actions = lambda *a, **k: dv._action_bars(*_actions(11))
-    try:
-        dd.render_overlay(
-            gt_frames=_frames(), pred_frames=_frames(),
-            session_db_path="unused", start_frame_idx=0,
-            out_path="/dev/null", n_observed=3,
-        )
-    finally:
-        dd._overlay_frame, dd.get_frame_actions = orig_overlay, orig_get
-        dd_restore_writer(orig_writer)
-    assert rec.bars[0::2] == rec.bars[1::2], "both rows should show recorded actions"
-    print("  [PASS] val/overlay without pred_actions is unchanged")
-
-
 # ---- stub out the mp4 writer; these tests are about wiring, not encoding ----
 class _NullWriter:
     def append_data(self, frame): pass
@@ -149,14 +103,9 @@ def dv_restore_writer(orig):
     imageio.get_writer = orig
 
 
-dd_get_writer, dd_restore_writer = dv_get_writer, dv_restore_writer
-
-
 if __name__ == "__main__":
     print("Running overlay action-bar tests...")
     test_display_shift()
     test_action_bars_from_tensor()
     test_swap_overlay_draws_gt_and_generated_separately()
-    test_val_overlay_pred_row_uses_generated_actions()
-    test_val_overlay_defaults_to_recorded_actions()
     print("ALL OVERLAY TESTS PASSED")

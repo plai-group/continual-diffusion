@@ -28,13 +28,7 @@ from .action_masks import frame_mask_to_action_mask
 from .gaussian_diffusion import _unpack_action_mouse_out
 from .logger import logger
 from .rng_util import RNG
-from .decode_debug import (
-    render_overlay,
-    get_frame_actions,
-    _to_uint8_frame,
-    _overlay_frame,
-    DECODE_VIDEO_FPS,
-)
+from .decode_debug import _to_uint8_frame, _overlay_frame, DECODE_VIDEO_FPS
 
 VIDEO_FPS = 12.5  # plaicraft-debug#80: the corpus's session.fps
 MS_PER_FRAME = 1000.0 / VIDEO_FPS
@@ -415,11 +409,9 @@ def _to_display_actions(a):
     click appears simultaneously with its own effect, which reads as though
     causality were violated.
 
-    decode_debug.get_frame_actions (used by the 2-row val/overlay) instead
-    returns the RAW action for window [i, i+1), so the input renders one
-    frame BEFORE its consequence. Match that here, or the two overlays
-    disagree by one frame. cache[i+1] == raw[i], and the final frame has no
-    successor so its bar is blank.
+    The display convention instead shifts the cache back one row, so an
+    action renders one frame BEFORE its consequence: out[i] == cache[i+1].
+    The final frame has no successor, so its bar is blank.
     """
     if hasattr(a, 'detach'):
         a = a.detach().float().cpu().numpy()
@@ -430,7 +422,7 @@ def _to_display_actions(a):
 
 
 def _action_bars(keypress, mouse):
-    """(T, 8) + (T, 2) causal action arrays -> the T bar dicts render_overlay draws."""
+    """(T, 8) + (T, 2) causal action arrays -> the T bar dicts _overlay_frame draws."""
     dk, dm = _to_display_actions(keypress), _to_display_actions(mouse)
     return [_action_vec_to_bar(dk[t], dm[t]) for t in range(dk.shape[0])]
 
@@ -489,10 +481,9 @@ def _label_panel(panel, text):
 
 
 def _render_panels(frames_list, actions_list, labels, n_observed, out_path, ncols):
-    """Shared writer for _render_pair_overlay/_render_triple_overlay: one panel per
-    (frames, actions, label), arranged in an `ncols`-wide grid, same imageio/libx264
-    settings as decode_debug.render_overlay -- cv2's mp4v encodes fine and then will
-    not play in wandb.
+    """Shared writer for _render_triple_overlay: one panel per (frames, actions, label),
+    arranged in an `ncols`-wide grid -- cv2's mp4v encodes fine and then will not play
+    in wandb, so this uses imageio/libx264 instead.
     """
     frames_list = [np.asarray(f) for f in frames_list]
     T = frames_list[0].shape[0]
@@ -521,23 +512,6 @@ def _render_panels(frames_list, actions_list, labels, n_observed, out_path, ncol
         writer.append_data(rows[0] if len(rows) == 1 else cv2.vconcat(rows))
     writer.close()
     return out_path
-
-
-def _render_pair_overlay(frames_gt, frames_pred, actions_gt, actions_pred,
-                         n_observed, out_path):
-    """Side-by-side mp4: GT | PRED, from already-baked (keypress, mouse) tensors.
-
-    CorpusValidationSet rows (issue #81) have no session db -- decode_debug.
-    render_overlay's get_frame_actions can't draw their bars (it also hardcodes
-    100ms/10Hz frames, wrong for this corpus's 80ms/12.5Hz ticks). Both action
-    tensors are already loaded raw by run_debug_validation's caller, so this
-    reuses the same low-level primitives _render_triple_overlay does, just for
-    2 panels instead of 4.
-    """
-    return _render_panels(
-        (frames_gt, frames_pred), (actions_gt, actions_pred), ["GT", "PRED"],
-        n_observed, out_path, ncols=2,
-    )
 
 
 def _render_triple_overlay(frames_gt, frames_true, frames_swap, frames_zero,
@@ -726,43 +700,6 @@ def run_debug_validation(model, diffusion, valset, device, out_dir,
             if per_task_scalars:
                 for k, v in m_next.items():
                     logger.logkv(f"val/per_task/{slug}/{k}", v, distributed=False)
-
-            if log_videos:
-                mp4 = out_dir / f"step{step}_{slug}.mp4"
-                try:
-                    # Bottom row: model output (8+2/raw-pixels, km_fsq already decoded), falling back to raw GT per-modality -- never native 36-dim km codes, which _action_bars can't draw.
-                    pred_bar_key = p_key_chunk[j] if p_key_chunk is not None else keypress_raw_chunk[j] if keypress_raw_chunk is not None else None
-                    pred_bar_mouse = p_mouse_chunk[j] if p_mouse_chunk is not None else mouse_raw_chunk[j] if mouse_raw_chunk is not None else None
-                    if is_corpus_valset:
-                        # No session db to read GT actions from (frozen npz package,
-                        # issue #81), and get_frame_actions hardcodes 10Hz framing anyway
-                        # -- draw both rows from the already-loaded raw tensors instead.
-                        _render_pair_overlay(
-                            frames_gt=gt.cpu().numpy(),
-                            frames_pred=pred.cpu().numpy(),
-                            actions_gt=(keypress_raw_chunk[j].cpu().numpy(), mouse_raw_chunk[j].cpu().numpy()),
-                            actions_pred=((pred_bar_key.cpu().numpy() if pred_bar_key is not None else keypress_raw_chunk[j].cpu().numpy()),
-                                          (pred_bar_mouse.cpu().numpy() if pred_bar_mouse is not None else mouse_raw_chunk[j].cpu().numpy())),
-                            n_observed=n_obs,
-                            out_path=str(mp4),
-                        )
-                    else:
-                        render_overlay(
-                            gt_frames=gt.cpu().numpy(),
-                            pred_frames=pred.cpu().numpy(),
-                            pred_actions=(_action_bars(pred_bar_key, pred_bar_mouse)
-                                          if pred_bar_key is not None and pred_bar_mouse is not None else None),
-                            session_db_path=str(row["session_db"]),
-                            start_frame_idx=row["window_start"],
-                            out_path=str(mp4),
-                            n_observed=n_obs,
-                            title=row["prompt"],
-                        )
-                    import wandb
-                    logger.logkv(f"val/overlay/{slug}", wandb.Video(str(mp4)), distributed=False)
-                except Exception as e:
-                    # An overlay failure must never take down a training run.
-                    print(f"[debug_validation] overlay failed for row {row['num']}: {e!r}")
 
             # The swap test (acceptance criterion): true/swapped/zero actions on the same context.
             # Intervenes on the RAW 8+2 arrays (see the note above _invert_actions), encoding km_fsq live per pass.

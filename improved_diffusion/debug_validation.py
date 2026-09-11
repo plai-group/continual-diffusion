@@ -883,12 +883,11 @@ def run_debug_validation(model, diffusion, valset, device, out_dir,
             if vals:
                 agg[f"{prefix}/{k}"] = float(np.mean(vals))
 
-    """Pool-level, so set directly rather than through ACT_METRIC_KEYS. fvd's covariance is
-    rank-deficient at 13 real clips against 1024-d features, which puts a large floor
-    under it: two draws from the SAME distribution measure 1911 at 13-vs-52, not 0, and
-    that floor is a function of n_rows and fvd_repeats. Comparable across steps of one
-    run, never across runs with different valset sizes (13-row CorpusValidationSet vs
-    8-row DebugValidationSet). kvd is the unbiased estimator and carries no such floor."""
+    """Pool-level, so set directly rather than through ACT_METRIC_KEYS.
+    Note that FVD extracts a 1024-dim vector. Across 13 tasks that's [13, 1024]. The resulting
+    covariance matrix has at most rank 13, which is heavily rank deficient.
+    FVD is unreliable because and KVD is the more stable alternative.
+    """
     if len(feats_real) and len(feats_fake):
         try:
             d = frechet_video_distance.video_distances(np.concatenate(feats_real),

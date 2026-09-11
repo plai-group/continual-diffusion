@@ -24,6 +24,7 @@ import torch as th
 import torch.nn as nn
 
 from . import debug_actions
+from . import action_ce
 from .action_masks import frame_mask_to_action_mask
 from .gaussian_diffusion import _unpack_action_mouse_out
 from .logger import logger
@@ -231,7 +232,7 @@ def _symlog(v):
 
 
 def _decode_km_actions(tokenizer, codes):
-    """(B, T, 36) quantized km codes -> ((B, T, 8) keys bool, (B, T, 2) mouse raw pixels).
+    """(B, T, 36) quantized km codes -> ((B, T, 8) keys bool, (B, T, 2) mouse raw pixels, (B, T, 8) key probs).
     keys: sigmoid(key_logits) at _RAW_POSITIONS, mean over the tick's 8 sub-bins, thresholded.
     mouse: mouse_pred summed over the tick's 8 sub-bins."""
     from .km_tokenizer.keypress_scatter import _RAW_POSITIONS
@@ -241,9 +242,10 @@ def _decode_km_actions(tokenizer, codes):
     key_logits, _mouse_logits, mouse_pred = tokenizer.decode_codes(
         codes.reshape(B, T, tokenizer.config.num_tokens, tokenizer.config.fsq_dim)
     )
-    keys = (th.sigmoid(key_logits[..., _RAW_POSITIONS]).mean(dim=2) > 0.5).float()  # (B, T, 8)
+    probs = th.sigmoid(key_logits[..., _RAW_POSITIONS]).mean(dim=2)  # (B, T, 8)
+    keys = (probs > 0.5).float()
     mouse = mouse_pred.sum(dim=2)  # (B, T, 2), raw pixels
-    return keys, mouse
+    return keys, mouse, probs
 
 
 def _encode_km_actions(tokenizer, keys_raw, mouse_raw):
@@ -435,7 +437,8 @@ _QUANTIZE_FNS = {
 }
 
 
-def _action_metrics(p_key, g_key, p_mouse, g_mouse, sl, quantize="none", is_km_fsq=False):
+def _action_metrics(p_key, g_key, p_mouse, g_mouse, sl, quantize="none", is_km_fsq=False,
+                    p_key_prob=None, g_key_true=None):
     """Action metrics over one frame window, plus the all-zeros baseline.
 
     Keypress and mouse are computed independently -- either side may be None
@@ -448,6 +451,11 @@ def _action_metrics(p_key, g_key, p_mouse, g_mouse, sl, quantize="none", is_km_f
 
     mouse_mse's do-nothing baseline is ~3.4, so mouse keeps a *_trivial pair,
     measured from this batch's GT rows rather than hard-coded.
+
+    key_cross_entropy scores p_key_prob (a per-key probability, however the encoding
+    produced it) against g_key_true, the real multi-hot -- never a decoder round-trip.
+    Its key_ce_baserate partner is the same *_trivial convention: beat it or the head
+    is doing no better than predicting each key's marginal.
     """
     out = {}
     if p_key is not None and g_key is not None:
@@ -470,6 +478,9 @@ def _action_metrics(p_key, g_key, p_mouse, g_mouse, sl, quantize="none", is_km_f
         out["mouse_mse"] = float(((p_m - g_m) ** 2).mean().item())
         out["mouse_l1_trivial"] = float(g_m.abs().mean().item())
         out["mouse_mse_trivial"] = float((g_m ** 2).mean().item())
+    if p_key_prob is not None and g_key_true is not None:
+        out["key_cross_entropy"] = float(action_ce.keypress_cross_entropy(p_key_prob[sl], g_key_true[sl]))
+        out["key_ce_baserate"] = float(action_ce.keypress_ce_baserate(g_key_true[sl]))
     return out
 
 
@@ -649,20 +660,22 @@ def run_debug_validation(model, diffusion, valset, device, out_dir,
             # VDT regresses continuous codes; snap to the nearest FSQ lattice point here, at inference, never during training.
             act_for_decode = (debug_actions.quantize_km_fsq(samples_act)
                               if action_quantization == "fsq" and samples_act is not None else samples_act)
-            p_key_chunk, p_mouse_chunk = (_decode_km_actions(km_tokenizer, act_for_decode)
-                                          if act_for_decode is not None else (None, None))
-            g_key_chunk, g_mouse_chunk = (_decode_km_actions(km_tokenizer, keypress_chunk)
-                                          if keypress_chunk is not None else (None, None))
+            p_key_chunk, p_mouse_chunk, p_key_prob_chunk = (_decode_km_actions(km_tokenizer, act_for_decode)
+                                          if act_for_decode is not None else (None, None, None))
+            g_key_chunk, g_mouse_chunk, _g_key_prob_chunk = (_decode_km_actions(km_tokenizer, keypress_chunk)
+                                          if keypress_chunk is not None else (None, None, None))
             metrics_quantize = "none"  # already hard-thresholded booleans; nothing left to snap
         elif is_raw_fused:
             # 10-dim fused token: first 8 dims are keypress, last 2 are symlog(mouse).
             p_key_chunk, p_mouse_chunk = ((samples_act[..., :8], debug_actions._inv_symlog(samples_act[..., 8:]))
                                           if samples_act is not None else (None, None))
+            p_key_prob_chunk = p_key_chunk  # MSE-trained toward 0/1, so already a P(pressed) estimate
             g_key_chunk, g_mouse_chunk = ((keypress_chunk[..., :8], debug_actions._inv_symlog(keypress_chunk[..., 8:]))
                                           if keypress_chunk is not None else (None, None))
             metrics_quantize = action_quantization
         else:
             p_key_chunk, g_key_chunk = samples_act, keypress_chunk
+            p_key_prob_chunk = p_key_chunk
             p_mouse_chunk, g_mouse_chunk = samples_mouse, mouse_chunk
             metrics_quantize = action_quantization
 
@@ -678,19 +691,25 @@ def run_debug_validation(model, diffusion, valset, device, out_dir,
             rec = {"row": row["num"], "prompt": row["prompt"], "type": row["test_type"]}
             rec.update({f"next/{k}": v for k, v in m_next.items()})
             rec.update({f"roll/{k}": v for k, v in m_roll.items()})
+            # CE scores against the real multi-hot, not g_key -- under km_fsq that is itself a thresholded round-trip.
+            p_key_prob = p_key_prob_chunk[j].to(device) if p_key_prob_chunk is not None else None
+            g_key_true = keypress_raw_chunk[j].to(device) if keypress_raw_chunk is not None else None
             p_key = p_key_chunk[j].to(device) if p_key_chunk is not None and g_key_chunk is not None else None
             g_key = g_key_chunk[j].to(device) if p_key is not None else None
             p_mouse = p_mouse_chunk[j].to(device) if p_mouse_chunk is not None and g_mouse_chunk is not None else None
             g_mouse = g_mouse_chunk[j].to(device) if p_mouse is not None else None
-            if p_key is not None or p_mouse is not None:
+            if p_key is not None or p_mouse is not None or p_key_prob is not None:
                 # Row n_obs is pinned GT (the action mask lags by one row), so the first genuinely generated action is row n_obs + 1.
                 first_gen = n_obs + 1
                 for scope, sl in (("next", slice(first_gen, first_gen + 1)),
                                   ("roll", slice(first_gen, None))):
+                                  # next is just the next frame, roll is all rollout frames
                     rec.update({f"{scope}/{k}": v
                                 for k, v in _action_metrics(p_key, g_key, p_mouse, g_mouse, sl,
                                                              metrics_quantize,
-                                                             is_km_fsq=is_km_fsq or is_raw_fused).items()})
+                                                             is_km_fsq=is_km_fsq or is_raw_fused,
+                                                             p_key_prob=p_key_prob,
+                                                             g_key_true=g_key_true).items()})
             per_row.append(rec)
 
             slug = valset.slug(row)
@@ -768,7 +787,7 @@ def run_debug_validation(model, diffusion, valset, device, out_dir,
                         if is_km_fsq and key_out is not None:
                             # Same snap-then-decode as the main pass, still batch=1 here.
                             act_out = debug_actions.quantize_km_fsq(key_out) if action_quantization == "fsq" else key_out
-                            key_out, mouse_out = _decode_km_actions(km_tokenizer, act_out)
+                            key_out, mouse_out, _ = _decode_km_actions(km_tokenizer, act_out)
                         elif is_raw_fused and key_out is not None:
                             key_out, mouse_out = key_out[..., :8], debug_actions._inv_symlog(key_out[..., 8:])
                         return (video, key_out[0] if key_out is not None else None,
@@ -823,8 +842,8 @@ def run_debug_validation(model, diffusion, valset, device, out_dir,
             vals = [r[f"{scope}/{k}"] for r in per_row if f"{scope}/{k}" in r]
             if vals:
                 agg[f"{prefix}/{k}"] = float(np.mean(vals))
-    ACT_METRIC_KEYS = ("key_jaccard_distance", "mouse_l1", "mouse_mse",
-                       "mouse_l1_trivial", "mouse_mse_trivial")
+    ACT_METRIC_KEYS = ("key_jaccard_distance", "key_cross_entropy", "key_ce_baserate",
+                       "mouse_l1", "mouse_mse", "mouse_l1_trivial", "mouse_mse_trivial")
     for scope, prefix in (("next", "val/action"), ("roll", "val/action_roll")):
         for k in ACT_METRIC_KEYS:
             vals = [r[f"{scope}/{k}"] for r in per_row if f"{scope}/{k}" in r]

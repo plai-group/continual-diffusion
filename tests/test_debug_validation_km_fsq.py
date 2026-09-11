@@ -64,11 +64,13 @@ def test_decode_then_encode_km_actions_round_trip():
     codes = dv._encode_km_actions(tokenizer, keys_raw, mouse_raw)
     assert codes.shape == (1, 3, da.KM_CODE_DIM)
 
-    keys_hat, mouse_hat = dv._decode_km_actions(tokenizer, codes)
+    keys_hat, mouse_hat, probs_hat = dv._decode_km_actions(tokenizer, codes)
     assert keys_hat.shape == (1, 3, 8)
     assert mouse_hat.shape == (1, 3, 2)
+    assert probs_hat.shape == (1, 3, 8)
     # A trained tokenizer should recover simple, sparse actions near-exactly.
     assert (mouse_hat - mouse_raw).abs().mean().item() < 2.0
+    assert torch.equal((probs_hat > 0.5).float(), keys_hat)
 
 
 def _make_session(tmp_path, n_ticks=3):

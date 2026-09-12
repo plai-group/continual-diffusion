@@ -150,3 +150,40 @@ class CorpusValidationSet:
         overlays and interventions read this, never the model's native conditioning
         tensor (mirrors DebugValidationSet.load_all_actions_raw, plaicraft-debug#80/81)."""
         return th.from_numpy(self._keypress.copy()), th.from_numpy(self._mouse.copy())
+
+
+class PlayerValidationSet(CorpusValidationSet):
+    """The issue-85 paired package: the same exercises, but two frame stacks per row.
+
+    Both arms come from replaying one action trace under each player, so they are identical
+    apart from the cue block and the click tint. `frames` is player 0's arm (inherited
+    wholesale, including load_all and the shape checks); `frames_p2` is player 1's.
+
+    Because the package lives in its own directory and still calls itself validation.npz,
+    everything the base class does -- the manifest cross-checks, the boundary-offset assert,
+    and load_all_actions' raw / raw_fused / km_fsq branches -- applies unchanged. The actions
+    are shared between arms by construction, so there is exactly one keypress/mouse array.
+    """
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        npz = np.load(self.validation_dir / "validation.npz", allow_pickle=False)
+        if "frames_p2" not in npz:
+            raise ValueError(
+                f"{self.validation_dir / 'validation.npz'} has no frames_p2: this is a plain "
+                f"issue-81 package, not a paired player one. Point --player_validation_dir at "
+                f"a directory built by plaicraft-debug's build_player_validation.py."
+            )
+        self._frames_p2 = np.asarray(npz["frames_p2"], dtype=np.float32)
+        if self._frames_p2.shape != self._frames.shape:
+            raise ValueError(
+                f"frames_p2.shape={self._frames_p2.shape} != frames.shape={self._frames.shape}; "
+                f"the two arms must be the same trace rendered twice"
+            )
+        self.player_indices = [int(p) for p in npz["player_indices"]] if "player_indices" in npz else [0, 1]
+        if len(self.player_indices) != 2:
+            raise ValueError(f"expected exactly 2 player_indices, got {self.player_indices}")
+
+    def load_all_p2(self):
+        """(N, T, H, W) float32 in [-1, 1]: the SECOND player's arm of every row."""
+        return th.from_numpy(self._frames_p2.copy())

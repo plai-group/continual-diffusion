@@ -65,9 +65,11 @@ class TrainLoop:
         clip_grad=None,
         optimizer='adam',
         debug_validation=None,
+        player_validation=None,
     ):
         # (valset, out_dir) for the issue-58 plaicraft-debug validation set, or None.
         self.debug_validation = debug_validation
+        self.player_validation = player_validation
         self.args = args
         self.model = model
         self.diffusion = diffusion
@@ -728,6 +730,21 @@ class TrainLoop:
                     )
                 except Exception as e:
                     print(f"[debug_validation] skipped at step {self.step}: {e!r}")
+
+            # Issue-85 player test: a second, independent package. Same never-kill-a-run
+            # contract as above, and deliberately separate so a failure in one does not
+            # take the other down with it.
+            if self.player_validation is not None:
+                from .debug_validation import run_player_validation
+                valset, val_out_dir, label_cfg_scale = self.player_validation
+                try:
+                    run_player_validation(
+                        self.model, self.diffusion, valset, dist_util.dev(),
+                        out_dir=val_out_dir, step=self.step,
+                        label_cfg_scale=label_cfg_scale,
+                    )
+                except Exception as e:
+                    print(f"[player_validation] skipped at step {self.step}: {e!r}")
 
             logger.logkv("timing/sampling_time", time() - sample_start, distributed=False)
 

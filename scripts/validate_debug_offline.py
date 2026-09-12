@@ -41,6 +41,8 @@ def main():
     p.add_argument("--device", default="cuda")
     p.add_argument("--chunk_size", type=int, default=3)
     p.add_argument("--cfg_scale", type=float, default=1.0)
+    p.add_argument("--label_cfg_scale", type=float, default=1.0,
+                   help="Classifier-free guidance on the issue-85 player label; 1.0 = off.")
     args = p.parse_args()
 
     using_dir = bool(args.debug_validation_dir)
@@ -90,6 +92,7 @@ def main():
         model, diffusion, valset, args.device, out_dir=args.out,
         step=step, chunk_size=args.chunk_size, log_videos=True,
         cfg_scale=args.cfg_scale,
+        label_cfg_scale=args.label_cfg_scale,
     )
     print("\nAGGREGATE")
     for k, v in sorted(res["aggregate"].items()):

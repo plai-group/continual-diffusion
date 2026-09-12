@@ -270,26 +270,45 @@ def _encode_km_actions(tokenizer, keys_raw, mouse_raw):
 
 
 class _CFGWrapper(nn.Module):
-    """Wraps an action-conditioned VDT model to sample with classifier-free
-    guidance: runs the model twice (conditional + null-action unconditional
-    via ``force_action_drop``) and extrapolates. NOT vdt.py:forward_with_cfg
-    (dead DiT-era code, incompatible signature) -- guidance is applied here,
-    at the sampling site.
+    """Wraps a VDT model to sample with classifier-free guidance, on the actions, the player
+    label, or both. NOT vdt.py:forward_with_cfg (dead DiT-era code, incompatible signature) --
+    guidance is applied here, at the sampling site.
+
+    The two arms are kept on separate scales rather than one shared null. They answer
+    different questions ("how hard should the actions drive this" vs "how hard should the
+    player"), and collapsing them would make the issue-85 player overlay's reading depend on
+    the action scale.
+
+    Note that the action arm is inert under ``generate_actions``: there the action rides in
+    the sequence as a token and ``action_embedder`` is None, so ``force_action_drop`` has
+    nothing to drop. The label arm works in every mode.
     """
 
-    def __init__(self, model, w):
+    def __init__(self, model, w, label_w=1.0):
         super().__init__()
         self.model = model
         self.w = w
+        self.label_w = label_w
+
+    def _run(self, x, timesteps, kwargs, *, drop_action=False, drop_label=False):
+        kw = dict(kwargs)
+        if self.w != 1.0:
+            kw["force_action_drop"] = drop_action
+        if self.label_w != 1.0:
+            kw["force_label_drop"] = drop_label
+        eps, _ = self.model(x, timesteps=timesteps, **kw)
+        return eps
 
     def forward(self, x, timesteps, **kwargs):
-        kwargs_cond = dict(kwargs)
-        kwargs_cond["force_action_drop"] = False
-        kwargs_uncond = dict(kwargs)
-        kwargs_uncond["force_action_drop"] = True
-        eps_cond, _ = self.model(x, timesteps=timesteps, **kwargs_cond)
-        eps_uncond, _ = self.model(x, timesteps=timesteps, **kwargs_uncond)
-        return eps_uncond + self.w * (eps_cond - eps_uncond), None
+        eps = self._run(x, timesteps, kwargs)
+        if self.w != 1.0:
+            eps_no_action = self._run(x, timesteps, kwargs, drop_action=True)
+            eps = eps_no_action + self.w * (eps - eps_no_action)
+        if self.label_w != 1.0:
+            # Guidance is composed, not shared: each arm extrapolates from its own null.
+            eps_no_label = self._run(x, timesteps, kwargs, drop_label=True)
+            eps = eps_no_label + self.label_w * (eps - eps_no_label)
+        return eps, None
 
 
 # _invert_actions/_swap_actions/_zero_actions operate only on RAW 8+2 arrays, never km_fsq codes or a decode/re-encode round trip -- issue-74's decode-then-reencode fed the encoder out-of-distribution logits and silently dropped shift/space swaps (fixed in 6a38b88).
@@ -545,7 +564,7 @@ def _render_triple_overlay(frames_gt, frames_true, frames_swap, frames_zero,
 def run_debug_validation(model, diffusion, valset, device, out_dir,
                          step=0, chunk_size=3, log_videos=True,
                          per_task_scalars=False, actions=True,
-                         swap_test=True, cfg_scale=1.0,
+                         swap_test=True, cfg_scale=1.0, label_cfg_scale=1.0,
                          teacher_force_actions=True):
     """Sample every validation row, render overlays, log metrics to wandb.
 
@@ -571,7 +590,8 @@ def run_debug_validation(model, diffusion, valset, device, out_dir,
     is_km_fsq = action_encoding == "km_fsq"
     is_raw_fused = action_encoding == "raw_fused"
     km_tokenizer = _get_km_tokenizer(device, getattr(valset, "tokenizer_checkpoint", None)) if is_km_fsq else None
-    sampling_model = _CFGWrapper(model, cfg_scale) if cfg_scale != 1.0 else model
+    sampling_model = (_CFGWrapper(model, cfg_scale, label_cfg_scale)
+                      if (cfg_scale != 1.0 or label_cfg_scale != 1.0) else model)
 
     T, n_obs = valset.T, valset.n_observed
     # CorpusValidationSet (issue #81) rows carry swap_kind: their swap test targets
@@ -840,4 +860,162 @@ def run_debug_validation(model, diffusion, valset, device, out_dir,
     for k, v in agg.items():
         logger.logkv(k, v, distributed=False)
 
+    return {"aggregate": agg, "per_row": per_row}
+
+
+def _render_player_overlay(frames_gt, frames_p1, frames_p2, actions, n_observed, out_path,
+                           labels=("GT", "P1", "P2")):
+    """1x3 mp4: GT | P1 | P2, all three driven by the SAME action trace.
+
+    Only player 0's ground truth is shown. Player 1's exists (the arms are two renders of one
+    trace) but past n_observed it differs from player 0's only in the cue and the tint -- which
+    is exactly what the two generated panels are being judged on, so showing it would crowd the
+    strip without adding a reference. It is not discarded: the cross-arm metrics below read it.
+    """
+    return _render_panels(
+        (frames_gt, frames_p1, frames_p2),
+        (actions, actions, actions),
+        list(labels), n_observed, out_path, ncols=3,
+    )
+
+
+def _player_l2(a, b):
+    """Mean squared difference between two [-1,1] frame stacks, on the 0-1 scale the other
+    validation metrics use."""
+    return float(th.mean((_to01(a) - _to01(b)) ** 2))
+
+
+def _player_metrics(gen_p1, gen_p2, gt_p1, gt_p2, click_mask=None):
+    """Does each generated arm look more like its OWN player's ground truth than the other's?
+
+    matched = mean(L2(gen_p1, gt_p1), L2(gen_p2, gt_p2))
+    crossed = mean(L2(gen_p1, gt_p2), L2(gen_p2, gt_p1))
+    margin  = crossed - matched, positive when the model tracked the player it was given.
+
+    NOTE ON THE FLOOR: gt_p1 and gt_p2 differ in the cue block on EVERY frame, so `crossed`
+    never reaches zero and `margin` is not zero-baselined -- an untrained model that renders
+    no cue at all still scores a small positive margin. The *_click variants restrict to the
+    frames where a click is held, which is where the whole-frame tint dominates and the cue
+    floor is negligible. Read those for the real signal; the overlay is the primary evidence.
+    """
+    def agg(sel):
+        g1, g2 = gen_p1[sel], gen_p2[sel]
+        t1, t2 = gt_p1[sel], gt_p2[sel]
+        if g1.numel() == 0:
+            return {}
+        matched = 0.5 * (_player_l2(g1, t1) + _player_l2(g2, t2))
+        crossed = 0.5 * (_player_l2(g1, t2) + _player_l2(g2, t1))
+        return {"l2_matched": matched, "l2_crossed": crossed, "margin": crossed - matched}
+
+    out = {k: v for k, v in agg(slice(None)).items()}
+    if click_mask is not None and bool(click_mask.any()):
+        out.update({f"{k}_click": v for k, v in agg(click_mask).items()})
+    return out
+
+
+@th.no_grad()
+def run_player_validation(model, diffusion, valset, device, out_dir, step=0, chunk_size=3,
+                          log_videos=True, cfg_scale=1.0, label_cfg_scale=1.0,
+                          teacher_force_actions=True):
+    """Issue #85: sample each row twice -- same frames-so-far contract, same actions, different
+    player -- and report whether the two generations track their own players.
+
+    The two passes share one noise draw and one reseed, exactly as the swap test does, so the
+    only difference between them is the player: its label in `y` and its cue in the context.
+    """
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    _m = getattr(model, "module", model)
+    generates_actions = (bool(getattr(_m, "generate_actions", False))
+                         and getattr(_m, "action_dim", 0) > 0)
+    generates_mouse = (bool(getattr(_m, "generate_mouse", False))
+                       and getattr(_m, "mouse_dim", 0) > 0)
+    sampling_model = (_CFGWrapper(model, cfg_scale, label_cfg_scale)
+                      if (cfg_scale != 1.0 or label_cfg_scale != 1.0) else model)
+
+    T, n_obs = valset.T, valset.n_observed
+    gt_p1_all, gt_p2_all = valset.load_all(), valset.load_all_p2()
+    keypress_all, mouse_all = valset.load_all_actions()
+    keypress_raw_all, mouse_raw_all = valset.load_all_actions_raw()
+    p_a, p_b = valset.player_indices
+    sched_sigma_max = float(diffusion.timestep2sigma(diffusion.num_timesteps - 1))
+
+    per_row, agg = [], {}
+    for i, row in enumerate(valset.rows):
+        try:
+            gt_a = gt_p1_all[i:i + 1].to(device)
+            gt_b = gt_p2_all[i:i + 1].to(device)
+            actions_in = keypress_all[i:i + 1].to(device)
+            mouse_in = mouse_all[i:i + 1].to(device)
+
+            obs_mask = th.zeros(1, T, 1, 1, 1, device=device)
+            obs_mask[:, :n_obs] = 1.0
+            latent_mask = th.zeros_like(obs_mask)
+            latent_mask[:, n_obs:] = 1.0
+            obs_act_mask = frame_mask_to_action_mask(obs_mask)
+            if not teacher_force_actions:
+                obs_act_mask = th.zeros_like(obs_act_mask)
+
+            shared_noise = th.randn(*gt_a.shape, device=device)
+            seed = 20250911 + int(row["num"])
+
+            def _sample(x0, player_index):
+                with RNG(seed):
+                    s, _ = diffusion.heun_sample(
+                        sampling_model, x0.shape, noise=shared_noise,
+                        sigma_max=sched_sigma_max, clip_denoised=True,
+                        model_kwargs={
+                            "frame_indices": None, "x0": x0,
+                            "obs_mask": obs_mask, "latent_mask": latent_mask,
+                            "actions": actions_in, "mouse": mouse_in,
+                            "y": th.full((1,), player_index, dtype=th.long, device=device),
+                            **({"actions0": actions_in, "obs_action_mask": obs_act_mask}
+                               if generates_actions else {}),
+                            **({"mouse0": mouse_in, "obs_mouse_mask": obs_act_mask}
+                               if generates_mouse else {}),
+                        },
+                        latent_mask=latent_mask.cpu(), return_decoded=False,
+                    )
+                if isinstance(s, tuple):
+                    s = s[0]
+                s = s.to(device)
+                return (s * latent_mask + x0 * obs_mask)[0]
+
+            gen_a = _sample(gt_a, p_a)
+            gen_b = _sample(gt_b, p_b)
+
+            # Only the generated region is model output; the prefix is the given context.
+            gen_region = slice(n_obs, T)
+            key_raw = keypress_raw_all[i]
+            clicks = (key_raw[gen_region, 6:8].sum(-1) > 0).to(device)
+            rec = {"row": row["num"], "name": row["name"]}
+            rec.update(_player_metrics(
+                gen_a[gen_region], gen_b[gen_region],
+                gt_a[0][gen_region], gt_b[0][gen_region], click_mask=clicks))
+            per_row.append(rec)
+
+            if log_videos:
+                slug = valset.slug(row)
+                mp4 = out_dir / f"step{step}_{slug}_player.mp4"
+                _render_player_overlay(
+                    frames_gt=gt_a[0].cpu().numpy(),
+                    frames_p1=gen_a.cpu().numpy(),
+                    frames_p2=gen_b.cpu().numpy(),
+                    actions=(key_raw.cpu().numpy(), mouse_raw_all[i].cpu().numpy()),
+                    n_observed=n_obs, out_path=str(mp4),
+                    labels=("GT", f"P{p_a}", f"P{p_b}"),
+                )
+                import wandb
+                logger.logkv(f"val/player_overlay/{slug}", wandb.Video(str(mp4)), distributed=False)
+        except Exception as e:
+            print(f"[player_validation] row {row['num']} failed: {e!r}")
+
+    for key in ("l2_matched", "l2_crossed", "margin",
+                "l2_matched_click", "l2_crossed_click", "margin_click"):
+        vals = [r[key] for r in per_row if key in r]
+        if vals:
+            agg[f"val/player/{key}"] = float(np.mean(vals))
+    for k, v in agg.items():
+        logger.logkv(k, v, distributed=False)
     return {"aggregate": agg, "per_row": per_row}

@@ -198,6 +198,10 @@ def vdt_model_and_diffusion_defaults():
         action_token_cond=False,
         generate_mouse=False,
         mouse_token_cond=False,
+        # 0 keeps y_embedder the single learned constant it has always been, so every
+        # pre-issue-85 run script is unchanged. 2 turns it into the player label.
+        num_classes=0,
+        class_dropout_prob=0.1,
         keypress_loss_weight=1.0,
         mouse_loss_weight=1.0,
         action_quantization="none",  # "none" | "codebook" | "fsq"; see plaicraft-debug#77, #80
@@ -234,6 +238,8 @@ def create_vdt_model_and_diffusion(
     mouse_loss_weight=1.0,
     action_quantization="none",
     action_encoding="raw",
+    num_classes=0,
+    class_dropout_prob=0.1,
 ):
     diffusion = create_gaussian_diffusion(
         steps=diffusion_steps,
@@ -265,6 +271,8 @@ def create_vdt_model_and_diffusion(
         action_token_cond=action_token_cond,
         generate_mouse=generate_mouse,
         mouse_token_cond=mouse_token_cond,
+        num_classes=num_classes,
+        class_dropout_prob=class_dropout_prob,
     )
     return model, diffusion
 

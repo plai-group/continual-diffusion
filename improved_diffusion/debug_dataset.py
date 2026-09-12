@@ -8,7 +8,9 @@ import torch
 from torch.utils.data import Dataset
 
 from improved_diffusion.debug_actions import load_or_build as load_or_build_actions
-from improved_diffusion.debug_actions import read_session_fps, validate_action_encoding
+from improved_diffusion.debug_actions import (
+    read_session_fps, read_session_player, validate_action_encoding,
+)
 
 
 class ContinuousDebugDataset(Dataset):
@@ -28,13 +30,15 @@ class ContinuousDebugDataset(Dataset):
     N_TEST_SESSIONS = 20
 
     def __init__(self, dataset_path, window_length=20, frame_range=(0, None),
-                 action_encoding="raw", tokenizer_checkpoint=None):
+                 action_encoding="raw", tokenizer_checkpoint=None, num_classes=0):
         self.dataset_path = Path(dataset_path)
         self.window_length = self.T = window_length
         self.is_test = False
         self.original_frame_range = frame_range
         self.action_encoding = action_encoding
         self.tokenizer_checkpoint = tokenizer_checkpoint
+        # >0 means the model conditions on a player label, so every session must declare one.
+        self.num_classes = num_classes
 
         self._h5_handles = {}
         self._keypress_arrays = {}
@@ -48,6 +52,32 @@ class ContinuousDebugDataset(Dataset):
     def _validate_parameters(self):
         assert isinstance(self.window_length, int) and self.window_length > 0, \
             f"window_length must be a positive integer, but got {self.window_length}."
+
+    def _resolve_players(self):
+        """One player index per session, read once here rather than per __getitem__.
+
+        Raises rather than defaulting to 0 when the model wants labels but the corpus has
+        none: a silent fallback would train a 'player-conditioned' model on a single-player
+        corpus, and the only symptom would be a flat val/player/margin weeks later.
+        """
+        self._session_players = {}
+        for _fs, _fe, path in self.file_boundaries:
+            session_dir = path.parent.parent
+            player = read_session_player(session_dir)
+            if self.num_classes > 0:
+                if player is None:
+                    raise ValueError(
+                        f"debug_toy: session {session_dir.name} has no player_index in its "
+                        f"other_metadata, but the model was built with num_classes="
+                        f"{self.num_classes}. Regenerate the corpus with a plaicraft-debug "
+                        f"that includes issue #85, or set --num_classes 0."
+                    )
+                if not 0 <= player < self.num_classes:
+                    raise ValueError(
+                        f"debug_toy: session {session_dir.name} has player_index={player}, "
+                        f"outside range(num_classes={self.num_classes})."
+                    )
+            self._session_players[session_dir] = 0 if player is None else int(player)
 
     def _validate_action_encoding(self):
         """km_fsq needs a 12.5Hz corpus; check every session's fps, not just the first --
@@ -115,6 +145,10 @@ class ContinuousDebugDataset(Dataset):
         self.frame_range = self.original_frame_range
         if self.frame_range[1] is None or self.frame_range[1] > total_frames:
             self.frame_range = (self.frame_range[0], total_frames)
+
+        # Inside the mapping build, not __init__: set_train/set_test re-run this with a
+        # different session list, and a stale player map would KeyError in __getitem__.
+        self._resolve_players()
 
         self.window_starts = self._build_window_starts(step=1)
 
@@ -210,7 +244,10 @@ class ContinuousDebugDataset(Dataset):
         ).float()
 
         absolute_index_map = torch.arange(start_frame, end_frame, dtype=torch.int64)
-        return frames, absolute_index_map, keypress, mouse
+        # Per-sequence, not per-frame: a window never straddles a session, so one scalar
+        # covers it. That is also why it needs no frame_indices gather in forward_backward.
+        player_id = torch.tensor(self._session_players[session_dir], dtype=torch.long)
+        return frames, absolute_index_map, keypress, mouse, player_id
 
     def set_train(self):
         self.is_test = False

@@ -133,6 +133,8 @@ def main():
         frame_range=(0, args.upper_frame_range),
         action_encoding=args.action_encoding,
         tokenizer_checkpoint=args.km_tokenizer_checkpoint,
+        # >0 makes the dataset emit a player label per window, and refuse a corpus without one.
+        num_classes=args.num_classes,
     )
 
     # Issue-58: fixed prompt set from the plaicraft-debug validation recording.

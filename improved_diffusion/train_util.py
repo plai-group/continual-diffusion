@@ -95,6 +95,7 @@ class TrainLoop:
         self.vis_batch = None
         self.vis_actions = None
         self.vis_mouse = None
+        self.vis_player = None
         self.max_frames = max_frames
         self.gradient_clip_norm = float(clip_grad) if clip_grad is not None else None
 
@@ -371,23 +372,29 @@ class TrainLoop:
 
     def get_next_batch(self):
         batch = next(self.data)
-        if len(batch) == 4:
+        # 5 is the issue-85 debug_toy shape (…, player_id); 4 is every other action-carrying
+        # dataset; 2 is the video-only ones.
+        if len(batch) == 5:
+            frames, absolute_index_map, actions, mouse, player = batch
+        elif len(batch) == 4:
             frames, absolute_index_map, actions, mouse = batch
+            player = None
         else:
             frames, absolute_index_map = batch
-            actions, mouse = None, None
+            actions, mouse, player = None, None, None
         if self.vis_batch is None or self.vis_batch.size(1) < self.max_frames:
             with RNG(0):  # Initialize datapoint to log here in case data is deterministic
                 self.vis_batch = frames
                 self.vis_actions = actions
                 self.vis_mouse = mouse
-        return frames, absolute_index_map, actions, mouse
+                self.vis_player = player
+        return frames, absolute_index_map, actions, mouse, player
 
     def run_loop(self):
         last_sample_time = None
         while not self.lr_anneal_steps or self.step < self.lr_anneal_steps:
             try:
-                frames, absolute_index_map, actions, mouse = self.get_next_batch()
+                frames, absolute_index_map, actions, mouse, player = self.get_next_batch()
                 # print(f"rank: {dist.get_rank()}, indices: {absolute_index_map[:,0].tolist()}, device: {dist_util.dev()}")
             except RuntimeError as e:
                 print(e)
@@ -395,7 +402,7 @@ class TrainLoop:
                 break
 
             for _ in range(self.steps_per_experience):
-                self.run_step(frames, None, absolute_index_map, actions, mouse)
+                self.run_step(frames, None, absolute_index_map, actions, mouse, player)
                 if self.step % self.log_interval == 0:
                     logger.dumpkvs()
                 if self.step % self.save_interval == 0:
@@ -411,9 +418,10 @@ class TrainLoop:
                 self.step += 1
         self.save()
 
-    def run_step(self, batch1, batch2, absolute_index_map=None, actions=None, mouse=None):
+    def run_step(self, batch1, batch2, absolute_index_map=None, actions=None, mouse=None,
+                 player=None):
         t0 = time()
-        self.forward_backward(batch1, batch2, absolute_index_map, actions, mouse)
+        self.forward_backward(batch1, batch2, absolute_index_map, actions, mouse, player)
         if self.use_fp16:
             self.optimize_fp16()
         else:
@@ -421,7 +429,8 @@ class TrainLoop:
         self.log_step()
         logger.logkv("timing/step_time", time() - t0)
     
-    def forward_backward(self, batch1, batch2, absolute_index_map=None, actions=None, mouse=None):
+    def forward_backward(self, batch1, batch2, absolute_index_map=None, actions=None, mouse=None,
+                         player=None):
         zero_grad(self.master_params)
 
         batch_size = batch1.shape[0]
@@ -431,6 +440,7 @@ class TrainLoop:
             micro2 = batch2[i : i + self.microbatch] if batch2 is not None else None
             micro_actions = actions[i : i + self.microbatch] if actions is not None else None
             micro_mouse = mouse[i : i + self.microbatch] if mouse is not None else None
+            micro_player = player[i : i + self.microbatch] if player is not None else None
             if self.masking_mode == "autoregressive":
                 micro, frame_indices, obs_mask, latent_mask = self.get_autoregressive_masks(micro1)
                 # frame_indices (local, into micro1's T dim) must be the identity
@@ -476,6 +486,9 @@ class TrainLoop:
 
             model_kwargs = {'frame_indices': frame_indices, 'obs_mask': obs_mask,
                              'latent_mask': latent_mask, 'x0': micro}
+            if micro_player is not None:
+                # Per-sequence, so unlike actions/mouse it needs no frame_indices gather.
+                model_kwargs['y'] = micro_player.to(dist_util.dev(), dtype=th.long)
             generates_actions = getattr(self.model, 'generate_actions', False) or getattr(self.args, 'generate_actions', False)
             generates_mouse = getattr(self.model, 'generate_mouse', False) or getattr(self.args, 'generate_mouse', False)
             # Keypress and mouse currently always share one frame mask; compute once, reuse for both.
@@ -679,6 +692,10 @@ class TrainLoop:
             if self.vis_mouse is not None:
                 gather_idx = frame_indices.unsqueeze(-1).expand(-1, -1, self.vis_mouse.shape[-1])
                 model_kwargs['mouse'] = th.gather(self.vis_mouse, 1, gather_idx).to(dist_util.dev(), dtype=th.float32)
+            if self.vis_player is not None:
+                # No gather: per-sequence, so reordering frames does not touch it. Sliced to
+                # the visualised batch, which log_samples may have trimmed.
+                model_kwargs['y'] = self.vis_player[:batch.shape[0]].to(dist_util.dev(), dtype=th.long)
             samples, _ = self.diffusion.heun_sample(
                 self.model,
                 batch.shape,

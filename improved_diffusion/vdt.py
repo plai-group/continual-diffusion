@@ -105,6 +105,9 @@ class LabelEmbedder(nn.Module):
         """
         if force_drop_ids is None:
             drop_ids = torch.rand(labels.shape[0], device=labels.device) < self.dropout_prob
+        elif isinstance(force_drop_ids, bool):  # whole-batch case; mirrors ActionEmbedder
+            drop_ids = torch.full((labels.shape[0],), force_drop_ids, dtype=torch.bool,
+                                  device=labels.device)
         else:
             drop_ids = force_drop_ids == 1
         labels = torch.where(drop_ids, self.num_classes, labels)
@@ -461,6 +464,7 @@ class VDT(nn.Module):
 
     def forward(self, x, timesteps=None, *, x0=None, frame_indices=None,
                 obs_mask=None, latent_mask=None, return_attn_weights=False,
+                y=None, force_label_drop=None,
                 actions=None, actions0=None, obs_action_mask=None, latent_action_mask=None,
                 force_action_drop=None,
                 mouse=None, mouse0=None, obs_mouse_mask=None, latent_mouse_mask=None, **kwargs):
@@ -474,7 +478,9 @@ class VDT(nn.Module):
             x = x * (1 - obs_mask) + x0 * obs_mask
 
         x = x.contiguous().view(-1, C, H, W)
-        y = torch.zeros(B, dtype=torch.long, device=x.device)
+        # At num_classes=0 the zeros default is exactly the pre-issue-85 behaviour.
+        y = (torch.zeros(B, dtype=torch.long, device=x.device) if y is None
+             else y.to(device=x.device, dtype=torch.long).reshape(B))
         patch_tokens = self.x_embedder(x) + self.pos_embed  # (B*T, N, D), where N = (H*W) / patch_size ** 2
         N = patch_tokens.shape[1]
 
@@ -506,14 +512,11 @@ class VDT(nn.Module):
             tokens = rearrange(tokens, '(b n) t m -> (b t) n m', b=B, t=T)
 
         t = self.t_embedder(timesteps)           # (B, D)
-        y = self.y_embedder(y, self.training)    # (B, D)
+        y = self.y_embedder(y, self.training, force_label_drop)  # (B, D)
 
         if not self.generate_actions and actions is not None and self.action_embedder is not None:
-            # `y` is kept here even though num_classes=0 makes it a learned
-            # constant: dropping it leaves y_embedder unreachable by backward,
-            # and an orphaned parameter with p.grad None crashed _log_grad_norm
-            # on the first optimizer step. It is expressively free -- the action
-            # embedder has its own bias -- so this costs nothing.
+            # At num_classes=0 `y` is an inert constant kept only so y_embedder stays reachable
+            # by backward (p.grad None once crashed _log_grad_norm); at 2 it is the player.
             c = t.unsqueeze(1) + y.unsqueeze(1) + \
                 self.action_embedder(actions, self.training, force_action_drop)  # (B, T, D)
         else:
@@ -625,16 +628,20 @@ def get_1d_sincos_pos_embed_from_grid(embed_dim, pos):
 #################################################################################
 
 def VDT_L_2(**kwargs):
-    return VDT(depth=28, hidden_size=1152, num_heads=16, num_classes=0, **kwargs)
+    kwargs.setdefault('num_classes', 0)
+    return VDT(depth=28, hidden_size=1152, num_heads=16, **kwargs)
 
 def VDT_M_2(**kwargs):
-    return VDT(depth=12, hidden_size=1024, num_heads=16, num_classes=0, **kwargs)
+    kwargs.setdefault('num_classes', 0)
+    return VDT(depth=12, hidden_size=1024, num_heads=16, **kwargs)
 
 def VDT_SM_2(**kwargs):
-    return VDT(depth=12, hidden_size=640, num_heads=10, num_classes=0, **kwargs)
+    kwargs.setdefault('num_classes', 0)
+    return VDT(depth=12, hidden_size=640, num_heads=10, **kwargs)
 
 def VDT_S_2(**kwargs):
-    return VDT(depth=12, hidden_size=384, num_heads=6, num_classes=1000, **kwargs)
+    kwargs.setdefault('num_classes', 1000)
+    return VDT(depth=12, hidden_size=384, num_heads=6, **kwargs)
 
 
 VDT_models = {

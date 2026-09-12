@@ -133,6 +133,8 @@ def main():
         frame_range=(0, args.upper_frame_range),
         action_encoding=args.action_encoding,
         tokenizer_checkpoint=args.km_tokenizer_checkpoint,
+        # >0 makes the dataset emit a player label per window, and refuse a corpus without one.
+        num_classes=args.num_classes,
     )
 
     # Issue-58: fixed prompt set from the plaicraft-debug validation recording.
@@ -163,6 +165,20 @@ def main():
         print(f"debug validation: {len(valset.rows)} rows -> {out_dir}")
         debug_validation = (valset, out_dir, args.debug_validation_per_task)
 
+    # Issue-85: independent of the swap validation above -- both can run, either can be off.
+    player_validation = None
+    if args.player_validation_dir:
+        from improved_diffusion.corpus_validation import PlayerValidationSet
+        player_valset = PlayerValidationSet(
+            args.player_validation_dir, T=args.T, n_observed=args.T // 2,
+            action_encoding=args.action_encoding, tokenizer_checkpoint=args.km_tokenizer_checkpoint,
+            device=dist_util.dev(),
+        )
+        player_out = args.debug_validation_out or os.path.join("results", "debug_validation")
+        player_out = os.path.join(player_out, "player")
+        print(f"player validation: {len(player_valset.rows)} rows -> {player_out}")
+        player_validation = (player_valset, player_out, args.label_cfg_scale)
+
     print("training...")
     TrainLoop(
         model=model,
@@ -190,6 +206,7 @@ def main():
         clip_grad=args.clip_grad,
         optimizer=args.optimizer,
         debug_validation=debug_validation,
+        player_validation=player_validation,
         args=args,
     ).run_loop()
 
@@ -233,9 +250,12 @@ def create_argparser():
         debug_validation_db="",
         debug_validation_root="",
         debug_validation_dir="",  # issue-81: frozen held-out-policy package; wins over debug_validation_db
+        player_validation_dir="",  # issue-85: paired player package; independent of the above
         debug_validation_out="",
         debug_validation_per_task=False,
         cfg_scale=1.0,  # sampling-time only; not a model kwarg. 1.0 = no guidance.
+        # Independent of cfg_scale: guides on the issue-85 player label, not the actions.
+        label_cfg_scale=1.0,
         generate_actions=False,
         # Warm start from a different architecture: step counter stays 0, optimizer/EMA stay fresh (--resume_checkpoint loads strict and reads the step from the filename).
         init_from_checkpoint="",

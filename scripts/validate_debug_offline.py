@@ -19,8 +19,10 @@ from pathlib import Path
 import torch as th
 
 from improved_diffusion import dist_util
-from improved_diffusion.corpus_validation import CorpusValidationSet
-from improved_diffusion.debug_validation import DebugValidationSet, run_debug_validation
+from improved_diffusion.corpus_validation import CorpusValidationSet, PlayerValidationSet
+from improved_diffusion.debug_validation import (
+    DebugValidationSet, run_debug_validation, run_player_validation,
+)
 from improved_diffusion.km_tokenizer.model import DEFAULT_CHECKPOINT
 from improved_diffusion.script_util import (
     args_to_dict,
@@ -41,14 +43,22 @@ def main():
     p.add_argument("--device", default="cuda")
     p.add_argument("--chunk_size", type=int, default=3)
     p.add_argument("--cfg_scale", type=float, default=1.0)
+    p.add_argument("--label_cfg_scale", type=float, default=1.0,
+                   help="Classifier-free guidance on the issue-85 player label; 1.0 = off.")
+    p.add_argument("--player_validation_dir", default=None,
+                   help="paired player package (issue-85); runs the GT|P1|P2 overlay instead "
+                        "of the swap test")
     args = p.parse_args()
 
+    using_player = bool(args.player_validation_dir)
     using_dir = bool(args.debug_validation_dir)
     using_db = bool(args.db) or bool(args.root)
+    if using_player and (using_dir or using_db):
+        p.error("--player_validation_dir is mutually exclusive with --debug_validation_dir/--db/--root")
     if using_dir and using_db:
         p.error("--debug_validation_dir is mutually exclusive with --db/--root")
-    if not using_dir and not using_db:
-        p.error("pass either --debug_validation_dir or both --db and --root")
+    if not using_player and not using_dir and not using_db:
+        p.error("pass --player_validation_dir, --debug_validation_dir, or both --db and --root")
     if using_db and not (args.db and args.root):
         p.error("--db and --root must both be passed together")
 
@@ -65,6 +75,24 @@ def main():
     model = model.to(args.device).eval()
     step = data.get("step", 0)
     print(f"loaded {args.checkpoint} (step {step}), T={ns.T}")
+
+    if using_player:
+        valset = PlayerValidationSet(
+            args.player_validation_dir, T=ns.T, n_observed=ns.T // 2,
+            action_encoding=getattr(ns, "action_encoding", "raw"),
+            tokenizer_checkpoint=getattr(ns, "km_tokenizer_checkpoint", DEFAULT_CHECKPOINT),
+            device=args.device,
+        )
+        print(f"player validation rows: {len(valset.rows)} (players {valset.player_indices})")
+        res = run_player_validation(
+            model, diffusion, valset, args.device, out_dir=args.out, step=step,
+            chunk_size=args.chunk_size, log_videos=True,
+            cfg_scale=args.cfg_scale, label_cfg_scale=args.label_cfg_scale,
+        )
+        print("\nAGGREGATE")
+        for k, v in sorted(res["aggregate"].items()):
+            print(f"  {k:30s} {v:.6f}")
+        return
 
     if using_dir:
         valset = CorpusValidationSet(
@@ -90,6 +118,7 @@ def main():
         model, diffusion, valset, args.device, out_dir=args.out,
         step=step, chunk_size=args.chunk_size, log_videos=True,
         cfg_scale=args.cfg_scale,
+        label_cfg_scale=args.label_cfg_scale,
     )
     print("\nAGGREGATE")
     for k, v in sorted(res["aggregate"].items()):

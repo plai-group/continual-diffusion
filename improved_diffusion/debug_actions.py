@@ -86,19 +86,15 @@ def read_session_fps(session_dir):
 def read_session_player(session_dir):
     """The session's player index from other_metadata, or None if the corpus predates issue #85.
 
-    Sibling of read_session_fps: one cheap DB read per session at index-build time, never per
-    __getitem__. The index rather than the name is the cross-repo contract -- plaicraft-debug
-    owns the name-to-index map, so a rename there cannot silently relabel training data here.
-    """
+    The index rather than the name is the cross-repo contract: plaicraft-debug owns the
+    name-to-index map, so a rename there cannot silently relabel training data here."""
     session_dir = Path(session_dir)
     db_path = session_dir / f"{session_dir.name}.db"
     con = sqlite3.connect(str(db_path))
     try:
         row = con.execute("SELECT other_metadata FROM session").fetchone()
     except sqlite3.OperationalError:
-        # No session table, or no other_metadata column. Both mean "this corpus predates
-        # issue #85", which is the same answer as an absent player_index -- harmless at
-        # num_classes=0, and turned into a clear error by the caller at num_classes>0.
+        # No session table or no other_metadata column: same answer as an absent player_index.
         return None
     finally:
         con.close()

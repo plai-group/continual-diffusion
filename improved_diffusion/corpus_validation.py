@@ -155,15 +155,11 @@ class CorpusValidationSet:
 class PlayerValidationSet(CorpusValidationSet):
     """The issue-85 paired package: the same exercises, but two frame stacks per row.
 
-    Both arms come from replaying one action trace under each player, so they are identical
-    apart from the cue block and the click tint. `frames` is player 0's arm (inherited
-    wholesale, including load_all and the shape checks); `frames_p2` is player 1's.
-
-    Because the package lives in its own directory and still calls itself validation.npz,
-    everything the base class does -- the manifest cross-checks, the boundary-offset assert,
-    and load_all_actions' raw / raw_fused / km_fsq branches -- applies unchanged. The actions
-    are shared between arms by construction, so there is exactly one keypress/mouse array.
-    """
+    Both arms replay one action trace under each player, so they differ only in the cue block
+    and the click tint. `frames` is player 0's arm, `frames_p2` player 1's, and the actions are
+    shared. The package keeps the name validation.npz in its own directory so every base-class
+    behaviour -- manifest checks, the boundary assert, the raw/raw_fused/km_fsq branches --
+    applies unchanged."""
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)

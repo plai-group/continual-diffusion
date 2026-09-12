@@ -124,3 +124,31 @@ def test_set_test_rebuilds_the_player_map(tmp_path):
     ds.set_test()
     _f, _i, _k, _m, player = ds[0]
     assert int(player) in (0, 1)
+
+
+# ── the model gate ─────────────────────────────────────────────────────────────────────────
+
+def test_label_classes_is_zero_for_a_model_without_an_embedder():
+    """UNetVideoModel.forward takes no y and no **kwargs, so passing one TypeErrors any UNet
+    run on debug_toy. The dataset always emits a player id, so the gate lives on the model."""
+    import types
+    from improved_diffusion.train_util import TrainLoop
+
+    loop = types.SimpleNamespace(model=object())
+    assert TrainLoop._label_classes(loop) == 0
+
+
+def test_label_classes_reads_through_ddp_and_reports_the_real_count():
+    import types
+    from improved_diffusion.train_util import TrainLoop
+    from improved_diffusion.vdt import VDT
+
+    vdt = VDT(input_size=(24, 40), patch_size=4, in_channels=3, num_frames=4,
+              learn_sigma=False, depth=1, hidden_size=64, num_heads=4, num_classes=2)
+    assert TrainLoop._label_classes(types.SimpleNamespace(model=vdt)) == 2
+    # .module is how DDP nests it; the gate has to see through that or every DDP run loses y.
+    assert TrainLoop._label_classes(types.SimpleNamespace(model=types.SimpleNamespace(module=vdt))) == 2
+
+    plain = VDT(input_size=(24, 40), patch_size=4, in_channels=3, num_frames=4,
+                learn_sigma=False, depth=1, hidden_size=64, num_heads=4, num_classes=0)
+    assert TrainLoop._label_classes(types.SimpleNamespace(model=plain)) == 0

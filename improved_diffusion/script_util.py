@@ -198,8 +198,7 @@ def vdt_model_and_diffusion_defaults():
         action_token_cond=False,
         generate_mouse=False,
         mouse_token_cond=False,
-        # 0 keeps y_embedder the single learned constant it has always been, so every
-        # pre-issue-85 run script is unchanged. 2 turns it into the player label.
+        # 0 keeps y_embedder the inert constant it has always been; 2 = the issue-85 player.
         num_classes=0,
         class_dropout_prob=0.1,
         keypress_loss_weight=1.0,

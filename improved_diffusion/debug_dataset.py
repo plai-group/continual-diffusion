@@ -56,10 +56,8 @@ class ContinuousDebugDataset(Dataset):
     def _resolve_players(self):
         """One player index per session, read once here rather than per __getitem__.
 
-        Raises rather than defaulting to 0 when the model wants labels but the corpus has
-        none: a silent fallback would train a 'player-conditioned' model on a single-player
-        corpus, and the only symptom would be a flat val/player/margin weeks later.
-        """
+        Raises rather than defaulting to 0 when labels are wanted but the corpus has none: a
+        silent fallback shows up only as a flat val/player/margin, weeks later."""
         self._session_players = {}
         for _fs, _fe, path in self.file_boundaries:
             session_dir = path.parent.parent
@@ -146,8 +144,7 @@ class ContinuousDebugDataset(Dataset):
         if self.frame_range[1] is None or self.frame_range[1] > total_frames:
             self.frame_range = (self.frame_range[0], total_frames)
 
-        # Inside the mapping build, not __init__: set_train/set_test re-run this with a
-        # different session list, and a stale player map would KeyError in __getitem__.
+        # Here, not __init__: set_train/set_test re-run this with a different session list.
         self._resolve_players()
 
         self.window_starts = self._build_window_starts(step=1)
@@ -244,8 +241,7 @@ class ContinuousDebugDataset(Dataset):
         ).float()
 
         absolute_index_map = torch.arange(start_frame, end_frame, dtype=torch.int64)
-        # Per-sequence, not per-frame: a window never straddles a session, so one scalar
-        # covers it. That is also why it needs no frame_indices gather in forward_backward.
+        # Per-sequence: a window never straddles a session, so this needs no gather.
         player_id = torch.tensor(self._session_players[session_dir], dtype=torch.long)
         return frames, absolute_index_map, keypress, mouse, player_id
 

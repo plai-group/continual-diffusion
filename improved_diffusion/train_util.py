@@ -374,8 +374,7 @@ class TrainLoop:
 
     def get_next_batch(self):
         batch = next(self.data)
-        # 5 is the issue-85 debug_toy shape (…, player_id); 4 is every other action-carrying
-        # dataset; 2 is the video-only ones.
+        # 5 = issue-85 debug_toy (+player_id); 4 = other action datasets; 2 = video-only.
         if len(batch) == 5:
             frames, absolute_index_map, actions, mouse, player = batch
         elif len(batch) == 4:
@@ -419,6 +418,14 @@ class TrainLoop:
                     last_sample_time = time()
                 self.step += 1
         self.save()
+
+    def _label_classes(self):
+        """Player classes the model conditions on; 0 for any model that cannot take y.
+
+        UNetVideoModel.forward accepts no y and no **kwargs, so passing one would TypeError
+        any UNet run on debug_toy -- and the dataset always emits a player id."""
+        model = getattr(self.model, "module", self.model)
+        return getattr(getattr(model, "y_embedder", None), "num_classes", 0)
 
     def run_step(self, batch1, batch2, absolute_index_map=None, actions=None, mouse=None,
                  player=None):
@@ -488,8 +495,8 @@ class TrainLoop:
 
             model_kwargs = {'frame_indices': frame_indices, 'obs_mask': obs_mask,
                              'latent_mask': latent_mask, 'x0': micro}
-            if micro_player is not None:
-                # Per-sequence, so unlike actions/mouse it needs no frame_indices gather.
+            # Per-sequence, so unlike actions/mouse it needs no frame_indices gather.
+            if micro_player is not None and self._label_classes() > 0:
                 model_kwargs['y'] = micro_player.to(dist_util.dev(), dtype=th.long)
             generates_actions = getattr(self.model, 'generate_actions', False) or getattr(self.args, 'generate_actions', False)
             generates_mouse = getattr(self.model, 'generate_mouse', False) or getattr(self.args, 'generate_mouse', False)
@@ -694,9 +701,8 @@ class TrainLoop:
             if self.vis_mouse is not None:
                 gather_idx = frame_indices.unsqueeze(-1).expand(-1, -1, self.vis_mouse.shape[-1])
                 model_kwargs['mouse'] = th.gather(self.vis_mouse, 1, gather_idx).to(dist_util.dev(), dtype=th.float32)
-            if self.vis_player is not None:
-                # No gather: per-sequence, so reordering frames does not touch it. Sliced to
-                # the visualised batch, which log_samples may have trimmed.
+            # Sliced to the visualised batch, which log_samples may have trimmed.
+            if self.vis_player is not None and self._label_classes() > 0:
                 model_kwargs['y'] = self.vis_player[:batch.shape[0]].to(dist_util.dev(), dtype=th.long)
             samples, _ = self.diffusion.heun_sample(
                 self.model,
@@ -731,9 +737,7 @@ class TrainLoop:
                 except Exception as e:
                     print(f"[debug_validation] skipped at step {self.step}: {e!r}")
 
-            # Issue-85 player test: a second, independent package. Same never-kill-a-run
-            # contract as above, and deliberately separate so a failure in one does not
-            # take the other down with it.
+            # Issue-85: separate from the swap test so a failure in one cannot kill the other.
             if self.player_validation is not None:
                 from .debug_validation import run_player_validation
                 valset, val_out_dir, label_cfg_scale = self.player_validation

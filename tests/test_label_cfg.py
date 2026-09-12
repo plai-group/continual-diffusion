@@ -5,6 +5,7 @@ generate_actions (the action is a sequence token, so action_embedder is None and
 force_action_drop has nothing to drop). The label arm is the one that works in every mode,
 so it gets its own scale rather than sharing cfg_scale.
 """
+import pytest
 import torch as th
 import torch.nn as nn
 
@@ -68,9 +69,23 @@ def test_action_guidance_alone_is_unchanged():
 
 def test_both_scales_compose_over_three_passes():
     m, out, _ = _call(2.0, 3.0)
-    assert len(m.calls) == 3, "cond, null-action, null-label -- each arm from its own null"
-    # cond=1, null-action=2 -> 2 + 2*(1-2) = 0; null-label=4 -> 4 + 3*(0-4) = -8
-    assert out.unique().tolist() == [-8.0]
+    assert len(m.calls) == 3, "cond, null-action, null-label"
+    # Both deltas are measured against the SAME conditional pass and summed once:
+    # 1 + (2-1)*(1-2) + (3-1)*(1-4) = 1 - 1 - 6 = -6.
+    # Chaining instead would give -8, because the label scale would re-amplify the action
+    # guidance and the two knobs would stop being independent.
+    assert out.unique().tolist() == [-6.0]
+
+
+def test_the_arms_are_independent():
+    """Turning the action scale up must not change how much the label scale contributes."""
+    _, a_lo, _ = _call(1.0, 3.0)
+    _, a_hi, _ = _call(5.0, 3.0)
+    _, b_lo, _ = _call(1.0, 1.0)
+    _, b_hi, _ = _call(5.0, 1.0)
+    label_contrib_lo = a_lo.unique().item() - b_lo.unique().item()
+    label_contrib_hi = a_hi.unique().item() - b_hi.unique().item()
+    assert label_contrib_lo == pytest.approx(label_contrib_hi)
 
 
 def test_wrapper_returns_the_two_tuple_the_sampler_expects():

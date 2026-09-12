@@ -105,8 +105,7 @@ class LabelEmbedder(nn.Module):
         """
         if force_drop_ids is None:
             drop_ids = torch.rand(labels.shape[0], device=labels.device) < self.dropout_prob
-        elif isinstance(force_drop_ids, bool):
-            # Bare bool is the whole-batch case the CFG sampler wants; mirrors ActionEmbedder.
+        elif isinstance(force_drop_ids, bool):  # whole-batch case; mirrors ActionEmbedder
             drop_ids = torch.full((labels.shape[0],), force_drop_ids, dtype=torch.bool,
                                   device=labels.device)
         else:
@@ -479,8 +478,7 @@ class VDT(nn.Module):
             x = x * (1 - obs_mask) + x0 * obs_mask
 
         x = x.contiguous().view(-1, C, H, W)
-        # num_classes=0 makes y_embedder a single learned constant, so the zeros default is
-        # exactly the pre-issue-85 behaviour; num_classes=2 makes this the player label.
+        # At num_classes=0 the zeros default is exactly the pre-issue-85 behaviour.
         y = (torch.zeros(B, dtype=torch.long, device=x.device) if y is None
              else y.to(device=x.device, dtype=torch.long).reshape(B))
         patch_tokens = self.x_embedder(x) + self.pos_embed  # (B*T, N, D), where N = (H*W) / patch_size ** 2
@@ -517,10 +515,8 @@ class VDT(nn.Module):
         y = self.y_embedder(y, self.training, force_label_drop)  # (B, D)
 
         if not self.generate_actions and actions is not None and self.action_embedder is not None:
-            # At num_classes=0 `y` is a learned constant kept only so y_embedder stays
-            # reachable by backward (an orphaned parameter with p.grad None crashed
-            # _log_grad_norm on the first optimizer step). At num_classes=2 it is the
-            # player label -- issue #85.
+            # At num_classes=0 `y` is an inert constant kept only so y_embedder stays reachable
+            # by backward (p.grad None once crashed _log_grad_norm); at 2 it is the player.
             c = t.unsqueeze(1) + y.unsqueeze(1) + \
                 self.action_embedder(actions, self.training, force_action_drop)  # (B, T, D)
         else:

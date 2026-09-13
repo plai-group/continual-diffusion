@@ -591,6 +591,9 @@ def run_debug_validation(model, diffusion, valset, device, out_dir,
     is_raw_fused = action_encoding == "raw_fused"
     km_tokenizer = _get_km_tokenizer(device, getattr(valset, "tokenizer_checkpoint", None)) if is_km_fsq else None
     sampling_model = _guided(model, cfg_scale, label_cfg_scale)
+    action_encoding = getattr(diffusion, "action_encoding", "raw")
+    km_tokenizer = (_get_km_tokenizer(device, getattr(valset, "tokenizer_checkpoint", None))
+                    if action_encoding == "km_fsq" else None)
 
     T, n_obs = valset.T, valset.n_observed
     # CorpusValidationSet (issue #81) rows carry swap_kind: their swap test targets
@@ -862,18 +865,48 @@ def run_debug_validation(model, diffusion, valset, device, out_dir,
     return {"aggregate": agg, "per_row": per_row}
 
 
-def _render_player_overlay(frames_gt, frames_p1, frames_p2, actions, n_observed, out_path,
-                           labels=("GT", "P1", "P2")):
-    """1x3 mp4: GT | P1 | P2, all three driven by the SAME action trace.
+def _render_player_overlay(frames_gt, frames_p1, frames_p2, actions_gt, actions_p1, actions_p2,
+                           n_observed, out_path, labels=("GT", "P1", "P2")):
+    """1x3 mp4: GT | P1 | P2, each panel showing the actions that panel actually ran on.
+
+    The generated panels carry the model's OWN sampled actions, not the ground truth. Drawing
+    the GT bars under all three (which this used to do) makes a free rollout look teacher
+    forced, because every click appears prescribed even when the model chose it.
 
     Only player 0's ground truth is shown; player 1's differs from it in exactly what the two
     generated panels are judged on, so it would crowd the strip rather than add a reference.
     It is not discarded -- the cross-arm metrics read it."""
     return _render_panels(
         (frames_gt, frames_p1, frames_p2),
-        (actions, actions, actions),
+        (actions_gt, actions_p1, actions_p2),
         list(labels), n_observed, out_path, ncols=3,
     )
+
+
+# Cue colours from plaicraft-debug's env.PLAYER_CUE_COLORS, so a panel label names what you see.
+PLAYER_PANEL_LABELS = ("P0 red", "P1 blue")
+
+
+def _arm_bars(key, mouse, fallback):
+    """Per-panel action bars: the arm's own generated actions, or GT when it generated none."""
+    if key is None:
+        return fallback
+    m = mouse[0].cpu().numpy() if mouse is not None else fallback[1]
+    return (key[0].cpu().numpy(), m)
+
+
+def _decode_pred_actions(samples_act, samples_mouse, action_encoding, km_tokenizer):
+    """Generated action tokens -> (keypress, mouse) in the raw display space, or (None, None).
+
+    Mirrors the decode run_debug_validation does inline; km_fsq snaps to the FSQ lattice first
+    because VDT regresses continuous codes and only inference may quantise them."""
+    if samples_act is None:
+        return None, None
+    if action_encoding == "km_fsq":
+        return _decode_km_actions(km_tokenizer, debug_actions.quantize_km_fsq(samples_act))
+    if action_encoding == "raw_fused":
+        return samples_act[..., :8], debug_actions._inv_symlog(samples_act[..., 8:])
+    return samples_act, samples_mouse
 
 
 def _player_l2(a, b):
@@ -926,6 +959,9 @@ def run_player_validation(model, diffusion, valset, device, out_dir, step=0, chu
     generates_mouse = (bool(getattr(_m, "generate_mouse", False))
                        and getattr(_m, "mouse_dim", 0) > 0)
     sampling_model = _guided(model, cfg_scale, label_cfg_scale)
+    action_encoding = getattr(diffusion, "action_encoding", "raw")
+    km_tokenizer = (_get_km_tokenizer(device, getattr(valset, "tokenizer_checkpoint", None))
+                    if action_encoding == "km_fsq" else None)
 
     T, n_obs = valset.T, valset.n_observed
     gt_p1_all, gt_p2_all = valset.load_all(), valset.load_all_p2()
@@ -970,13 +1006,17 @@ def run_player_validation(model, diffusion, valset, device, out_dir, step=0, chu
                         },
                         latent_mask=latent_mask.cpu(), return_decoded=False,
                     )
+                pred_key, pred_mouse = None, None
                 if isinstance(s, tuple):
-                    s = s[0]
+                    s, second = s
+                    act_out, mouse_out = _unpack_action_mouse_out(second, generates_actions, generates_mouse)
+                    pred_key, pred_mouse = _decode_pred_actions(
+                        act_out, mouse_out, action_encoding, km_tokenizer)
                 s = s.to(device)
-                return (s * latent_mask + x0 * obs_mask)[0]
+                return (s * latent_mask + x0 * obs_mask)[0], pred_key, pred_mouse
 
-            gen_a = _sample(gt_a, player_a)
-            gen_b = _sample(gt_b, player_b)
+            gen_a, key_a, mouse_a = _sample(gt_a, player_a)
+            gen_b, key_b, mouse_b = _sample(gt_b, player_b)
 
             gen_region = slice(n_obs, T)
             key_raw = keypress_raw_all[i]
@@ -985,18 +1025,28 @@ def run_player_validation(model, diffusion, valset, device, out_dir, step=0, chu
             rec.update(_player_metrics(
                 gen_a[gen_region], gen_b[gen_region],
                 gt_a[0][gen_region], gt_b[0][gen_region], click_mask=clicks))
+            # Free rollout, so the arms choose their own clicks; equal to gt_click_rate every
+            # step would mean the action stream is being pinned rather than sampled.
+            if key_a is not None and key_b is not None:
+                rate = lambda k: float((k[0][gen_region, 6:8] > 0.5).any(-1).float().mean())
+                rec["gen_click_rate"] = 0.5 * (rate(key_a) + rate(key_b))
+                rec["gt_click_rate"] = float(
+                    (key_raw[gen_region, 6:8] > 0.5).any(-1).float().mean())
             per_row.append(rec)
 
             if log_videos:
                 slug = valset.slug(row)
                 mp4 = out_dir / f"step{step}_{slug}_player.mp4"
+                gt_bars = (key_raw.cpu().numpy(), mouse_raw_all[i].cpu().numpy())
                 _render_player_overlay(
                     frames_gt=gt_a[0].cpu().numpy(),
                     frames_p1=gen_a.cpu().numpy(),
                     frames_p2=gen_b.cpu().numpy(),
-                    actions=(key_raw.cpu().numpy(), mouse_raw_all[i].cpu().numpy()),
+                    actions_gt=gt_bars,
+                    actions_p1=_arm_bars(key_a, mouse_a, gt_bars),
+                    actions_p2=_arm_bars(key_b, mouse_b, gt_bars),
                     n_observed=n_obs, out_path=str(mp4),
-                    labels=("GT", f"P{player_a}", f"P{player_b}"),
+                    labels=("GT", PLAYER_PANEL_LABELS[player_a], PLAYER_PANEL_LABELS[player_b]),
                 )
                 logger.logkv(f"val/player_overlay/{slug}", wandb.Video(str(mp4)), distributed=False)
         except Exception as e:

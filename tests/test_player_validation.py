@@ -6,7 +6,7 @@ import pytest
 import torch as th
 
 from improved_diffusion.corpus_validation import CorpusValidationSet, PlayerValidationSet
-from improved_diffusion.debug_validation import _player_metrics, _render_player_overlay
+from improved_diffusion.debug_validation import _arm_bars, _player_metrics, _render_player_overlay
 
 T, N_OBS, N_ROWS, H, W = 20, 10, 4, 24, 40
 
@@ -144,8 +144,9 @@ def test_render_player_overlay_draws_three_panels_in_one_row(tmp_path):
     orig = imageio.get_writer
     imageio.get_writer = lambda *a, **k: writer
     try:
+        zeros = (np.zeros((T, 8), np.float32), np.zeros((T, 2), np.float32))
         _render_player_overlay(f(), f(), f(),
-                               actions=(np.zeros((T, 8), np.float32), np.zeros((T, 2), np.float32)),
+                               actions_gt=zeros, actions_p1=zeros, actions_p2=zeros,
                                n_observed=N_OBS, out_path=str(tmp_path / "p.mp4"))
     finally:
         imageio.get_writer = orig
@@ -155,3 +156,36 @@ def test_render_player_overlay_draws_three_panels_in_one_row(tmp_path):
     # One row of three panels: 3x wider than tall relative to a single labelled panel.
     assert frame.ndim == 3 and frame.shape[2] == 3
     assert frame.shape[1] > 3 * W, f"expected a 3-wide strip, got {frame.shape}"
+
+
+def test_each_panel_draws_its_own_actions(tmp_path):
+    """The teacher-forcing illusion: if the generated panels reuse the GT bars, a free rollout
+    reads as prescribed. Give the three panels different actions and assert three different
+    action bars reach the frame."""
+    import imageio
+
+    frames = np.zeros((T, 3, H, W), np.float32)
+    def bars(dim):
+        k = np.zeros((T, 8), np.float32); k[:, dim] = 1.0
+        return (k, np.zeros((T, 2), np.float32))
+
+    writer = _NullWriter()
+    orig = imageio.get_writer
+    imageio.get_writer = lambda *a, **k: writer
+    try:
+        _render_player_overlay(frames, frames, frames,
+                               actions_gt=bars(0), actions_p1=bars(6), actions_p2=bars(7),
+                               n_observed=N_OBS, out_path=str(tmp_path / "p.mp4"))
+    finally:
+        imageio.get_writer = orig
+
+    strip = writer.frames[0]
+    panel = strip.shape[1] // 3
+    a, b, c = strip[:, :panel], strip[:, panel:2 * panel], strip[:, 2 * panel:]
+    assert not np.array_equal(a, b) and not np.array_equal(b, c), (
+        "all three panels rendered identically, so the per-panel actions were ignored")
+
+
+def test_arm_bars_falls_back_to_gt_when_nothing_was_generated():
+    gt = (np.ones((T, 8), np.float32), np.ones((T, 2), np.float32))
+    assert _arm_bars(None, None, gt) is gt

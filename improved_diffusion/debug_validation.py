@@ -591,9 +591,6 @@ def run_debug_validation(model, diffusion, valset, device, out_dir,
     is_raw_fused = action_encoding == "raw_fused"
     km_tokenizer = _get_km_tokenizer(device, getattr(valset, "tokenizer_checkpoint", None)) if is_km_fsq else None
     sampling_model = _guided(model, cfg_scale, label_cfg_scale)
-    action_encoding = getattr(diffusion, "action_encoding", "raw")
-    km_tokenizer = (_get_km_tokenizer(device, getattr(valset, "tokenizer_checkpoint", None))
-                    if action_encoding == "km_fsq" else None)
 
     T, n_obs = valset.T, valset.n_observed
     # CorpusValidationSet (issue #81) rows carry swap_kind: their swap test targets

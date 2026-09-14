@@ -862,21 +862,25 @@ def run_debug_validation(model, diffusion, valset, device, out_dir,
     return {"aggregate": agg, "per_row": per_row}
 
 
-def _render_player_overlay(frames_gt, frames_p1, frames_p2, actions_gt, actions_p1, actions_p2,
+def _render_player_overlay(frames_gt_p1, frames_p1, frames_gt_p2, frames_p2,
+                           actions_gt, actions_p1, actions_p2,
                            n_observed, out_path, labels=("GT", "P1", "P2")):
-    """1x3 mp4: GT | P1 | P2, each panel showing the actions that panel actually ran on.
+    """2x2 mp4: each row is one player -- its ground truth, then its generation.
+
+    Pairing them per row is what makes the cue readable: with a single GT panel you can only
+    see that the two arms differ, not whether either got its own colour right. Both arms are
+    the same action trace re-rendered, so the two GT panels share `actions_gt`.
 
     The generated panels carry the model's OWN sampled actions, not the ground truth. Drawing
-    the GT bars under all three (which this used to do) makes a free rollout look teacher
-    forced, because every click appears prescribed even when the model chose it.
-
-    Only player 0's ground truth is shown; player 1's differs from it in exactly what the two
-    generated panels are judged on, so it would crowd the strip rather than add a reference.
-    It is not discarded -- the cross-arm metrics read it."""
+    the GT bars under all of them (which this used to do) makes a free rollout look teacher
+    forced, because every click appears prescribed even when the model chose it."""
+    gt, p1, p2 = labels
+    # Each GT panel is named for the player whose row it heads: "P0 red" -> "GT red".
     return _render_panels(
-        (frames_gt, frames_p1, frames_p2),
-        (actions_gt, actions_p1, actions_p2),
-        list(labels), n_observed, out_path, ncols=3,
+        (frames_gt_p1, frames_p1, frames_gt_p2, frames_p2),
+        (actions_gt, actions_p1, actions_gt, actions_p2),
+        [f"{gt} {p1.split()[-1]}", p1, f"{gt} {p2.split()[-1]}", p2],
+        n_observed, out_path, ncols=2,
     )
 
 
@@ -1036,8 +1040,9 @@ def run_player_validation(model, diffusion, valset, device, out_dir, step=0, chu
                 mp4 = out_dir / f"step{step}_{slug}_player.mp4"
                 gt_bars = (key_raw.cpu().numpy(), mouse_raw_all[i].cpu().numpy())
                 _render_player_overlay(
-                    frames_gt=gt_a[0].cpu().numpy(),
+                    frames_gt_p1=gt_a[0].cpu().numpy(),
                     frames_p1=gen_a.cpu().numpy(),
+                    frames_gt_p2=gt_b[0].cpu().numpy(),
                     frames_p2=gen_b.cpu().numpy(),
                     actions_gt=gt_bars,
                     actions_p1=_arm_bars(key_a, mouse_a, gt_bars),

@@ -46,8 +46,8 @@ def main():
     p.add_argument("--label_cfg_scale", type=float, default=1.0,
                    help="Classifier-free guidance on the issue-85 player label; 1.0 = off.")
     p.add_argument("--player_validation_dir", default=None,
-                   help="paired player package (issue-85); runs the GT|P1|P2 overlay instead "
-                        "of the swap test")
+                   help="paired player package (issue-85); runs the 2x2 per-player "
+                        "GT-vs-generated overlay instead of the swap test")
     args = p.parse_args()
 
     using_player = bool(args.player_validation_dir)

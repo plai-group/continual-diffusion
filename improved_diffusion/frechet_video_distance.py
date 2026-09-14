@@ -17,6 +17,10 @@
 FVD is a metric for the quality of video generation models. It is inspired by
 the FID (Frechet Inception Distance) used for images, but uses a different
 embedding to be better suitable for videos.
+
+The feature extractor here is torchvision S3D (Kinetics-400), I3D's
+separable-3D descendant trained on the same Kinetics-400 set: the original
+needs TF1 and pulls its I3D graph from the now-retired tfhub.dev.
 """
 
 from __future__ import absolute_import
@@ -24,114 +28,67 @@ from __future__ import division
 from __future__ import print_function
 
 
-import six
-import tensorflow.compat.v1 as tf
-import tensorflow_hub as hub
-import os
 import numpy as np
 import scipy
-
-os.environ["TFHUB_CACHE_DIR"] = f"{os.environ['PWD']}/.tfhub_cache"
+import torch
+import torch.nn as nn
 
 
 ######################################################################
 ## Feature extraction                                               ##
 ######################################################################
 
-def preprocess(videos, target_resolution):
-  """Runs some preprocessing on the videos for I3D model.
+class _VideoFeatures:
+    """Kinetics-400 S3D penultimate features: I3D's separable-3D descendant, same training
+    set, torch-native (the tfhub I3D needs TF1 and a retired host)."""
 
-  Args:
-    videos: <T>[batch_size, num_frames, height, width, depth] The videos to be
-      preprocessed. We don't care about the specific dtype of the videos, it can
-      be anything that tf.image.resize_bilinear accepts. Values are expected to
-      be in the range 0-255.
-    target_resolution: (width, height): target video resolution
+    # Resize straight to 224x224 rather than S3D_Weights' packaged 256-then-crop-224
+    # transform, which would throw away the edges of a small generated frame.
+    RESIZE = 224
+    MEAN = [0.43216, 0.394666, 0.37645]
+    STD = [0.22803, 0.22145, 0.216989]
+    # S3D_Weights.KINETICS400_V1.meta["min_temporal_size"] == 14; our generated half is 10.
+    NUM_FRAMES = 16
 
-  Returns:
-    videos: <float32>[batch_size, num_frames, height, width, depth]
-  """
-  videos_shape = videos.shape.as_list()
-  all_frames = tf.reshape(videos, [-1] + videos_shape[-3:])
-  resized_videos = tf.image.resize_bilinear(all_frames, size=target_resolution)
-  target_shape = [videos_shape[0], -1] + list(target_resolution) + [3]
-  output_videos = tf.reshape(resized_videos, target_shape)
-  scaled_videos = 2. * tf.cast(output_videos, tf.float32) / 255. - 1
-  return scaled_videos
+    def __init__(self, device):
+        from torchvision.models.video import S3D_Weights, s3d
 
+        self.device = device
+        m = s3d(weights=S3D_Weights.KINETICS400_V1)
+        self.net = nn.Sequential(m.features, nn.AdaptiveAvgPool3d(1)).to(device).eval()
+        for p in self.net.parameters():
+            p.requires_grad_(False)
+        self.mean = torch.tensor(self.MEAN, device=device).view(1, 3, 1, 1, 1)
+        self.std = torch.tensor(self.STD, device=device).view(1, 3, 1, 1, 1)
 
-def _is_in_graph(tensor_name):
-  """Checks whether a given tensor does exists in the graph."""
-  try:
-    tf.get_default_graph().get_tensor_by_name(tensor_name)
-  except KeyError:
-    return False
-  return True
-
-
-def create_id3_embedding(videos, batch_size=16):
-  """Embeds the given videos using the Inflated 3D Convolution network.
-
-  Downloads the graph of the I3D from tf.hub and adds it to the graph on the
-  first call.
-
-  Args:
-    videos: <float32>[batch_size, num_frames, height=224, width=224, depth=3].
-      Expected range is [-1, 1].
-
-  Returns:
-    embedding: <float32>[batch_size, embedding_size]. embedding_size depends
-               on the model used.
-
-  Raises:
-    ValueError: when a provided embedding_layer is not supported.
-  """
-
-  module_spec = "https://tfhub.dev/deepmind/i3d-kinetics-400/1"
+    @torch.no_grad()
+    def __call__(self, videos, batch_size=16):
+        """videos: (N, T, 3, H, W) float in [-1,1] -> (N, 1024) float32 numpy."""
+        n, t = videos.shape[:2]
+        idx = torch.linspace(0, t - 1, self.NUM_FRAMES).round().long()  # nearest-neighbour temporal resize
+        videos = videos[:, idx]
+        out = []
+        for i in range(0, n, batch_size):
+            # .float(): heun_sample integrates in float64, and S3D's weights are float32.
+            v = videos[i : i + batch_size].to(self.device, dtype=torch.float32)
+            v = (v + 1.0) / 2.0
+            b, tt, c, h, w = v.shape
+            v = v.reshape(b * tt, c, h, w)
+            v = nn.functional.interpolate(v, size=(self.RESIZE, self.RESIZE), mode="bilinear", align_corners=False)
+            v = v.reshape(b, tt, c, self.RESIZE, self.RESIZE).permute(0, 2, 1, 3, 4)  # (N,T,3,H,W) -> (N,3,T,H,W)
+            v = (v - self.mean) / self.std
+            out.append(self.net(v).flatten(1).cpu().numpy())
+        return np.concatenate(out, axis=0).astype(np.float32)
 
 
-  # Making sure that we import the graph separately for
-  # each different input video tensor.
-  module_name = "fvd_kinetics-400_id3_module_" + six.ensure_str(
-      videos.name).replace(":", "_")
+_FEATURES = None
 
-  assert_ops = [
-      tf.Assert(
-          tf.reduce_max(videos) <= 1.001,
-          ["max value in frame is > 1", videos]),
-      tf.Assert(
-          tf.reduce_min(videos) >= -1.001,
-          ["min value in frame is < -1", videos]),
-      tf.assert_equal(
-          tf.shape(videos)[0],
-          batch_size, ["invalid frame batch size: ",
-                       tf.shape(videos)],
-          summarize=6),
-  ]
-  with tf.control_dependencies(assert_ops):
-    videos = tf.identity(videos)
 
-  module_scope = "%s_apply_default/" % module_name
-
-  # To check whether the module has already been loaded into the graph, we look
-  # for a given tensor name. If this tensor name exists, we assume the function
-  # has been called before and the graph was imported. Otherwise we import it.
-  # Note: in theory, the tensor could exist, but have wrong shapes.
-  # This will happen if create_id3_embedding is called with a frames_placehoder
-  # of wrong size/batch size, because even though that will throw a tf.Assert
-  # on graph-execution time, it will insert the tensor (with wrong shape) into
-  # the graph. This is why we need the following assert.
-  video_batch_size = int(videos.shape[0])
-  assert video_batch_size in [batch_size, -1, None], "Invalid batch size"
-  tensor_name = module_scope + "RGB/inception_i3d/Mean:0"
-  if not _is_in_graph(tensor_name):
-    i3d_model = hub.Module(hub.resolve(module_spec), name=module_name)
-    i3d_model(videos)
-
-  # gets the kinetics-i3d-400-logits layer
-  tensor_name = module_scope + "RGB/inception_i3d/Mean:0"
-  tensor = tf.get_default_graph().get_tensor_by_name(tensor_name)
-  return tensor
+def _get_video_features(device):
+    global _FEATURES
+    if _FEATURES is None:
+        _FEATURES = _VideoFeatures(device)
+    return _FEATURES
 
 
 ######################################################################
@@ -168,7 +125,9 @@ def frechet_statistics_to_frechet_metric(stat_1, stat_2):
 
     # Product might be almost singular
     covmean, _ = scipy.linalg.sqrtm(sigma1.dot(sigma2), disp=False)
-    if not np.isfinite(covmean).all():
+    if not np.isfinite(covmean).all() or (
+        np.iscomplexobj(covmean) and not np.allclose(np.diagonal(covmean).imag, 0, atol=1e-3)
+    ):
         print(
             f'WARNING: fid calculation produces singular product; '
             f'adding {eps} to diagonal of cov estimates'
@@ -300,3 +259,15 @@ def kid_features_to_metric(features_1, features_2,
     }
 
     return out
+
+
+######################################################################
+## Entry point                                                      ##
+######################################################################
+
+def video_distances(feats_real, feats_fake):
+    """(N,D) and (M,D) feature arrays -> {"fvd", "kvd", "kvd_std"}."""
+    fvd = fid_features_to_metric(feats_real, feats_fake)
+    kid_subset_size = min(len(feats_real), len(feats_fake), 1000)
+    kid = kid_features_to_metric(feats_real, feats_fake, kid_subset_size=kid_subset_size)
+    return {"fvd": fvd, "kvd": kid[KEY_METRIC_KID_MEAN], "kvd_std": kid[KEY_METRIC_KID_STD]}

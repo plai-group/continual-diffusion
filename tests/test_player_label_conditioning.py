@@ -185,3 +185,27 @@ def test_concat_refuses_the_per_frame_action_embedder(mode):
     x, t = _x()
     with pytest.raises(AssertionError, match="cond_combine"):
         m(x, timesteps=t, y=th.ones(2, dtype=th.long), actions=th.randn(2, 4, 8))
+
+
+# ── loading checkpoints trained before the flag existed ────────────────────────────────────
+
+def test_backfill_defaults_missing_cond_combine_to_add():
+    """args_to_dict getattrs every default key, so a pre-flag checkpoint's config would raise
+    AttributeError before the model is ever built."""
+    import argparse
+
+    from improved_diffusion.script_util import backfill_cond_combine
+
+    ns = argparse.Namespace(num_classes=2)
+    backfill_cond_combine(ns)
+    assert ns.cond_combine == "add"
+
+
+def test_backfill_leaves_an_explicit_cond_combine_alone():
+    import argparse
+
+    from improved_diffusion.script_util import backfill_cond_combine
+
+    ns = argparse.Namespace(cond_combine="concat_ln")
+    backfill_cond_combine(ns)
+    assert ns.cond_combine == "concat_ln"

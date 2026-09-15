@@ -359,6 +359,13 @@ def backfill_action_encoding(model_args):
         model_args.action_encoding = "raw"
 
 
+def backfill_cond_combine(model_args):
+    """Checkpoints from before plaicraft-debug#85's follow-up have no cond_combine saved; they
+    all trained the additive path."""
+    if not hasattr(model_args, "cond_combine"):
+        model_args.cond_combine = "add"
+
+
 def str2bool(v):
     """
     https://stackoverflow.com/questions/15008758/parsing-boolean-values-with-argparse

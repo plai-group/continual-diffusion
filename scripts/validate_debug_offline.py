@@ -27,6 +27,7 @@ from improved_diffusion.km_tokenizer.model import DEFAULT_CHECKPOINT
 from improved_diffusion.script_util import (
     args_to_dict,
     backfill_action_encoding,
+    backfill_cond_combine,
     create_model_and_diffusion,
     model_and_diffusion_defaults,
 )
@@ -67,6 +68,7 @@ def main():
     margs.setdefault("model_type", "vdt")
     ns = argparse.Namespace(**margs)
     backfill_action_encoding(ns)  # pre-#80 checkpoints have no action_encoding saved
+    backfill_cond_combine(ns)  # pre-#85-follow-up checkpoints predate the flag
     model, diffusion = create_model_and_diffusion(
         model_type=ns.model_type,
         **args_to_dict(ns, model_and_diffusion_defaults(model_type=ns.model_type).keys()),

@@ -65,6 +65,7 @@ class TrainLoop:
         clip_grad=None,
         optimizer='adam',
         debug_validation=None,
+        video_log_every=1,
     ):
         # (valset, out_dir) for the issue-58 plaicraft-debug validation set, or None.
         self.debug_validation = debug_validation
@@ -90,6 +91,8 @@ class TrainLoop:
         self.weight_decay = weight_decay
         self.lr_anneal_steps = lr_anneal_steps
         self.sample_interval = sample_interval
+        self.video_log_every = video_log_every
+        self._sample_call_count = 0
         self.pad_with_random_frames = pad_with_random_frames
         self.enc_dec_chunk_size = enc_dec_chunk_size
         self.vis_batch = None
@@ -649,6 +652,10 @@ class TrainLoop:
             self.model.load_state_dict(copy.deepcopy(self._master_params_to_state_dict(self.ema_params[0])))
 
             print("sampling...")
+            # Overlay mp4s are the bulk of this run's wandb storage; only render
+            # them every video_log_every-th call, scalars still log every time.
+            log_videos = self._sample_call_count % self.video_log_every == 0
+            self._sample_call_count += 1
             # construct simple masks for our vis batch
             obs_mask = th.zeros_like(self.vis_batch[:, :, :1, :1, :1])
             latent_mask = obs_mask.clone()
@@ -707,7 +714,7 @@ class TrainLoop:
                     run_debug_validation(
                         self.model, self.diffusion, valset, dist_util.dev(),
                         out_dir=val_out_dir, step=self.step,
-                        per_task_scalars=per_task,
+                        per_task_scalars=per_task, log_videos=log_videos,
                     )
                 except Exception as e:
                     print(f"[debug_validation] skipped at step {self.step}: {e!r}")

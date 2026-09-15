@@ -311,6 +311,7 @@ class VDT(nn.Module):
         action_token_cond=False,
         generate_mouse=False,
         mouse_token_cond=False,
+        cond_combine="add",
     ):
         super().__init__()
         self.learn_sigma = learn_sigma
@@ -331,6 +332,27 @@ class VDT(nn.Module):
         self.x_embedder = PatchEmbed(input_size, patch_size, in_channels, hidden_size, bias=True)
         self.t_embedder = TimestepEmbedder(hidden_size)
         self.y_embedder = LabelEmbedder(num_classes, hidden_size, class_dropout_prob)
+        # "add" folds y into t, so one shared adaLN W sees only their sum and the label rides
+        # whatever magnitude the timestep needs; concat gives y its own weight block (issue #85).
+        assert cond_combine in ("add", "concat", "concat_ln"), f"unknown cond_combine {cond_combine}"
+        self.cond_combine = cond_combine
+        if cond_combine != "add":
+            # Same shape as plaicraft-model-pi0's adaln_proj. The SiLU is the point: a purely
+            # linear projection of [t; y] is only a reparametrisation of t + y, since W_y @ y
+            # spans exactly what a free embedding table already spans.
+            self.cond_proj = nn.Sequential(
+                nn.Linear(2 * hidden_size, 2 * hidden_size),
+                nn.SiLU(),
+                nn.Linear(2 * hidden_size, hidden_size),
+            )
+        else:
+            self.cond_proj = None
+        if cond_combine == "concat_ln":
+            self.t_cond_norm = nn.LayerNorm(hidden_size)
+            self.y_cond_norm = nn.LayerNorm(hidden_size)
+        else:
+            self.t_cond_norm = None
+            self.y_cond_norm = None
         if action_dim > 0:
             if generate_actions or self.action_token_cond:
                 self.action_x_embedder = nn.Linear(action_dim, hidden_size, bias=True)
@@ -415,6 +437,12 @@ class VDT(nn.Module):
 
         if self.mouse_pos_embed is not None:
             nn.init.normal_(self.mouse_pos_embed, std=0.02)
+
+        if self.cond_proj is not None:
+            for layer in self.cond_proj:
+                if isinstance(layer, nn.Linear):
+                    nn.init.xavier_uniform_(layer.weight)
+                    nn.init.constant_(layer.bias, 0)
 
         # Initialize label embedding table:
         nn.init.normal_(self.y_embedder.embedding_table.weight, std=0.02)
@@ -517,10 +545,15 @@ class VDT(nn.Module):
         if not self.generate_actions and actions is not None and self.action_embedder is not None:
             # At num_classes=0 `y` is an inert constant kept only so y_embedder stays reachable
             # by backward (p.grad None once crashed _log_grad_norm); at 2 it is the player.
+            assert self.cond_combine == "add", "cond_combine != add is unsupported with action_embedder"
             c = t.unsqueeze(1) + y.unsqueeze(1) + \
                 self.action_embedder(actions, self.training, force_action_drop)  # (B, T, D)
-        else:
+        elif self.cond_combine == "add":
             c = t + y                         # (B, D)
+        else:
+            if self.cond_combine == "concat_ln":
+                t, y = self.t_cond_norm(t), self.y_cond_norm(y)
+            c = self.cond_proj(torch.cat([t, y], dim=-1))  # (B, D)
 
         for block in self.blocks:
             tokens = block(tokens, c)            # (B*T, N+1, D) or (B*T, N, D)

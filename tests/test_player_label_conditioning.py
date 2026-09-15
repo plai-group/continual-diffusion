@@ -121,3 +121,67 @@ def test_factory_default_is_still_zero_classes():
     m = create_vdt_model("VDT-SM", input_size=(24, 40), patch_size=4, in_channels=3,
                          num_frames=4, learn_sigma=False)
     assert m.y_embedder.num_classes == 0
+
+
+# ── cond_combine: how t and y become c (issue #85 follow-up) ───────────────────────────────
+
+def test_add_is_the_default_and_adds_no_parameters():
+    """Every checkpoint trained so far has no cond_proj in its state_dict; the default path
+    must keep loading them."""
+    m = _model(num_classes=2)
+    assert m.cond_combine == "add"
+    assert m.cond_proj is None
+    assert not [k for k in m.state_dict() if "cond_proj" in k or "cond_norm" in k]
+
+
+@pytest.mark.parametrize("mode", ["concat", "concat_ln"])
+def test_concat_projects_back_to_hidden_size(mode):
+    """One projection, not 14 widened adaLN layers: everything downstream of c keeps its shape."""
+    m = _model(num_classes=2, cond_combine=mode)
+    assert [l.weight.shape for l in m.cond_proj if isinstance(l, th.nn.Linear)] == [(128, 128), (64, 128)]
+    assert any(isinstance(l, th.nn.SiLU) for l in m.cond_proj), (
+        "without the nonlinearity this is only a reparametrisation of c = t + y"
+    )
+    for block in m.blocks:
+        assert block.adaLN_modulation[-1].weight.shape == (6 * 64, 64)
+    assert m.final_layer.adaLN_modulation[-1].weight.shape == (2 * 64, 64)
+
+
+@pytest.mark.parametrize("mode", ["concat", "concat_ln"])
+def test_distinct_players_give_distinct_output_under_concat(mode):
+    th.manual_seed(0)
+    m = _model(num_classes=2, cond_combine=mode)
+    x, t = _x()
+    with th.no_grad():
+        p0, _ = m(x, timesteps=t, y=th.zeros(2, dtype=th.long))
+        p1, _ = m(x, timesteps=t, y=th.ones(2, dtype=th.long))
+    assert p0.shape == (2, 4, 3, 24, 40)
+    assert p0.count_nonzero() > 0, "degenerate model -- the inequality below would be vacuous"
+    assert not th.allclose(p0, p1)
+
+
+def test_concat_ln_normalises_both_halves_before_projecting():
+    """The point of concat_ln: y arrives at cond_proj at the same scale as t, instead of the
+    80x gap measured on run hu9hvxqv (|t| 117 vs |y| 1.2)."""
+    th.manual_seed(0)
+    m = _model(num_classes=2, cond_combine="concat_ln")
+    seen = []
+    m.cond_proj.register_forward_pre_hook(lambda _mod, args: seen.append(args[0]))
+    x, t = _x()
+    with th.no_grad():
+        m(x, timesteps=t, y=th.ones(2, dtype=th.long))
+    t_part, y_part = seen[0][:, :64], seen[0][:, 64:]
+    for part in (t_part, y_part):
+        assert abs(part.pow(2).mean().sqrt().item() - 1.0) < 0.15
+
+
+@pytest.mark.parametrize("mode", ["concat", "concat_ln"])
+def test_concat_refuses_the_per_frame_action_embedder(mode):
+    """The action_embedder branch builds a (B, T, D) c by addition; concatenating there is a
+    separate design question and no current config reaches it."""
+    th.manual_seed(0)
+    m = _model(num_classes=2, cond_combine=mode, action_dim=8)
+    assert m.action_embedder is not None, "wrong branch -- the assert below would never fire"
+    x, t = _x()
+    with pytest.raises(AssertionError, match="cond_combine"):
+        m(x, timesteps=t, y=th.ones(2, dtype=th.long), actions=th.randn(2, 4, 8))

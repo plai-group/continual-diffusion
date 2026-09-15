@@ -201,6 +201,8 @@ def vdt_model_and_diffusion_defaults():
         # 0 keeps y_embedder the inert constant it has always been; 2 = the issue-85 player.
         num_classes=0,
         class_dropout_prob=0.1,
+        # "add" | "concat" | "concat_ln": how t and y are combined into c; see plaicraft-debug#85
+        cond_combine="add",
         keypress_loss_weight=1.0,
         mouse_loss_weight=1.0,
         action_quantization="none",  # "none" | "codebook" | "fsq"; see plaicraft-debug#77, #80
@@ -239,6 +241,7 @@ def create_vdt_model_and_diffusion(
     action_encoding="raw",
     num_classes=0,
     class_dropout_prob=0.1,
+    cond_combine="add",
 ):
     diffusion = create_gaussian_diffusion(
         steps=diffusion_steps,
@@ -272,6 +275,7 @@ def create_vdt_model_and_diffusion(
         mouse_token_cond=mouse_token_cond,
         num_classes=num_classes,
         class_dropout_prob=class_dropout_prob,
+        cond_combine=cond_combine,
     )
     return model, diffusion
 

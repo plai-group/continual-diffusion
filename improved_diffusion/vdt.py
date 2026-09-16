@@ -88,16 +88,33 @@ class TimestepEmbedder(nn.Module):
         return t_emb
 
 
+# What the learned table actually reaches under cond_combine=add (||y||=1.52 at 410k on run
+# hu9hvxqv; init would be 0.506) -- a frozen table needs to start where training would take it.
+FROZEN_LABEL_SCALE = 1.5
+
+
 class LabelEmbedder(nn.Module):
     """
     Embeds class labels into vector representations. Also handles label dropout for classifier-free guidance.
     """
-    def __init__(self, num_classes, hidden_size, dropout_prob):
+    def __init__(self, num_classes, hidden_size, dropout_prob, freeze=False, frozen_scale=FROZEN_LABEL_SCALE):
         super().__init__()
         use_cfg_embedding = dropout_prob > 0
         self.embedding_table = nn.Embedding(num_classes + use_cfg_embedding, hidden_size)
         self.num_classes = num_classes
         self.dropout_prob = dropout_prob
+        self.freeze = freeze
+        if freeze:
+            self._freeze_orthogonal(frozen_scale)
+
+    def _freeze_orthogonal(self, scale):
+        """Deterministic (fixed seed, not the model seed) so every run freezes the same rows."""
+        n, d = self.embedding_table.weight.shape
+        g = torch.Generator().manual_seed(85)
+        q, _ = torch.linalg.qr(torch.randn(d, n, generator=g))
+        with torch.no_grad():
+            self.embedding_table.weight.copy_(q.T * scale)
+        self.embedding_table.weight.requires_grad_(False)
 
     def token_drop(self, labels, force_drop_ids=None):
         """
@@ -312,6 +329,7 @@ class VDT(nn.Module):
         generate_mouse=False,
         mouse_token_cond=False,
         cond_combine="add",
+        label_embedding_frozen=False,
     ):
         super().__init__()
         self.learn_sigma = learn_sigma
@@ -331,7 +349,8 @@ class VDT(nn.Module):
 
         self.x_embedder = PatchEmbed(input_size, patch_size, in_channels, hidden_size, bias=True)
         self.t_embedder = TimestepEmbedder(hidden_size)
-        self.y_embedder = LabelEmbedder(num_classes, hidden_size, class_dropout_prob)
+        self.y_embedder = LabelEmbedder(num_classes, hidden_size, class_dropout_prob,
+                                       freeze=label_embedding_frozen)
         # "add" folds y into t, so one shared adaLN W sees only their sum and the label rides
         # whatever magnitude the timestep needs; concat gives y its own weight block (issue #85).
         assert cond_combine in ("add", "concat", "concat_ln"), f"unknown cond_combine {cond_combine}"
@@ -444,8 +463,9 @@ class VDT(nn.Module):
                     nn.init.xavier_uniform_(layer.weight)
                     nn.init.constant_(layer.bias, 0)
 
-        # Initialize label embedding table:
-        nn.init.normal_(self.y_embedder.embedding_table.weight, std=0.02)
+        # Initialize label embedding table: skip when frozen, or this clobbers the orthogonal rows.
+        if not self.y_embedder.freeze:
+            nn.init.normal_(self.y_embedder.embedding_table.weight, std=0.02)
 
         # Initialize timestep embedding MLP:
         nn.init.normal_(self.t_embedder.mlp[0].weight, std=0.02)

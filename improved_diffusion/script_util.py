@@ -203,6 +203,7 @@ def vdt_model_and_diffusion_defaults():
         class_dropout_prob=0.1,
         # "add" | "concat" | "concat_ln": how t and y are combined into c; see plaicraft-debug#85
         cond_combine="add",
+        label_embedding_frozen=False,  # freeze y_embedder to fixed orthogonal rows; see plaicraft-debug#85
         keypress_loss_weight=1.0,
         mouse_loss_weight=1.0,
         action_quantization="none",  # "none" | "codebook" | "fsq"; see plaicraft-debug#77, #80
@@ -242,6 +243,7 @@ def create_vdt_model_and_diffusion(
     num_classes=0,
     class_dropout_prob=0.1,
     cond_combine="add",
+    label_embedding_frozen=False,
 ):
     diffusion = create_gaussian_diffusion(
         steps=diffusion_steps,
@@ -276,6 +278,7 @@ def create_vdt_model_and_diffusion(
         num_classes=num_classes,
         class_dropout_prob=class_dropout_prob,
         cond_combine=cond_combine,
+        label_embedding_frozen=label_embedding_frozen,
     )
     return model, diffusion
 
@@ -364,6 +367,13 @@ def backfill_cond_combine(model_args):
     all trained the additive path."""
     if not hasattr(model_args, "cond_combine"):
         model_args.cond_combine = "add"
+
+
+def backfill_label_embedding_frozen(model_args):
+    """Pre-frozen-label checkpoints have no label_embedding_frozen saved; they all trained a
+    learned table (plaicraft-debug#85)."""
+    if not hasattr(model_args, "label_embedding_frozen"):
+        model_args.label_embedding_frozen = False
 
 
 def str2bool(v):

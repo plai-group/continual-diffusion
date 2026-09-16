@@ -209,3 +209,67 @@ def test_backfill_leaves_an_explicit_cond_combine_alone():
     ns = argparse.Namespace(cond_combine="concat_ln")
     backfill_cond_combine(ns)
     assert ns.cond_combine == "concat_ln"
+
+
+# ── frozen orthogonal label embedding (issue #85, third pass) ─────────────────────────────
+
+def test_frozen_rows_are_orthogonal_with_norm_1_5():
+    m = _model(num_classes=2, label_embedding_frozen=True)
+    W = m.y_embedder.embedding_table.weight
+    assert W.shape[0] == 3, "2 players + the null class"
+    assert th.allclose(W.norm(dim=-1), th.full((3,), 1.5), atol=1e-4)
+    gram = W @ W.T
+    off_diag = gram[~th.eye(3, dtype=th.bool)]
+    assert th.allclose(off_diag, th.zeros_like(off_diag), atol=1e-4)
+
+
+def test_frozen_at_zero_dropout_has_exactly_num_classes_rows():
+    m = _model(num_classes=2, class_dropout_prob=0.0, label_embedding_frozen=True)
+    assert m.y_embedder.embedding_table.weight.shape[0] == 2
+
+
+def test_frozen_table_requires_no_grad():
+    m = _model(num_classes=2, label_embedding_frozen=True)
+    assert not m.y_embedder.embedding_table.weight.requires_grad
+
+
+def test_frozen_table_survives_a_training_step():
+    th.manual_seed(0)
+    m = _model(num_classes=2, label_embedding_frozen=True)
+    before = m.y_embedder.embedding_table.weight.clone()
+    other_before = next(p for p in m.blocks[0].parameters() if p.requires_grad).clone()
+    x, t = _x()
+    out, _ = m(x, timesteps=t, y=th.ones(2, dtype=th.long))
+    out.sum().backward()
+    th.optim.SGD(m.parameters(), lr=0.1).step()
+    assert th.equal(m.y_embedder.embedding_table.weight, before)
+    other_after = next(p for p in m.blocks[0].parameters() if p.requires_grad)
+    assert not th.equal(other_after, other_before), "degenerate step -- the equality above would be vacuous"
+
+
+def test_label_embedding_frozen_false_is_byte_identical_to_today():
+    th.manual_seed(0)
+    m_off = _model(num_classes=2)
+    th.manual_seed(0)
+    m_explicit = _model(num_classes=2, label_embedding_frozen=False)
+    assert th.equal(m_off.y_embedder.embedding_table.weight, m_explicit.y_embedder.embedding_table.weight)
+
+
+def test_backfill_defaults_missing_label_embedding_frozen_to_false():
+    import argparse
+
+    from improved_diffusion.script_util import backfill_label_embedding_frozen
+
+    ns = argparse.Namespace(num_classes=2)
+    backfill_label_embedding_frozen(ns)
+    assert ns.label_embedding_frozen is False
+
+
+def test_backfill_leaves_an_explicit_label_embedding_frozen_alone():
+    import argparse
+
+    from improved_diffusion.script_util import backfill_label_embedding_frozen
+
+    ns = argparse.Namespace(label_embedding_frozen=True)
+    backfill_label_embedding_frozen(ns)
+    assert ns.label_embedding_frozen is True

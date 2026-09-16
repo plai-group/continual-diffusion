@@ -273,3 +273,48 @@ def test_backfill_leaves_an_explicit_label_embedding_frozen_alone():
     ns = argparse.Namespace(label_embedding_frozen=True)
     backfill_label_embedding_frozen(ns)
     assert ns.label_embedding_frozen is True
+
+
+def test_label_init_std_defaults_to_dits_small_value():
+    m = _model(num_classes=2)
+    assert m.label_init_std == 0.02
+    assert m.y_embedder.embedding_table.weight.std().item() < 0.1
+
+
+def test_label_init_std_one_restores_nn_embeddings_own_default():
+    """std=1.0 is what nn.Embedding initialises to on its own; at hidden_size=640 that starts
+    ||y|| near 25 instead of 0.51, so the label is not negligible beside ||t|| from step 0."""
+    th.manual_seed(0)
+    m = VDT(
+        input_size=(24, 40), patch_size=4, in_channels=3, num_frames=4, learn_sigma=False,
+        depth=1, hidden_size=640, num_heads=4, num_classes=2, class_dropout_prob=0.0,
+        label_init_std=1.0,
+    )
+    rows = m.y_embedder.embedding_table.weight
+    assert 0.8 < rows.std().item() < 1.2
+    assert 20.0 < rows.norm(dim=-1).mean().item() < 30.0
+
+
+def test_freezing_wins_over_label_init_std():
+    """Both set is a config trap: the frozen rows must survive, not be re-drawn at std=1.0."""
+    from improved_diffusion.vdt import FROZEN_LABEL_SCALE
+    m = VDT(
+        input_size=(24, 40), patch_size=4, in_channels=3, num_frames=4, learn_sigma=False,
+        depth=1, hidden_size=64, num_heads=4, num_classes=2, class_dropout_prob=0.0,
+        label_embedding_frozen=True, label_init_std=1.0,
+    )
+    rows = m.y_embedder.embedding_table.weight
+    assert rows.norm(dim=-1).allclose(th.full((2,), FROZEN_LABEL_SCALE), atol=1e-4)
+    assert rows.requires_grad is False
+
+
+def test_backfill_label_init_std():
+    import argparse
+
+    from improved_diffusion.script_util import backfill_label_init_std
+    ns = argparse.Namespace()
+    backfill_label_init_std(ns)
+    assert ns.label_init_std == 0.02
+    ns2 = argparse.Namespace(label_init_std=1.0)
+    backfill_label_init_std(ns2)
+    assert ns2.label_init_std == 1.0

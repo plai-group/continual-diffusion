@@ -92,6 +92,10 @@ class TimestepEmbedder(nn.Module):
 # hu9hvxqv; init would be 0.506) -- a frozen table needs to start where training would take it.
 FROZEN_LABEL_SCALE = 1.5
 
+# DiT's shared std for the small init; 1.0 restores nn.Embedding's own default, which at
+# hidden_size=640 starts ||y|| at ~25 instead of 0.51 (plaicraft-debug#85).
+LABEL_INIT_STD = 0.02
+
 
 class LabelEmbedder(nn.Module):
     """
@@ -330,6 +334,7 @@ class VDT(nn.Module):
         mouse_token_cond=False,
         cond_combine="add",
         label_embedding_frozen=False,
+        label_init_std=LABEL_INIT_STD,
     ):
         super().__init__()
         self.learn_sigma = learn_sigma
@@ -349,6 +354,8 @@ class VDT(nn.Module):
 
         self.x_embedder = PatchEmbed(input_size, patch_size, in_channels, hidden_size, bias=True)
         self.t_embedder = TimestepEmbedder(hidden_size)
+        # Ignored when frozen -- _freeze_orthogonal sets the rows and initialize_weights skips them.
+        self.label_init_std = label_init_std
         self.y_embedder = LabelEmbedder(num_classes, hidden_size, class_dropout_prob,
                                        freeze=label_embedding_frozen)
         # "add" folds y into t, so one shared adaLN W sees only their sum and the label rides
@@ -465,7 +472,7 @@ class VDT(nn.Module):
 
         # Initialize label embedding table: skip when frozen, or this clobbers the orthogonal rows.
         if not self.y_embedder.freeze:
-            nn.init.normal_(self.y_embedder.embedding_table.weight, std=0.02)
+            nn.init.normal_(self.y_embedder.embedding_table.weight, std=self.label_init_std)
 
         # Initialize timestep embedding MLP:
         nn.init.normal_(self.t_embedder.mlp[0].weight, std=0.02)

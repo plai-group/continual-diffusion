@@ -9,7 +9,7 @@ import os
 
 from improved_diffusion.video_datasets import get_eval_dataset, eval_dataset_configs
 from improved_diffusion.test_util import mark_as_observed, tensor2gif, tensor2mp4, parse_eval_run_identifier
-from improved_diffusion.script_util import str2bool, create_model_and_diffusion, model_and_diffusion_defaults, args_to_dict, backfill_action_encoding, backfill_cond_combine, backfill_label_embedding_frozen
+from improved_diffusion.script_util import str2bool, create_model_and_diffusion, model_and_diffusion_defaults, args_to_dict, backfill_action_encoding, backfill_cond_combine, backfill_label_embedding_frozen, backfill_label_init_std
 
 """
 Sample Command
@@ -58,6 +58,7 @@ if __name__ == "__main__":
         backfill_action_encoding(model_args)
         backfill_cond_combine(model_args)  # pre-#85-follow-up checkpoints predate the flag
         backfill_label_embedding_frozen(model_args)  # pre-frozen-label checkpoints predate the flag
+        backfill_label_init_std(model_args)  # predates the flag; DiT's 0.02
         # Load the dataset (to get observations from)
         eval_dataset_args = dict(dataset_name=model_args.dataset, T=T, spacing_kwargs=dict(n_data=args.num_sampled_videos),
                                  train=eval_on_train, eval_dataset_config=eval_dataset_config,

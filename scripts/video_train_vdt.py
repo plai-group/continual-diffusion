@@ -208,6 +208,7 @@ def main():
         debug_validation=debug_validation,
         player_validation=player_validation,
         args=args,
+        video_log_every=args.video_log_every,
     ).run_loop()
 
 
@@ -234,6 +235,7 @@ def create_argparser():
         enc_dec_chunk_size=20,
         T=-1,
         sample_interval=50000,
+        video_log_every=1,  # only render/upload the overlay mp4 every Nth sample call; scalars still log every time
         stm_size=-1,  # Only used for flexible and streaming sampling (masking_mode == "flexible")
         ltm_size=-1,
         n_sample_stm=-1,

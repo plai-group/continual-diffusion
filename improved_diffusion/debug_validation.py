@@ -940,6 +940,60 @@ def _player_metrics(gen_p1, gen_p2, gt_p1, gt_p2, click_mask=None):
     return out
 
 
+def _label_swap_probe(model, x, timesteps, model_kwargs, y0=0, y1=1):
+    """Two forward passes through the raw model, same everything but the player label -- the
+    live inertness gate (plaicraft-debug#85). Calibration: the known-inert baseline hu9hvxqv
+    reads 7.6e-4 at 410k (cos_y0_y1 0.962), so a run still sitting near 1e-3 at 20k is dead
+    regardless of margin_click -- clearing the gate means an order of magnitude above that.
+
+    y1 clamps to the table's last row when the model has fewer than 2 classes, so an inert
+    model (num_classes<2) reports delta=0 instead of an out-of-range embedding lookup."""
+    _m = getattr(model, "module", model)
+    n_rows = _m.y_embedder.embedding_table.weight.shape[0]
+    y1 = min(y1, n_rows - 1)
+
+    def _out(y):
+        with th.no_grad():
+            out, _ = _m(x, timesteps, y=th.full((x.shape[0],), y, dtype=th.long, device=x.device),
+                        **model_kwargs)
+        return out
+
+    out0, out1 = _out(y0), _out(y1)
+    delta = float(th.linalg.norm((out1 - out0).flatten())
+                 / th.linalg.norm(out0.flatten()).clamp_min(1e-12))
+    W = _m.y_embedder.embedding_table.weight
+    cos = float(th.nn.functional.cosine_similarity(W[y0:y0 + 1], W[y1:y1 + 1]).item())
+    dist = float(th.linalg.norm(W[y0] - W[y1]).item())
+    return delta, cos, dist
+
+
+# Fractions of the schedule to probe. edm_sigmas rises with t, so this is the noisy end: at
+# t=0 the denoiser is near identity and every model, label-using or not, reads as inert.
+LABEL_SWAP_PROBE_FRACS = (1.0, 0.75, 0.5)
+
+
+@th.no_grad()
+def run_label_swap_probe(model, diffusion, x0, actions, mouse, obs_mask, pin_actions=False):
+    """The three val/* scalars of the inertness gate, max-ed over LABEL_SWAP_PROBE_FRACS."""
+    device = x0.device
+    kwargs = dict(x0=x0, obs_mask=obs_mask, latent_mask=1 - obs_mask,
+                  actions=actions, mouse=mouse)
+    if pin_actions:
+        # Pin the action tokens so the only thing differing between the two passes is y.
+        kwargs.update(actions0=actions,
+                      obs_action_mask=th.ones_like(frame_mask_to_action_mask(obs_mask)))
+    delta, cos, dist = 0.0, None, None
+    with RNG(20250916):  # fixed, so the delta is comparable across validation steps
+        for frac in LABEL_SWAP_PROBE_FRACS:
+            t = th.full((x0.shape[0],), int((diffusion.num_timesteps - 1) * frac),
+                        dtype=th.long, device=device)
+            xt = diffusion.q_sample(x0, t, th.randn_like(x0))
+            d, cos, dist = _label_swap_probe(model, xt, t.to(th.int32), kwargs)
+            delta = max(delta, d)
+    return {"val/player/swap_delta": delta,
+            "val/label/cos_y0_y1": cos, "val/label/dist_y0_y1": dist}
+
+
 @th.no_grad()
 def run_player_validation(model, diffusion, valset, device, out_dir, step=0, chunk_size=3,
                           log_videos=True, cfg_scale=1.0, label_cfg_scale=1.0,
@@ -1053,6 +1107,15 @@ def run_player_validation(model, diffusion, valset, device, out_dir, step=0, chu
                 logger.logkv(f"val/player_overlay/{slug}", wandb.Video(str(mp4)), distributed=False)
         except Exception as e:
             print(f"[player_validation] row {row['num']} failed: {e!r}")
+
+    try:
+        obs_mask = th.zeros(1, T, 1, 1, 1, device=device)
+        obs_mask[:, :n_obs] = 1.0
+        agg.update(run_label_swap_probe(
+            _m, diffusion, gt_p1_all[0:1].to(device), keypress_all[0:1].to(device),
+            mouse_all[0:1].to(device), obs_mask, generates_actions))
+    except Exception as e:
+        print(f"[player_validation] label-swap probe failed: {e!r}")
 
     for key in ("l2_matched", "l2_crossed", "margin",
                 "l2_matched_click", "l2_crossed_click", "margin_click"):

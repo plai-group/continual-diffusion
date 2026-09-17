@@ -995,7 +995,9 @@ def _decode_pred_actions(samples_act, samples_mouse, action_encoding, km_tokeniz
     if samples_act is None:
         return None, None
     if action_encoding == "km_fsq":
-        return _decode_km_actions(km_tokenizer, debug_actions.quantize_km_fsq(samples_act))
+        # Unpack rather than forward: _decode_km_actions also returns the key probabilities.
+        keys, mouse, _probs = _decode_km_actions(km_tokenizer, debug_actions.quantize_km_fsq(samples_act))
+        return keys, mouse
     if action_encoding == "raw_fused":
         return samples_act[..., :8], debug_actions._inv_symlog(samples_act[..., 8:])
     return samples_act, samples_mouse
@@ -1116,7 +1118,7 @@ def run_player_validation(model, diffusion, valset, device, out_dir, step=0, chu
     player_a, player_b = valset.player_indices
     sched_sigma_max = float(diffusion.timestep2sigma(diffusion.num_timesteps - 1))
 
-    per_row, agg = [], {}
+    per_row, agg, fails = [], {}, ValidationFailures()
     for i, row in enumerate(valset.rows):
         try:
             gt_a = gt_p1_all[i:i + 1].to(device)
@@ -1197,7 +1199,7 @@ def run_player_validation(model, diffusion, valset, device, out_dir, step=0, chu
                 )
                 logger.logkv(f"val/player_overlay/{slug}", wandb.Video(str(mp4)), distributed=False)
         except Exception as e:
-            print(f"[player_validation] row {row['num']} failed: {e!r}")
+            fails.record(f"player_row_{row['num']}", step, e)
 
     try:
         obs_mask = th.zeros(1, T, 1, 1, 1, device=device)
@@ -1206,7 +1208,7 @@ def run_player_validation(model, diffusion, valset, device, out_dir, step=0, chu
             _m, diffusion, gt_p1_all[0:1].to(device), keypress_all[0:1].to(device),
             mouse_all[0:1].to(device), obs_mask, generates_actions))
     except Exception as e:
-        print(f"[player_validation] label-swap probe failed: {e!r}")
+        fails.record("player_swap_probe", step, e)
 
     for key in ("l2_matched", "l2_crossed", "margin",
                 "l2_matched_click", "l2_crossed_click", "margin_click"):
@@ -1215,4 +1217,5 @@ def run_player_validation(model, diffusion, valset, device, out_dir, step=0, chu
             agg[f"val/player/{key}"] = float(np.mean(vals))
     for k, v in agg.items():
         logger.logkv(k, v, distributed=False)
-    return {"aggregate": agg, "per_row": per_row}
+    fails.log("val/player_failures")
+    return {"aggregate": agg, "per_row": per_row, "failures": dict(fails)}

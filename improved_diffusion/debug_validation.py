@@ -573,6 +573,27 @@ def _render_triple_overlay(frames_gt, frames_true, frames_swap, frames_zero,
     )
 
 
+class ValidationFailures(dict):
+    """Per-label tally of validation sub-steps that raised and were swallowed.
+
+    Validation must never kill a training run, but a sub-step that fails silently is worse
+    than a crash: the metric it fed simply stops being logged, so wandb keeps charting its
+    last good value and a dead probe is indistinguishable from a converged one. #85's player
+    validation died on a resume and went unnoticed for ~100k steps that way. Counting the
+    failures turns that flat line into a rising one (plaicraft-debug#85).
+    """
+
+    def record(self, label, step, exc):
+        self[label] = self.get(label, 0) + 1
+        print(f"[debug_validation] {label} failed at step {step}: {exc!r}", flush=True)
+
+    def log(self, prefix="val/failures"):
+        # total is logged even when zero, so the panel exists and any jump off the floor shows.
+        logger.logkv(f"{prefix}/total", float(sum(self.values())), distributed=False)
+        for label, n in self.items():
+            logger.logkv(f"{prefix}/{label}", float(n), distributed=False)
+
+
 @th.no_grad()
 def run_debug_validation(model, diffusion, valset, device, out_dir,
                          step=0, chunk_size=3, log_videos=True,
@@ -623,6 +644,7 @@ def run_debug_validation(model, diffusion, valset, device, out_dir,
                       if keypress_raw_all is not None else None)
 
     per_row, agg, swap_rows, feats_real, feats_fake = [], {}, [], [], []
+    fails = ValidationFailures()
     for lo in range(0, n_rows, chunk_size):
         hi = min(lo + chunk_size, n_rows)
         x0 = x0_all[lo:hi].to(device)
@@ -699,7 +721,7 @@ def run_debug_validation(model, diffusion, valset, device, out_dir,
                     extra = (extra[0] if isinstance(extra, tuple) else extra).to(device)
                     feats_fake.append(extract((extra * latent_mask + x0 * obs_mask)[:, n_obs:]))
             except Exception as e:
-                print(f"[debug_validation] fvd features skipped at step {step}: {e!r}")
+                fails.record("fvd_features", step, e)
                 """Drop what was collected: a pool truncated mid-loop is indistinguishable
                 from a full one at aggregation, and its floor shifts (see below), so it
                 would read as a quality regression. Better no number than a wrong one."""
@@ -882,7 +904,7 @@ def run_debug_validation(model, diffusion, valset, device, out_dir,
                         import wandb
                         logger.logkv(f"val/swap_overlay/{slug}", wandb.Video(str(mp4_swap)), distributed=False)
                 except Exception as e:
-                    print(f"[debug_validation] swap test failed for row {row['num']}: {e!r}")
+                    fails.record(f"swap_row_{row['num']}", step, e)
 
     # Key naming mirrors plaicraft-model-pi0's `val/video/*` so the same wandb
     # panels line up against the DiT runs.
@@ -916,7 +938,7 @@ def run_debug_validation(model, diffusion, valset, device, out_dir,
             # Spread across resamples of the generated side only, not a standard error.
             agg["val/video/kvd_subset_spread"] = d["kvd_std"]
         except Exception as e:
-            print(f"[debug_validation] fvd skipped at step {step}: {e!r}")
+            fails.record("fvd", step, e)
 
     if swap_rows:
         agg["val/swap/l2_true_vs_swap"] = float(np.mean([r["l2_true_swap"] for r in swap_rows]))
@@ -926,8 +948,9 @@ def run_debug_validation(model, diffusion, valset, device, out_dir,
 
     for k, v in agg.items():
         logger.logkv(k, v, distributed=False)
+    fails.log()
 
-    return {"aggregate": agg, "per_row": per_row}
+    return {"aggregate": agg, "per_row": per_row, "failures": dict(fails)}
 
 
 def _render_player_overlay(frames_gt_p1, frames_p1, frames_gt_p2, frames_p2,

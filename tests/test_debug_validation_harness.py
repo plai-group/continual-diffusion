@@ -96,7 +96,7 @@ def harness(monkeypatch):
 
 def test_validation_returns_aggregate_and_per_row(harness, tmp_path):
     res = harness(tmp_path)
-    assert set(res) == {"aggregate", "per_row"}
+    assert set(res) == {"aggregate", "per_row", "failures"}
     assert len(res["per_row"]) == 6
 
 
@@ -146,3 +146,34 @@ def test_failed_extraction_publishes_no_video_distances(monkeypatch, harness, tm
     for k in ("val/video/fvd", "val/video/kvd", "val/video/kvd_subset_spread"):
         assert k not in agg, k
     assert "val/video/psnr" in agg  # the run still completes and still logs everything else
+
+
+def _logged(monkeypatch):
+    """Capture logkv, which is the only place the failure tally becomes visible."""
+    seen = {}
+    monkeypatch.setattr(dv.logger, "logkv",
+                        lambda k, v, distributed=True: seen.__setitem__(k, v))
+    return seen
+
+
+def test_a_clean_run_logs_a_zero_failure_total(monkeypatch, harness, tmp_path):
+    # Logged even at zero so the panel exists; a metric that only appears once something
+    # breaks is a panel nobody has on their dashboard when it matters.
+    seen = _logged(monkeypatch)
+    assert harness(tmp_path)["failures"] == {}
+    assert seen["val/failures/total"] == 0.0
+
+
+def test_a_swallowed_failure_is_counted_and_logged(monkeypatch, harness, tmp_path):
+    """The #85 regression: a sub-step died every call and the only trace was a print into
+    a block-buffered stdout, while its metric kept charting its last good value."""
+    def boom(videos, batch_size=16):
+        raise RuntimeError("CUDA out of memory")
+
+    monkeypatch.setattr(fvdmod, "_FEATURES", boom)
+    seen = _logged(monkeypatch)
+    res = harness(tmp_path)
+    assert res["failures"]["fvd_features"] >= 1
+    assert seen["val/failures/total"] == float(res["failures"]["fvd_features"])
+    assert seen["val/failures/fvd_features"] == float(res["failures"]["fvd_features"])
+    assert "val/video/psnr" in res["aggregate"]  # still only validation that died

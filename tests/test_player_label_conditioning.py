@@ -8,6 +8,7 @@ script trains today.
 import pytest
 import torch as th
 
+from improved_diffusion import train_util
 from improved_diffusion.vdt import VDT
 
 
@@ -318,3 +319,72 @@ def test_backfill_label_init_std():
     ns2 = argparse.Namespace(label_init_std=1.0)
     backfill_label_init_std(ns2)
     assert ns2.label_init_std == 1.0
+
+
+# ── what the label is actually being taught (issue #85, fourth pass) ────────────────────────
+
+def _logged(monkeypatch):
+    """Capture logkv_mean, the only place the label's gradient becomes visible."""
+    seen = {}
+    monkeypatch.setattr(train_util.logger, "logkv_mean", lambda k, v: seen.__setitem__(k, v))
+    return seen
+
+
+def _with_grad(m, g0, g1):
+    w = m.y_embedder.embedding_table.weight
+    w.grad = th.stack([g0, g1])
+    return w
+
+
+def test_label_grad_keys_populate_after_a_real_backward(monkeypatch):
+    seen = _logged(monkeypatch)
+    m = _model(num_classes=2, class_dropout_prob=0.0)
+    x, _ = _x()
+    m(x, th.zeros(2), y=th.tensor([0, 1]))[0].sum().backward()
+    assert train_util.log_label_grad(m, 1.0) is not None
+    for key in ("grad/label/norm", "grad/label/frac", "grad/label/row0", "grad/label/row1",
+                "grad/label/cos_rows", "param/label/norm", "param/label/cos_rows"):
+        assert key in seen, key
+    assert seen["grad/label/norm"] > 0
+
+
+def test_cos_rows_reports_whether_the_rows_are_driven_together(monkeypatch):
+    """The whole point of the metric: co-driven rows translate instead of separating."""
+    m = _model(num_classes=2, class_dropout_prob=0.0)
+    shared = th.randn(m.y_embedder.embedding_table.weight.shape[1])
+    for g1, expected in ((shared, 1.0), (-shared, -1.0)):
+        seen = _logged(monkeypatch)
+        _with_grad(m, shared, g1)
+        train_util.log_label_grad(m, 1.0)
+        assert seen["grad/label/cos_rows"] == pytest.approx(expected, abs=1e-5)
+
+
+def test_frac_is_the_label_share_of_the_total_gradient(monkeypatch):
+    seen = _logged(monkeypatch)
+    m = _model(num_classes=2, class_dropout_prob=0.0)
+    w = _with_grad(m, th.ones(m.y_embedder.embedding_table.weight.shape[1]),
+                   th.zeros(m.y_embedder.embedding_table.weight.shape[1]))
+    train_util.log_label_grad(m, 4.0)
+    assert seen["grad/label/frac"] == pytest.approx(w.grad.norm().item() / 4.0)
+    assert seen["grad/label/row1"] == 0.0
+
+
+def test_delta_needs_a_previous_table_and_then_tracks_the_realised_update(monkeypatch):
+    m = _model(num_classes=2, class_dropout_prob=0.0)
+    seen = _logged(monkeypatch)
+    prev = train_util.log_label_grad(m, 1.0)
+    assert "param/label/delta" not in seen, "nothing to difference against on the first step"
+    with th.no_grad():
+        m.y_embedder.embedding_table.weight.add_(0.1)
+    seen = _logged(monkeypatch)
+    train_util.log_label_grad(m, 1.0, prev)
+    assert seen["param/label/delta"] > 0
+    assert seen["param/label/rel_delta"] == pytest.approx(
+        seen["param/label/delta"] / seen["param/label/norm"])
+
+
+def test_a_single_row_table_logs_nothing(monkeypatch):
+    """num_classes=0 keeps one inert constant; there is no pair to compare and no run to break."""
+    seen = _logged(monkeypatch)
+    assert train_util.log_label_grad(_model(num_classes=0), 1.0) is None
+    assert seen == {}

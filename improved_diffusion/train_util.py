@@ -593,7 +593,10 @@ class TrainLoop:
             if not p.requires_grad or p.grad is None:
                 continue
             sqsum += (p.grad ** 2).sum().item()
-        logger.logkv_mean("grad_norm", np.sqrt(sqsum))
+        total = np.sqrt(sqsum)
+        logger.logkv_mean("grad_norm", total)
+        self._label_prev = log_label_grad(getattr(self.model, "module", self.model),
+                                          total, getattr(self, "_label_prev", None))
 
     def _anneal_lr(self):
         if not self.lr_anneal_steps:
@@ -764,6 +767,44 @@ class TrainLoop:
             self.model.load_state_dict(orig_state_dict)
             print("finished sampling")
         dist.barrier()
+
+
+def log_label_grad(model, total_norm, prev=None):
+    """Trace what the player-label embedding is actually being taught (plaicraft-debug#85).
+
+    cos_rows is the one to watch. nn.Embedding gradients are row-sparse, so each player's row is
+    taught only by its own windows; if the two rows nonetheless receive a shared gradient
+    direction they translate together and never separate, which is what val/player/cos_y0_y1
+    converging to 0.96 looks like from the parameter side. No architecture can fix that.
+
+    Returns the current table, to be passed back as `prev` next step so the realised update
+    (post-clip, post-Adam) can be differenced. Read pre-clip: the clip is a uniform scalar, so it
+    cancels in every ratio and cosine here and shifts only grad/label/norm.
+    """
+    table = getattr(getattr(model, "y_embedder", None), "embedding_table", None)
+    w = getattr(table, "weight", None)
+    # num_classes=0 runs have one inert row, and the frozen arm never gets a gradient.
+    if w is None or w.shape[0] < 2:
+        return None
+    w = w.detach()
+    logger.logkv_mean("param/label/norm", w.norm().item())
+    logger.logkv_mean("param/label/cos_rows", th.cosine_similarity(w[0], w[1], dim=0).item())
+    if prev is not None:
+        delta = (w - prev).norm().item()
+        logger.logkv_mean("param/label/delta", delta)
+        logger.logkv_mean("param/label/rel_delta", delta / max(w.norm().item(), 1e-12))
+    g = table.weight.grad
+    if g is not None:
+        g = g.detach()
+        norm = g.norm().item()
+        logger.logkv_mean("grad/label/norm", norm)
+        logger.logkv_mean("grad/label/frac", norm / total_norm if total_norm > 0 else 0.0)
+        logger.logkv_mean("grad/label/row0", g[0].norm().item())
+        logger.logkv_mean("grad/label/row1", g[1].norm().item())
+        # Undefined until DiT's zero-init adaLN lets any gradient reach c, which takes ~2 steps.
+        if g[0].norm() > 0 and g[1].norm() > 0:
+            logger.logkv_mean("grad/label/cos_rows", th.cosine_similarity(g[0], g[1], dim=0).item())
+    return w.clone()
 
 
 def _mark_as_observed(images, color=[1., -1., -1.]):

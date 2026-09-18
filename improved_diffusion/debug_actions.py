@@ -83,6 +83,29 @@ def read_session_fps(session_dir):
     return float(row[0]) if row is not None else None
 
 
+def read_session_player(session_dir):
+    """The session's player index from other_metadata, or None if the corpus predates issue #85.
+
+    The index rather than the name is the cross-repo contract: plaicraft-debug owns the
+    name-to-index map, so a rename there cannot silently relabel training data here."""
+    session_dir = Path(session_dir)
+    db_path = session_dir / f"{session_dir.name}.db"
+    con = sqlite3.connect(str(db_path))
+    try:
+        row = con.execute("SELECT other_metadata FROM session").fetchone()
+    except sqlite3.OperationalError:
+        # No session table or no other_metadata column: same answer as an absent player_index.
+        return None
+    finally:
+        con.close()
+    if row is None or not row[0]:
+        return None
+    try:
+        return json.loads(row[0]).get("player_index")
+    except (json.JSONDecodeError, TypeError):
+        return None
+
+
 def validate_action_encoding(action_encoding, fps=None, action_dim=None, mouse_dim=None):
     """km_fsq needs fps==12.5, action_dim==36, mouse_dim==0; raw needs action_dim==8,
     mouse_dim==2; raw_fused needs action_dim==10, mouse_dim==0. The exception is raw with

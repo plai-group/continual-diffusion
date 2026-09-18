@@ -6,6 +6,7 @@ tests pin that the token is live (it reaches the video output), that nothing
 in the loss or the sampler treats it as a generated quantity, and that a
 trunk trained with adaLN conditioning can be warm-started into it.
 """
+import pytest
 import torch
 
 from improved_diffusion.vdt import VDT_S_2
@@ -107,3 +108,36 @@ def test_warm_start_reuses_the_trunk_and_zeroes_the_token_path():
         if name.startswith("blocks.0.attn"):
             assert torch.allclose(p, dict(donor.named_parameters())[name])
     assert target.action_x_embedder.weight.abs().sum() == 0
+
+
+# ── composing with the issue-85 conditioning path ──────────────────────────────────────────
+
+def test_token_cond_composes_with_concat_ln():
+    """The #85 fourth-pass arms depend on this and nothing else pinned it.
+
+    cond_combine != "add" is unsupported alongside ActionEmbedder, because that path adds a
+    per-frame (B,T,D) action term straight into c. Token-cond leaves action_embedder None and
+    routes the action through the sequence instead, so c stays (B,D) and cond_proj applies.
+    """
+    m = _model(action_token_cond=True, cond_combine="concat_ln", num_classes=2,
+               class_dropout_prob=0.0).eval()
+    assert m.action_embedder is None and m.cond_proj is not None
+    x, t = torch.randn(B, T, C, H, W), torch.tensor([50, 150])
+    acts = torch.randn(B, T, ACTION_DIM)
+    with torch.no_grad():
+        for param in m.parameters():
+            if param.count_nonzero() == 0:
+                param.normal_(0.0, 0.05)
+        p0 = m(x, timesteps=t, actions=acts, y=torch.zeros(B, dtype=torch.long))[0]
+        p1 = m(x, timesteps=t, actions=acts, y=torch.ones(B, dtype=torch.long))[0]
+    assert not torch.allclose(p0, p1), "the player label must still reach the output"
+
+
+def test_adaln_action_conditioning_still_refuses_concat_ln():
+    """The other side of the same guard: silently ignoring cond_combine would ship a run
+    whose label was folded into c by addition while its config claimed otherwise."""
+    m = _model(cond_combine="concat_ln", num_classes=2, class_dropout_prob=0.0)
+    assert m.action_embedder is not None, "this test is only meaningful on the adaLN path"
+    with pytest.raises(AssertionError, match="cond_combine"):
+        m(torch.randn(B, T, C, H, W), timesteps=torch.tensor([50, 150]),
+          actions=torch.randn(B, T, ACTION_DIM), y=torch.zeros(B, dtype=torch.long))

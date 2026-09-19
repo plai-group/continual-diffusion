@@ -953,25 +953,21 @@ def run_debug_validation(model, diffusion, valset, device, out_dir,
     return {"aggregate": agg, "per_row": per_row, "failures": dict(fails)}
 
 
-def _render_player_overlay(frames_gt_p1, frames_p1, frames_gt_p2, frames_p2,
-                           actions_gt, actions_p1, actions_p2,
-                           n_observed, out_path, labels=("GT", "P1", "P2")):
-    """2x2 mp4: each row is one player -- its ground truth, then its generation.
+def _render_player_arm_overlay(frames_gt, frames_gen, actions_gt, actions_gen,
+                               n_observed, out_path, label="P0 red"):
+    """1x2 mp4 for ONE player: its ground truth beside its own generation.
 
-    Pairing them per row is what makes the cue readable: with a single GT panel you can only
-    see that the two arms differ, not whether either got its own colour right. Both arms are
-    the same action trace re-rendered, so the two GT panels share `actions_gt`.
+    This used to pack both players into a 2x2. One file per arm makes each readable alone and
+    lets the two be diffed frame-for-frame, which is how you separate an overlay bug from the
+    arms genuinely rendering the same image.
 
-    The generated panels carry the model's OWN sampled actions, not the ground truth. Drawing
-    the GT bars under all of them (which this used to do) makes a free rollout look teacher
-    forced, because every click appears prescribed even when the model chose it."""
-    gt, p1, p2 = labels
-    # Each GT panel is named for the player whose row it heads: "P0 red" -> "GT red".
+    The generated panel carries the model's OWN sampled actions, not the ground truth. Drawing
+    the GT bars under it (which this used to do) makes a free rollout look teacher forced,
+    because every click appears prescribed even when the model chose it."""
+    # The GT panel is named for the player it belongs to: "P0 red" -> "GT red".
     return _render_panels(
-        (frames_gt_p1, frames_p1, frames_gt_p2, frames_p2),
-        (actions_gt, actions_p1, actions_gt, actions_p2),
-        [f"{gt} {p1.split()[-1]}", p1, f"{gt} {p2.split()[-1]}", p2],
-        n_observed, out_path, ncols=2,
+        (frames_gt, frames_gen), (actions_gt, actions_gen),
+        [f"GT {label.split()[-1]}", label], n_observed, out_path, ncols=2,
     )
 
 
@@ -1094,8 +1090,11 @@ def run_player_validation(model, diffusion, valset, device, out_dir, step=0, chu
     """Issue #85: sample each row twice -- same actions, different player -- and report whether
     each generation tracks the player it was given.
 
-    The passes share one noise draw and one reseed, as the swap test does, so the only
-    difference is the player: its label in `y` and its cue in the context."""
+    The two passes of a row share one noise draw and one reseed, as the swap test does, so the
+    only difference is the player: its label in `y` and its cue in the context. The draw is
+    per row, so the left-click pair and the right-click pair sit on different noise -- a result
+    that survives both is not an artifact of one sample. Each arm is written as its own
+    overlay, named for its player."""
     import wandb
 
     out_dir = Path(out_dir)
@@ -1184,20 +1183,20 @@ def run_player_validation(model, diffusion, valset, device, out_dir, step=0, chu
 
             if log_videos:
                 slug = valset.slug(row)
-                mp4 = out_dir / f"step{step}_{slug}_player.mp4"
                 gt_bars = (key_raw.cpu().numpy(), mouse_raw_all[i].cpu().numpy())
-                _render_player_overlay(
-                    frames_gt_p1=gt_a[0].cpu().numpy(),
-                    frames_p1=gen_a.cpu().numpy(),
-                    frames_gt_p2=gt_b[0].cpu().numpy(),
-                    frames_p2=gen_b.cpu().numpy(),
-                    actions_gt=gt_bars,
-                    actions_p1=_arm_bars(key_a, mouse_a, gt_bars),
-                    actions_p2=_arm_bars(key_b, mouse_b, gt_bars),
-                    n_observed=n_obs, out_path=str(mp4),
-                    labels=("GT", PLAYER_PANEL_LABELS[player_a], PLAYER_PANEL_LABELS[player_b]),
-                )
-                logger.logkv(f"val/player_overlay/{slug}", wandb.Video(str(mp4)), distributed=False)
+                for player_index, gt, gen, key, mouse in (
+                        (player_a, gt_a[0], gen_a, key_a, mouse_a),
+                        (player_b, gt_b[0], gen_b, key_b, mouse_b)):
+                    label = PLAYER_PANEL_LABELS[player_index]
+                    colour = label.split()[-1]
+                    mp4 = out_dir / f"step{step}_{slug}_{colour}.mp4"
+                    _render_player_arm_overlay(
+                        frames_gt=gt.cpu().numpy(), frames_gen=gen.cpu().numpy(),
+                        actions_gt=gt_bars, actions_gen=_arm_bars(key, mouse, gt_bars),
+                        n_observed=n_obs, out_path=str(mp4), label=label,
+                    )
+                    logger.logkv(f"val/player_overlay/{slug}_{colour}",
+                                 wandb.Video(str(mp4)), distributed=False)
         except Exception as e:
             fails.record(f"player_row_{row['num']}", step, e)
 

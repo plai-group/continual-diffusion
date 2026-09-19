@@ -1,12 +1,14 @@
 """PlayerValidationSet + the cross-arm player metric and overlay (issue #85)."""
 import json
+from pathlib import Path
 
 import numpy as np
 import pytest
 import torch as th
 
 from improved_diffusion.corpus_validation import CorpusValidationSet, PlayerValidationSet
-from improved_diffusion.debug_validation import _arm_bars, _player_metrics, _render_player_overlay
+from improved_diffusion.debug_validation import (
+    _arm_bars, _player_metrics, _render_player_arm_overlay)
 
 T, N_OBS, N_ROWS, H, W = 20, 10, 4, 24, 40
 
@@ -134,70 +136,70 @@ class _NullWriter:
         pass
 
 
-def test_render_player_overlay_draws_a_two_by_two_grid(tmp_path):
-    """One row per player: its ground truth, then its generation. A single GT panel only shows
-    that the arms differ, not whether either rendered its own cue colour."""
+def _render(tmp_path, gt, gen, actions_gt, actions_gen, label="P0 red"):
+    """Render one arm through a stubbed writer and hand back the first composed frame."""
     import imageio
-    rng = np.random.default_rng(1)
-    def f():
-        return rng.uniform(-1, 1, (T, 3, H, W)).astype(np.float32)
-
     writer = _NullWriter()
     orig = imageio.get_writer
     imageio.get_writer = lambda *a, **k: writer
     try:
-        zeros = (np.zeros((T, 8), np.float32), np.zeros((T, 2), np.float32))
-        _render_player_overlay(f(), f(), f(), f(),
-                               actions_gt=zeros, actions_p1=zeros, actions_p2=zeros,
-                               n_observed=N_OBS, out_path=str(tmp_path / "p.mp4"))
+        _render_player_arm_overlay(frames_gt=gt, frames_gen=gen,
+                                   actions_gt=actions_gt, actions_gen=actions_gen,
+                                   n_observed=N_OBS, out_path=str(tmp_path / "p.mp4"),
+                                   label=label)
     finally:
         imageio.get_writer = orig
+    return writer.frames
 
-    assert len(writer.frames) == T
-    frame = writer.frames[0]
+
+def test_render_player_arm_overlay_draws_one_row_of_two_panels(tmp_path):
+    """One file per player, GT beside that player's own generation -- not a 2x2 of both."""
+    rng = np.random.default_rng(1)
+    def f():
+        return rng.uniform(-1, 1, (T, 3, H, W)).astype(np.float32)
+
+    zeros = (np.zeros((T, 8), np.float32), np.zeros((T, 2), np.float32))
+    frames = _render(tmp_path, f(), f(), zeros, zeros)
+
+    assert len(frames) == T
+    frame = frames[0]
     assert frame.ndim == 3 and frame.shape[2] == 3
-    # 2x2, not a strip: both dimensions hold two panels of the upscaled frame size.
-    assert frame.shape[1] > 2 * W and frame.shape[0] > 2 * H, f"got {frame.shape}"
-    assert frame.shape[1] < 3 * frame.shape[0], f"still a wide strip: {frame.shape}"
-    # Four distinct stacks in, four distinct quadrants out -- so player 1's ground truth is
-    # really drawn and not a second copy of player 0's.
-    h, w = frame.shape[0] // 2, frame.shape[1] // 2
-    quads = [frame[:h, :w], frame[:h, w:], frame[h:, :w], frame[h:, w:]]
-    for i in range(4):
-        for j in range(i + 1, 4):
-            assert not np.array_equal(quads[i], quads[j]), f"quadrants {i} and {j} match"
+    # A wide strip of two panels, so the grid is 1x2 and never stacks a second row.
+    assert frame.shape[1] > 2 * W, f"got {frame.shape}"
+    assert frame.shape[1] > 2 * frame.shape[0], f"not a single row: {frame.shape}"
+    w = frame.shape[1] // 2
+    assert not np.array_equal(frame[:, :w], frame[:, w:]), "GT and generation match"
 
 
-def test_each_panel_draws_its_own_actions(tmp_path):
-    """The teacher-forcing illusion: if the generated panels reuse the GT bars, a free rollout
-    reads as prescribed. Give each panel different actions and assert that in both rows the
-    generated bars differ from the GT bars beside them."""
-    import imageio
+def test_each_arm_is_written_to_its_own_file(tmp_path):
+    """The split is the point: two arms must produce two paths, named for their player."""
+    frames = np.zeros((T, 3, H, W), np.float32)
+    zeros = (np.zeros((T, 8), np.float32), np.zeros((T, 2), np.float32))
+    paths = set()
+    for label in ("P0 red", "P1 blue"):
+        import imageio
+        writer = _NullWriter()
+        orig = imageio.get_writer
+        imageio.get_writer = lambda *a, **k: writer
+        try:
+            out = _render_player_arm_overlay(
+                frames_gt=frames, frames_gen=frames, actions_gt=zeros, actions_gen=zeros,
+                n_observed=N_OBS, out_path=str(tmp_path / f"step0_00_x_{label.split()[-1]}.mp4"),
+                label=label)
+        finally:
+            imageio.get_writer = orig
+        paths.add(Path(out).name)
+    assert paths == {"step0_00_x_red.mp4", "step0_00_x_blue.mp4"}
 
+
+def test_the_generated_panel_draws_its_own_actions(tmp_path):
+    """The teacher-forcing illusion: if the generated panel reuses the GT bars, a free rollout
+    reads as prescribed. Give the two panels different actions and assert they differ."""
     frames = np.zeros((T, 3, H, W), np.float32)
     def bars(dim):
         k = np.zeros((T, 8), np.float32); k[:, dim] = 1.0
         return (k, np.zeros((T, 2), np.float32))
 
-    writer = _NullWriter()
-    orig = imageio.get_writer
-    imageio.get_writer = lambda *a, **k: writer
-    try:
-        _render_player_overlay(frames, frames, frames, frames,
-                               actions_gt=bars(0), actions_p1=bars(6), actions_p2=bars(7),
-                               n_observed=N_OBS, out_path=str(tmp_path / "p.mp4"))
-    finally:
-        imageio.get_writer = orig
-
-    grid = writer.frames[0]
-    h, w = grid.shape[0] // 2, grid.shape[1] // 2
-    gt_a, gen_a = grid[:h, :w], grid[:h, w:]
-    gt_b, gen_b = grid[h:, :w], grid[h:, w:]
-    assert not np.array_equal(gt_a, gen_a), "row 0's generation reused the GT action bars"
-    assert not np.array_equal(gt_b, gen_b), "row 1's generation reused the GT action bars"
-    assert not np.array_equal(gen_a, gen_b), "both arms drew the same bars"
-
-
-def test_arm_bars_falls_back_to_gt_when_nothing_was_generated():
-    gt = (np.ones((T, 8), np.float32), np.ones((T, 2), np.float32))
-    assert _arm_bars(None, None, gt) is gt
+    grid = _render(tmp_path, frames, frames, bars(0), bars(6))[0]
+    w = grid.shape[1] // 2
+    assert not np.array_equal(grid[:, :w], grid[:, w:]), "the generation reused the GT bars"

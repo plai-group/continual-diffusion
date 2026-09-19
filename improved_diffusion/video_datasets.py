@@ -10,7 +10,7 @@ from pathlib import Path
 import shutil
 from typing import Tuple
 from mpi4py import MPI
-from improved_diffusion.data_sampler import DistributedReplaySampler, DistributedOfflineSampler
+from improved_diffusion.data_sampler import DistributedReplaySampler, DistributedOfflineSampler, PlayerBlockSampler
 
 from .train_util import get_blob_logdir
 from .test_util import Protect
@@ -114,7 +114,8 @@ def get_data_path(dataset_name):
 
 def load_data(dataset_name, batch_size, T=None, deterministic=False, num_workers=1, return_dataset=False,
               resume_id='', seed=0, buffer_size=None, n_sequential=1, save_every=None, frame_range=(0, None),
-              action_encoding="raw", tokenizer_checkpoint=None, num_classes=0):
+              action_encoding="raw", tokenizer_checkpoint=None, num_classes=0,
+              player_homogeneous_batches=False):
     data_path = get_data_path(dataset_name)
     T = default_T_dict[dataset_name] if T is None else T
     shard = MPI.COMM_WORLD.Get_rank()
@@ -152,6 +153,8 @@ def load_data(dataset_name, batch_size, T=None, deterministic=False, num_workers
     if deterministic:
         sampler = DistributedReplaySampler(dataset, batch_size, buffer_size=buffer_size, seed=seed,
                                            n_sequential=n_sequential, save_args=dict(path=save_path, every=save_every))
+    elif player_homogeneous_batches:
+        sampler = PlayerBlockSampler(dataset, batch_size, seed=seed, save_args=dict(path=save_path, every=save_every))
     else:
         sampler = DistributedOfflineSampler(dataset, batch_size, seed=seed, save_args=dict(path=save_path, every=save_every))
 

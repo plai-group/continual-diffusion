@@ -245,6 +245,23 @@ class ContinuousDebugDataset(Dataset):
         player_id = torch.tensor(self._session_players[session_dir], dtype=torch.long)
         return frames, absolute_index_map, keypress, mouse, player_id
 
+    def window_players(self):
+        """Player index per window, aligned with __getitem__'s idx.
+
+        Exposed for PlayerBlockSampler, which needs every window's label up front to build
+        single-player batches. Uses searchsorted over the session boundaries rather than a
+        per-window scan: at 2M windows x 400 sessions the naive loop takes minutes."""
+        session_starts = np.asarray([fs for fs, _fe, _p in self.file_boundaries], dtype=np.int64)
+        session_players = np.asarray(
+            [self._session_players[path.parent.parent] for _fs, _fe, path in self.file_boundaries],
+            dtype=np.int64,
+        )
+        starts = np.fromiter(
+            (self._get_start_frame_index(i) for i in range(len(self))),
+            dtype=np.int64, count=len(self),
+        )
+        return session_players[np.searchsorted(session_starts, starts, side="right") - 1]
+
     def set_train(self):
         self.is_test = False
         self._initialize_file_index_mapping()

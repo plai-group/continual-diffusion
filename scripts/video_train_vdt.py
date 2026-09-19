@@ -135,6 +135,7 @@ def main():
         tokenizer_checkpoint=args.km_tokenizer_checkpoint,
         # >0 makes the dataset emit a player label per window, and refuse a corpus without one.
         num_classes=args.num_classes,
+        player_homogeneous_batches=args.player_homogeneous_batches,
     )
 
     # Issue-58: fixed prompt set from the plaicraft-debug validation recording.
@@ -247,6 +248,8 @@ def create_argparser():
         clip_grad=None,
         optimizer="adam",
         data_seed=0,
+        # True: every gradient step draws its whole batch from one player (issue #85).
+        player_homogeneous_batches=False,
         upper_frame_range=None,
         # Issue-58 plaicraft-debug validation set (empty db path disables it).
         debug_validation_db="",

@@ -88,16 +88,37 @@ class TimestepEmbedder(nn.Module):
         return t_emb
 
 
+# What the learned table actually reaches under cond_combine=add (||y||=1.52 at 410k on run
+# hu9hvxqv; init would be 0.506) -- a frozen table needs to start where training would take it.
+FROZEN_LABEL_SCALE = 1.5
+
+# DiT's shared std for the small init; 1.0 restores nn.Embedding's own default, which at
+# hidden_size=640 starts ||y|| at ~25 instead of 0.51 (plaicraft-debug#85).
+LABEL_INIT_STD = 0.02
+
+
 class LabelEmbedder(nn.Module):
     """
     Embeds class labels into vector representations. Also handles label dropout for classifier-free guidance.
     """
-    def __init__(self, num_classes, hidden_size, dropout_prob):
+    def __init__(self, num_classes, hidden_size, dropout_prob, freeze=False, frozen_scale=FROZEN_LABEL_SCALE):
         super().__init__()
         use_cfg_embedding = dropout_prob > 0
         self.embedding_table = nn.Embedding(num_classes + use_cfg_embedding, hidden_size)
         self.num_classes = num_classes
         self.dropout_prob = dropout_prob
+        self.freeze = freeze
+        if freeze:
+            self._freeze_orthogonal(frozen_scale)
+
+    def _freeze_orthogonal(self, scale):
+        """Deterministic (fixed seed, not the model seed) so every run freezes the same rows."""
+        n, d = self.embedding_table.weight.shape
+        g = torch.Generator().manual_seed(85)
+        q, _ = torch.linalg.qr(torch.randn(d, n, generator=g))
+        with torch.no_grad():
+            self.embedding_table.weight.copy_(q.T * scale)
+        self.embedding_table.weight.requires_grad_(False)
 
     def token_drop(self, labels, force_drop_ids=None):
         """
@@ -105,6 +126,9 @@ class LabelEmbedder(nn.Module):
         """
         if force_drop_ids is None:
             drop_ids = torch.rand(labels.shape[0], device=labels.device) < self.dropout_prob
+        elif isinstance(force_drop_ids, bool):  # whole-batch case; mirrors ActionEmbedder
+            drop_ids = torch.full((labels.shape[0],), force_drop_ids, dtype=torch.bool,
+                                  device=labels.device)
         else:
             drop_ids = force_drop_ids == 1
         labels = torch.where(drop_ids, self.num_classes, labels)
@@ -115,6 +139,13 @@ class LabelEmbedder(nn.Module):
         if (train and use_dropout) or (force_drop_ids is not None):
             labels = self.token_drop(labels, force_drop_ids)
         embeddings = self.embedding_table(labels)
+        if self.freeze and torch.is_grad_enabled():
+            # A frozen table gets no .grad, so grad/label/* would be blank on exactly the arms
+            # whose rows we most want to compare. Re-entering the graph at the embedding OUTPUT
+            # captures the gradient that WOULD have reached it, leaving the forward value and
+            # the frozen weights untouched (issue #85).
+            embeddings = embeddings.detach().requires_grad_(True)
+            self._grad_probe = (embeddings, labels.detach())
         return embeddings
 
 
@@ -308,6 +339,10 @@ class VDT(nn.Module):
         action_token_cond=False,
         generate_mouse=False,
         mouse_token_cond=False,
+        cond_combine="add",
+        label_embedding_frozen=False,
+        label_init_std=LABEL_INIT_STD,
+        label_frozen_scale=FROZEN_LABEL_SCALE,
     ):
         super().__init__()
         self.learn_sigma = learn_sigma
@@ -327,7 +362,32 @@ class VDT(nn.Module):
 
         self.x_embedder = PatchEmbed(input_size, patch_size, in_channels, hidden_size, bias=True)
         self.t_embedder = TimestepEmbedder(hidden_size)
-        self.y_embedder = LabelEmbedder(num_classes, hidden_size, class_dropout_prob)
+        # Ignored when frozen -- _freeze_orthogonal sets the rows and initialize_weights skips them.
+        self.label_init_std = label_init_std
+        self.y_embedder = LabelEmbedder(num_classes, hidden_size, class_dropout_prob,
+                                       freeze=label_embedding_frozen,
+                                       frozen_scale=label_frozen_scale)
+        # "add" folds y into t, so one shared adaLN W sees only their sum and the label rides
+        # whatever magnitude the timestep needs; concat gives y its own weight block (issue #85).
+        assert cond_combine in ("add", "concat", "concat_ln"), f"unknown cond_combine {cond_combine}"
+        self.cond_combine = cond_combine
+        if cond_combine != "add":
+            # Same shape as plaicraft-model-pi0's adaln_proj. The SiLU is the point: a purely
+            # linear projection of [t; y] is only a reparametrisation of t + y, since W_y @ y
+            # spans exactly what a free embedding table already spans.
+            self.cond_proj = nn.Sequential(
+                nn.Linear(2 * hidden_size, 2 * hidden_size),
+                nn.SiLU(),
+                nn.Linear(2 * hidden_size, hidden_size),
+            )
+        else:
+            self.cond_proj = None
+        if cond_combine == "concat_ln":
+            self.t_cond_norm = nn.LayerNorm(hidden_size)
+            self.y_cond_norm = nn.LayerNorm(hidden_size)
+        else:
+            self.t_cond_norm = None
+            self.y_cond_norm = None
         if action_dim > 0:
             if generate_actions or self.action_token_cond:
                 self.action_x_embedder = nn.Linear(action_dim, hidden_size, bias=True)
@@ -413,8 +473,15 @@ class VDT(nn.Module):
         if self.mouse_pos_embed is not None:
             nn.init.normal_(self.mouse_pos_embed, std=0.02)
 
-        # Initialize label embedding table:
-        nn.init.normal_(self.y_embedder.embedding_table.weight, std=0.02)
+        if self.cond_proj is not None:
+            for layer in self.cond_proj:
+                if isinstance(layer, nn.Linear):
+                    nn.init.xavier_uniform_(layer.weight)
+                    nn.init.constant_(layer.bias, 0)
+
+        # Initialize label embedding table: skip when frozen, or this clobbers the orthogonal rows.
+        if not self.y_embedder.freeze:
+            nn.init.normal_(self.y_embedder.embedding_table.weight, std=self.label_init_std)
 
         # Initialize timestep embedding MLP:
         nn.init.normal_(self.t_embedder.mlp[0].weight, std=0.02)
@@ -461,6 +528,7 @@ class VDT(nn.Module):
 
     def forward(self, x, timesteps=None, *, x0=None, frame_indices=None,
                 obs_mask=None, latent_mask=None, return_attn_weights=False,
+                y=None, force_label_drop=None,
                 actions=None, actions0=None, obs_action_mask=None, latent_action_mask=None,
                 force_action_drop=None,
                 mouse=None, mouse0=None, obs_mouse_mask=None, latent_mouse_mask=None, **kwargs):
@@ -474,7 +542,9 @@ class VDT(nn.Module):
             x = x * (1 - obs_mask) + x0 * obs_mask
 
         x = x.contiguous().view(-1, C, H, W)
-        y = torch.zeros(B, dtype=torch.long, device=x.device)
+        # At num_classes=0 the zeros default is exactly the pre-issue-85 behaviour.
+        y = (torch.zeros(B, dtype=torch.long, device=x.device) if y is None
+             else y.to(device=x.device, dtype=torch.long).reshape(B))
         patch_tokens = self.x_embedder(x) + self.pos_embed  # (B*T, N, D), where N = (H*W) / patch_size ** 2
         N = patch_tokens.shape[1]
 
@@ -506,18 +576,20 @@ class VDT(nn.Module):
             tokens = rearrange(tokens, '(b n) t m -> (b t) n m', b=B, t=T)
 
         t = self.t_embedder(timesteps)           # (B, D)
-        y = self.y_embedder(y, self.training)    # (B, D)
+        y = self.y_embedder(y, self.training, force_label_drop)  # (B, D)
 
         if not self.generate_actions and actions is not None and self.action_embedder is not None:
-            # `y` is kept here even though num_classes=0 makes it a learned
-            # constant: dropping it leaves y_embedder unreachable by backward,
-            # and an orphaned parameter with p.grad None crashed _log_grad_norm
-            # on the first optimizer step. It is expressively free -- the action
-            # embedder has its own bias -- so this costs nothing.
+            # At num_classes=0 `y` is an inert constant kept only so y_embedder stays reachable
+            # by backward (p.grad None once crashed _log_grad_norm); at 2 it is the player.
+            assert self.cond_combine == "add", "cond_combine != add is unsupported with action_embedder"
             c = t.unsqueeze(1) + y.unsqueeze(1) + \
                 self.action_embedder(actions, self.training, force_action_drop)  # (B, T, D)
-        else:
+        elif self.cond_combine == "add":
             c = t + y                         # (B, D)
+        else:
+            if self.cond_combine == "concat_ln":
+                t, y = self.t_cond_norm(t), self.y_cond_norm(y)
+            c = self.cond_proj(torch.cat([t, y], dim=-1))  # (B, D)
 
         for block in self.blocks:
             tokens = block(tokens, c)            # (B*T, N+1, D) or (B*T, N, D)
@@ -625,16 +697,20 @@ def get_1d_sincos_pos_embed_from_grid(embed_dim, pos):
 #################################################################################
 
 def VDT_L_2(**kwargs):
-    return VDT(depth=28, hidden_size=1152, num_heads=16, num_classes=0, **kwargs)
+    kwargs.setdefault('num_classes', 0)
+    return VDT(depth=28, hidden_size=1152, num_heads=16, **kwargs)
 
 def VDT_M_2(**kwargs):
-    return VDT(depth=12, hidden_size=1024, num_heads=16, num_classes=0, **kwargs)
+    kwargs.setdefault('num_classes', 0)
+    return VDT(depth=12, hidden_size=1024, num_heads=16, **kwargs)
 
 def VDT_SM_2(**kwargs):
-    return VDT(depth=12, hidden_size=640, num_heads=10, num_classes=0, **kwargs)
+    kwargs.setdefault('num_classes', 0)
+    return VDT(depth=12, hidden_size=640, num_heads=10, **kwargs)
 
 def VDT_S_2(**kwargs):
-    return VDT(depth=12, hidden_size=384, num_heads=6, num_classes=1000, **kwargs)
+    kwargs.setdefault('num_classes', 1000)
+    return VDT(depth=12, hidden_size=384, num_heads=6, **kwargs)
 
 
 VDT_models = {

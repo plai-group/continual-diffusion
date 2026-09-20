@@ -204,6 +204,7 @@ def vdt_model_and_diffusion_defaults():
         # "add" | "concat" | "concat_ln": how t and y are combined into c; see plaicraft-debug#85
         cond_combine="add",
         label_embedding_frozen=False,  # freeze y_embedder to fixed orthogonal rows; see plaicraft-debug#85
+        label_frozen_scale=1.5,  # row norm of those orthogonal rows; inert unless frozen
         label_init_std=0.02,  # DiT's small init; 1.0 is nn.Embedding's own default
         keypress_loss_weight=1.0,
         mouse_loss_weight=1.0,
@@ -245,6 +246,7 @@ def create_vdt_model_and_diffusion(
     class_dropout_prob=0.1,
     cond_combine="add",
     label_embedding_frozen=False,
+    label_frozen_scale=1.5,
     label_init_std=0.02,
 ):
     diffusion = create_gaussian_diffusion(
@@ -281,6 +283,7 @@ def create_vdt_model_and_diffusion(
         class_dropout_prob=class_dropout_prob,
         cond_combine=cond_combine,
         label_embedding_frozen=label_embedding_frozen,
+        label_frozen_scale=label_frozen_scale,
         label_init_std=label_init_std,
     )
     return model, diffusion

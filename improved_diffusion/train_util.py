@@ -769,6 +769,20 @@ class TrainLoop:
         dist.barrier()
 
 
+def _frozen_label_grad(model, w):
+    """Per-row gradient for a frozen table, summed from the probe LabelEmbedder leaves.
+
+    index_add_ over the batch labels reproduces exactly what embedding_table.weight.grad would
+    hold if the rows were trainable, so frozen and learned arms log comparable numbers."""
+    probe = getattr(getattr(model, "y_embedder", None), "_grad_probe", None)
+    if probe is None or probe[0].grad is None:
+        return None
+    emb, labels = probe
+    g = th.zeros_like(w)
+    g.index_add_(0, labels[labels < w.shape[0]], emb.grad.detach()[labels < w.shape[0]])
+    return g
+
+
 def log_label_grad(model, total_norm, prev=None):
     """Trace what the player-label embedding is actually being taught (plaicraft-debug#85).
 
@@ -794,6 +808,8 @@ def log_label_grad(model, total_norm, prev=None):
         logger.logkv_mean("param/label/delta", delta)
         logger.logkv_mean("param/label/rel_delta", delta / max(w.norm().item(), 1e-12))
     g = table.weight.grad
+    if g is None:
+        g = _frozen_label_grad(model, w)
     if g is not None:
         g = g.detach()
         norm = g.norm().item()

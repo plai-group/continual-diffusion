@@ -388,3 +388,56 @@ def test_a_single_row_table_logs_nothing(monkeypatch):
     seen = _logged(monkeypatch)
     assert train_util.log_label_grad(_model(num_classes=0), 1.0) is None
     assert seen == {}
+
+
+# ── a frozen table must still report its gradient (issue #85, fifth pass) ───────────────────
+
+def test_a_frozen_label_still_logs_its_gradient(monkeypatch):
+    """The frozen arms are the ones whose rows we most want to compare, so grad/label/* cannot
+    go blank just because requires_grad is False."""
+    seen = _logged(monkeypatch)
+    m = _model(num_classes=2, class_dropout_prob=0.0, label_embedding_frozen=True)
+    x, _ = _x()
+    m(x, th.zeros(2), y=th.tensor([0, 1]))[0].sum().backward()
+    train_util.log_label_grad(m, 1.0)
+    for key in ("grad/label/norm", "grad/label/frac", "grad/label/row0", "grad/label/row1"):
+        assert key in seen, key
+    assert seen["grad/label/norm"] > 0
+
+
+def test_the_probe_does_not_unfreeze_the_table():
+    m = _model(num_classes=2, class_dropout_prob=0.0, label_embedding_frozen=True)
+    w = m.y_embedder.embedding_table.weight
+    before = w.detach().clone()
+    x, _ = _x()
+    m(x, th.zeros(2), y=th.tensor([0, 1]))[0].sum().backward()
+    assert w.grad is None and not w.requires_grad
+    assert th.equal(w.detach(), before)
+
+
+def test_frozen_row_gradients_are_row_sparse(monkeypatch):
+    """Both batch items carry y=0, so row 1 must receive exactly nothing."""
+    seen = _logged(monkeypatch)
+    m = _model(num_classes=2, class_dropout_prob=0.0, label_embedding_frozen=True)
+    x, _ = _x()
+    m(x, th.zeros(2), y=th.tensor([0, 0]))[0].sum().backward()
+    train_util.log_label_grad(m, 1.0)
+    assert seen["grad/label/row0"] > 0
+    assert seen["grad/label/row1"] == 0.0
+
+
+def test_label_frozen_scale_sets_the_row_norm():
+    """The magnitude sweep rides on this: under cond_combine=add the row norm IS |y|/|t|."""
+    for scale in (1.5, 25.0, 100.0):
+        w = _model(num_classes=2, class_dropout_prob=0.0,
+                   label_embedding_frozen=True, label_frozen_scale=scale
+                   ).y_embedder.embedding_table.weight
+        assert th.allclose(w[0].norm(), th.tensor(scale), rtol=1e-4)
+        assert th.allclose(w[1].norm(), th.tensor(scale), rtol=1e-4)
+        assert abs(th.cosine_similarity(w[0], w[1], dim=0).item()) < 1e-5
+
+
+def test_label_frozen_scale_is_inert_when_not_frozen():
+    a = _model(num_classes=2, class_dropout_prob=0.0, label_init_std=1.0, label_frozen_scale=1.5)
+    b = _model(num_classes=2, class_dropout_prob=0.0, label_init_std=1.0, label_frozen_scale=99.0)
+    assert th.equal(a.y_embedder.embedding_table.weight, b.y_embedder.embedding_table.weight)

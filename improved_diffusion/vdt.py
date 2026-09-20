@@ -139,6 +139,13 @@ class LabelEmbedder(nn.Module):
         if (train and use_dropout) or (force_drop_ids is not None):
             labels = self.token_drop(labels, force_drop_ids)
         embeddings = self.embedding_table(labels)
+        if self.freeze and torch.is_grad_enabled():
+            # A frozen table gets no .grad, so grad/label/* would be blank on exactly the arms
+            # whose rows we most want to compare. Re-entering the graph at the embedding OUTPUT
+            # captures the gradient that WOULD have reached it, leaving the forward value and
+            # the frozen weights untouched (issue #85).
+            embeddings = embeddings.detach().requires_grad_(True)
+            self._grad_probe = (embeddings, labels.detach())
         return embeddings
 
 
@@ -335,6 +342,7 @@ class VDT(nn.Module):
         cond_combine="add",
         label_embedding_frozen=False,
         label_init_std=LABEL_INIT_STD,
+        label_frozen_scale=FROZEN_LABEL_SCALE,
     ):
         super().__init__()
         self.learn_sigma = learn_sigma
@@ -357,7 +365,8 @@ class VDT(nn.Module):
         # Ignored when frozen -- _freeze_orthogonal sets the rows and initialize_weights skips them.
         self.label_init_std = label_init_std
         self.y_embedder = LabelEmbedder(num_classes, hidden_size, class_dropout_prob,
-                                       freeze=label_embedding_frozen)
+                                       freeze=label_embedding_frozen,
+                                       frozen_scale=label_frozen_scale)
         # "add" folds y into t, so one shared adaLN W sees only their sum and the label rides
         # whatever magnitude the timestep needs; concat gives y its own weight block (issue #85).
         assert cond_combine in ("add", "concat", "concat_ln"), f"unknown cond_combine {cond_combine}"

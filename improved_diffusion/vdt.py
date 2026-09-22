@@ -343,6 +343,7 @@ class VDT(nn.Module):
         label_embedding_frozen=False,
         label_init_std=LABEL_INIT_STD,
         label_frozen_scale=FROZEN_LABEL_SCALE,
+        independent_action_t=False,
     ):
         super().__init__()
         self.learn_sigma = learn_sigma
@@ -354,6 +355,8 @@ class VDT(nn.Module):
         self.action_dim = action_dim
         self.mouse_dim = mouse_dim
         self.generate_actions = generate_actions
+        # Lets the action token's noise level be sampled independently of the video's (issue #85).
+        self.independent_action_t = bool(independent_action_t)
         # Token conditioning WITHOUT generation: the action rides in the sequence like a patch, but is never noised and carries no loss.
         self.action_token_cond = bool(action_token_cond) and not generate_actions
         # Mouse's mode is fully independent of keypress's (its own generate/token-cond pair).
@@ -530,7 +533,7 @@ class VDT(nn.Module):
                 obs_mask=None, latent_mask=None, return_attn_weights=False,
                 y=None, force_label_drop=None,
                 actions=None, actions0=None, obs_action_mask=None, latent_action_mask=None,
-                force_action_drop=None,
+                force_action_drop=None, action_timesteps=None,
                 mouse=None, mouse0=None, obs_mouse_mask=None, latent_mouse_mask=None, **kwargs):
         """
         Forward pass of VDT.
@@ -558,6 +561,10 @@ class VDT(nn.Module):
             if obs_action_mask is not None and actions0 is not None:
                 actions = actions * (1 - obs_action_mask) + actions0 * obs_action_mask
             action_tokens = self.action_x_embedder(actions)  # (B, T, D)
+            if self.independent_action_t:
+                # Broadcast (B,1,D) over T: the action token sees its own noise level, not the video's.
+                action_tokens = action_tokens + self.t_embedder(
+                    action_timesteps if action_timesteps is not None else timesteps).unsqueeze(1)
             action_tokens = rearrange(action_tokens, 'b t d -> (b t) 1 d') + self.action_pos_embed  # (B*T, 1, D)
             tokens.append(action_tokens)
         if use_mouse_tokens:

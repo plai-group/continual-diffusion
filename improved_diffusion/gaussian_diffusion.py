@@ -1055,6 +1055,10 @@ class GaussianDiffusion:
                 getattr(model, 'generate_mouse', False)
                 or getattr(getattr(model, 'module', None), 'generate_mouse', False)
             )
+            independent_action_t = (
+                getattr(model, 'independent_action_t', False)
+                or getattr(getattr(model, 'module', None), 'independent_action_t', False)
+            )
             is_action_gen = actions_in is not None and (
                 generates_actions or 'obs_action_mask' in model_kwargs or 'actions0' in model_kwargs
             )
@@ -1068,9 +1072,13 @@ class GaussianDiffusion:
             if ('obs_action_mask' not in call_kwargs or 'obs_mouse_mask' not in call_kwargs) and 'obs_mask' in call_kwargs:
                 om = call_kwargs['obs_mask']
                 shared_act_mask = frame_mask_to_action_mask(om) if isinstance(om, th.Tensor) else om
+            t_a = t
             if is_action_gen:
                 noise_act = th.randn_like(actions_in)
-                act_t = self.q_sample(actions_in, t, noise=noise_act)
+                if independent_action_t:
+                    t_a = th.randint(0, self.num_timesteps, t.shape, device=t.device)
+                    call_kwargs['action_timesteps'] = self._scale_timesteps(t_a)
+                act_t = self.q_sample(actions_in, t_a, noise=noise_act)
                 call_kwargs['actions'] = act_t
                 call_kwargs['actions0'] = actions_in
                 if 'obs_action_mask' not in call_kwargs:
@@ -1125,7 +1133,7 @@ class GaussianDiffusion:
             if act_out is not None and is_action_gen:
                 target_act = {
                     ModelMeanType.PREVIOUS_X: self.q_posterior_mean_variance(
-                        x_start=actions_in, x_t=act_t, t=t
+                        x_start=actions_in, x_t=act_t, t=t_a
                     )[0],
                     ModelMeanType.START_X: actions_in,
                     ModelMeanType.EPSILON: noise_act,

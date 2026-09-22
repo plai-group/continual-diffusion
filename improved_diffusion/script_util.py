@@ -206,6 +206,7 @@ def vdt_model_and_diffusion_defaults():
         label_embedding_frozen=False,  # freeze y_embedder to fixed orthogonal rows; see plaicraft-debug#85
         label_frozen_scale=1.5,  # row norm of those orthogonal rows; inert unless frozen
         label_init_std=0.02,  # DiT's small init; 1.0 is nn.Embedding's own default
+        independent_action_t=False,  # sample the action token's noise level separately from the video's; see plaicraft-debug#85
         keypress_loss_weight=1.0,
         mouse_loss_weight=1.0,
         action_quantization="none",  # "none" | "codebook" | "fsq"; see plaicraft-debug#77, #80
@@ -248,6 +249,7 @@ def create_vdt_model_and_diffusion(
     label_embedding_frozen=False,
     label_frozen_scale=1.5,
     label_init_std=0.02,
+    independent_action_t=False,
 ):
     diffusion = create_gaussian_diffusion(
         steps=diffusion_steps,
@@ -285,6 +287,7 @@ def create_vdt_model_and_diffusion(
         label_embedding_frozen=label_embedding_frozen,
         label_frozen_scale=label_frozen_scale,
         label_init_std=label_init_std,
+        independent_action_t=independent_action_t,
     )
     return model, diffusion
 

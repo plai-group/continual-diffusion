@@ -12,6 +12,7 @@ import torch
 from improved_diffusion.vdt import VDT_S_2
 from improved_diffusion.script_util import (
     create_vdt_model_and_diffusion,
+    create_gaussian_diffusion,
     vdt_model_and_diffusion_defaults,
 )
 
@@ -141,3 +142,87 @@ def test_adaln_action_conditioning_still_refuses_concat_ln():
     with pytest.raises(AssertionError, match="cond_combine"):
         m(torch.randn(B, T, C, H, W), timesteps=torch.tensor([50, 150]),
           actions=torch.randn(B, T, ACTION_DIM), y=torch.zeros(B, dtype=torch.long))
+
+
+# ── independent_action_t: the action token's own noise level (issue #85) ───────────────────
+
+def _action_gen_model(**kw):
+    """generate_actions=True with the action_head de-zeroed, or act_out is vacuously constant."""
+    m = _model(generate_actions=True, **kw).eval()
+    torch.nn.init.normal_(m.action_head.linear.weight, std=0.1)
+    torch.nn.init.normal_(m.action_head.adaLN_modulation[-1].weight, std=0.1)
+    return m
+
+
+def test_independent_action_t_changes_act_out_with_action_timesteps():
+    m = _action_gen_model(independent_action_t=True)
+    x, t = torch.randn(B, T, C, H, W), torch.tensor([50, 150])
+    acts = torch.randn(B, T, ACTION_DIM)
+    with torch.no_grad():
+        a = m(x, timesteps=t, actions=acts, action_timesteps=torch.tensor([10, 20]))[1][0]
+        b = m(x, timesteps=t, actions=acts, action_timesteps=torch.tensor([900, 950]))[1][0]
+    assert not torch.allclose(a, b)
+
+
+def test_independent_action_t_none_matches_passing_video_timesteps():
+    m = _action_gen_model(independent_action_t=True)
+    x, t = torch.randn(B, T, C, H, W), torch.tensor([50, 150])
+    acts = torch.randn(B, T, ACTION_DIM)
+    with torch.no_grad():
+        a = m(x, timesteps=t, actions=acts)[1][0]
+        b = m(x, timesteps=t, actions=acts, action_timesteps=t)[1][0]
+    assert torch.allclose(a, b)
+
+
+def test_independent_action_t_off_ignores_action_timesteps():
+    m = _action_gen_model()  # independent_action_t defaults False
+    x, t = torch.randn(B, T, C, H, W), torch.tensor([50, 150])
+    acts = torch.randn(B, T, ACTION_DIM)
+    with torch.no_grad():
+        a = m(x, timesteps=t, actions=acts)[1][0]
+        b = m(x, timesteps=t, actions=acts, action_timesteps=torch.tensor([900, 950]))[1][0]
+    assert torch.allclose(a, b)
+
+
+class _CapturingActionModel:
+    """Stub standing in for VDT: records the kwargs training_losses calls it with."""
+    def __init__(self, action_dim, independent_action_t):
+        self.generate_actions = True
+        self.action_dim = action_dim
+        self.independent_action_t = independent_action_t
+        self.calls = []
+
+    def __call__(self, x_t, timesteps=None, **kwargs):
+        self.calls.append(dict(timesteps=timesteps, **kwargs))
+        actions = kwargs["actions"]
+        return torch.zeros_like(x_t), (torch.zeros_like(actions), None)
+
+
+def _stub_diffusion():
+    return create_gaussian_diffusion(
+        steps=100, timestep_respacing="",
+        diffusion_space_kwargs=dict(diffusion_space="pixel", pre_encoded=False))
+
+
+def test_training_losses_passes_independent_action_timesteps():
+    diffusion = _stub_diffusion()
+    N = 64
+    x = torch.randn(N, 1, 3, 4, 4)
+    actions = torch.randn(N, 1, 5)
+    t = torch.randint(0, 100, (N,))
+    model = _CapturingActionModel(action_dim=5, independent_action_t=True)
+    diffusion.training_losses(model, x, t, model_kwargs={"actions": actions})
+    call = model.calls[0]
+    assert "action_timesteps" in call
+    assert not torch.equal(call["action_timesteps"], call["timesteps"])
+
+
+def test_training_losses_omits_action_timesteps_when_flag_off():
+    diffusion = _stub_diffusion()
+    N = 64
+    x = torch.randn(N, 1, 3, 4, 4)
+    actions = torch.randn(N, 1, 5)
+    t = torch.randint(0, 100, (N,))
+    model = _CapturingActionModel(action_dim=5, independent_action_t=False)
+    diffusion.training_losses(model, x, t, model_kwargs={"actions": actions})
+    assert "action_timesteps" not in model.calls[0]

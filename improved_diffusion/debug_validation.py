@@ -1021,7 +1021,9 @@ def _player_metrics(gen_p1, gen_p2, gt_p1, gt_p2, click_mask=None):
             return {}
         matched = 0.5 * (_player_l2(g1, t1) + _player_l2(g2, t2))
         crossed = 0.5 * (_player_l2(g1, t2) + _player_l2(g2, t1))
-        return {"l2_matched": matched, "l2_crossed": crossed, "margin": crossed - matched}
+        # |margin| is separation regardless of which row it bound to; the sign is the grounding.
+        return {"l2_matched": matched, "l2_crossed": crossed, "margin": crossed - matched,
+                "margin_abs": abs(crossed - matched)}
 
     out = dict(agg(slice(None)))
     if click_mask is not None and bool(click_mask.any()):
@@ -1209,8 +1211,8 @@ def run_player_validation(model, diffusion, valset, device, out_dir, step=0, chu
     except Exception as e:
         fails.record("player_swap_probe", step, e)
 
-    for key in ("l2_matched", "l2_crossed", "margin",
-                "l2_matched_click", "l2_crossed_click", "margin_click"):
+    for key in ("l2_matched", "l2_crossed", "margin", "margin_abs",
+                "l2_matched_click", "l2_crossed_click", "margin_click", "margin_abs_click"):
         vals = [r[key] for r in per_row if key in r]
         if vals:
             agg[f"val/player/{key}"] = float(np.mean(vals))

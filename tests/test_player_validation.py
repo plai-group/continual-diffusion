@@ -105,6 +105,15 @@ def test_margin_is_zero_when_the_model_ignores_the_player():
     assert out["margin"] == pytest.approx(0.0, abs=1e-6)
 
 
+def test_margin_abs_scores_an_inverted_player_map_as_separation():
+    """A consistently swapped y->player map is separation with the wrong sign; |margin| keeps it."""
+    gt_a, gt_b = _arms()
+    right, wrong = _player_metrics(gt_a, gt_b, gt_a, gt_b), _player_metrics(gt_b, gt_a, gt_a, gt_b)
+    assert wrong["margin"] < 0 < right["margin"]
+    assert wrong["margin_abs"] == pytest.approx(right["margin_abs"])
+    assert right["margin_abs"] == pytest.approx(right["margin"])
+
+
 def test_click_variants_are_restricted_to_click_frames():
     gt_a, gt_b = _arms()
     mask = th.zeros(10, dtype=th.bool)

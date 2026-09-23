@@ -171,3 +171,14 @@ def test_km_codes_skip_scatter_for_raw79(tmp_path, monkeypatch):
     )
     assert codes.shape == (2, da.KM_CODE_DIM)
     assert mouse.shape == (2, 0)
+
+
+def test_km_codes_are_identical_whether_or_not_the_session_is_chunked(tmp_path, monkeypatch):
+    """Chunking the tokenizer along ticks (to fit hours-long sessions on the GPU) must not change a code."""
+    events = [("87", 0, 5 * da.TICK_MS), ("32", 3 * da.TICK_MS, 9 * da.TICK_MS)]
+    whole = np.asarray(da.load_or_build(_make_session_dir_79(tmp_path / "a", n_ticks=10, key_events=events),
+                                        action_encoding="km_fsq", action_builder="raw79")[0])
+    monkeypatch.setattr(da, "KM_ENCODE_CHUNK_TICKS", 3)
+    chunked = np.asarray(da.load_or_build(_make_session_dir_79(tmp_path / "b", n_ticks=10, key_events=events),
+                                          action_encoding="km_fsq", action_builder="raw79")[0])
+    assert np.array_equal(whole, chunked)

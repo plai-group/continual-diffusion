@@ -20,6 +20,7 @@ SUBBIN_RULE_VERSION = "2"  # v2: symlog mouse in load_or_build's raw branch + co
 TICK_MS = 80
 SUBBIN_MS = 10
 SUBBINS_PER_TICK = TICK_MS // SUBBIN_MS  # 8, matches the km tokenizer's block_size
+KM_ENCODE_CHUNK_TICKS = 4096  # one-shot encode of an hours-long PLAICraft session OOMs a 10GB GPU
 
 # Fixed key order for dims 0-5: [w, a, s, d, space, shift]
 _KEY_IDS = ["87", "65", "83", "68", "32", "340"]
@@ -424,10 +425,15 @@ def _load_or_build_km_codes(session_dir, tokenizer_checkpoint, device, action_bu
     key_press_t = torch.from_numpy(key_sub).float()
     key_press = (key_press_t if action_builder == "raw79" else scatter_keypress(key_press_t)).unsqueeze(0).to(device)
     mouse_movement = torch.from_numpy(mouse_sub).float().unsqueeze(0).to(device)
+    step = KM_ENCODE_CHUNK_TICKS * SUBBINS_PER_TICK
+
+    def encode(i):  # one context block before each chunk keeps the tokenizer's key-edge features exact
+        lo = max(i - SUBBINS_PER_TICK, 0)
+        q = tokenizer._quantize(tokenizer._encode_prequantized(key_press[:, lo:i + step], mouse_movement[:, lo:i + step])[0])[1]
+        return q[0, (i - lo) // SUBBINS_PER_TICK:].reshape(-1, KM_CODE_DIM).cpu().numpy()
+
     with torch.no_grad():
-        prequantized, _frame_mask, _block_mask = tokenizer._encode_prequantized(key_press, mouse_movement)
-        _token_ids, quantized_codes = tokenizer._quantize(prequantized)
-    codes = quantized_codes[0].reshape(n_ticks, KM_CODE_DIM).cpu().numpy().astype(np.float32)
+        codes = np.concatenate([encode(i) for i in range(0, key_press.shape[1], step)]).astype(np.float32)
 
     tmp_codes = codes_path.with_name(f".{codes_path.stem}.{os.getpid()}.tmp.npy")
     np.save(tmp_codes, codes)

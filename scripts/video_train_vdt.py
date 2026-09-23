@@ -136,6 +136,7 @@ def main():
         # >0 makes the dataset emit a player label per window, and refuse a corpus without one.
         num_classes=args.num_classes,
         player_homogeneous_batches=args.player_homogeneous_batches,
+        global_database_path=args.global_database_path or None,
     )
 
     # Issue-58: fixed prompt set from the plaicraft-debug validation recording.
@@ -265,6 +266,7 @@ def create_argparser():
         # Warm start from a different architecture: step counter stays 0, optimizer/EMA stay fresh (--resume_checkpoint loads strict and reads the step from the filename).
         init_from_checkpoint="",
         km_tokenizer_checkpoint=str(KM_TOKENIZER_DEFAULT_CHECKPOINT),
+        global_database_path="",  # plaicraft_morgan: player-name lookup DB; "" -> dataset's own default
     )
     defaults.update(model_and_diffusion_defaults(model_type='vdt'))
     defaults.pop("keypress_loss_weight")  # sentinel-resolved post-parse, once action_encoding is known (plaicraft-debug#80)

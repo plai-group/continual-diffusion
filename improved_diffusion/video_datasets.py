@@ -19,6 +19,7 @@ from .plaicraft_custom_dataset import PlaicraftCustomDataset
 from .car_dataset import ContinuousCarDataset, ChunkedCarDataset, SpacedCarDataset, ContinuousDriveDataset, ChunkedDriveDataset, SpacedDriveDataset
 from .egolife_dataset import ContinuousEgoLifeDataset, SpacedEgoLifeDataset, ChunkedEgoLifeDataset
 from .debug_dataset import ContinuousDebugDataset, ChunkedDebugDataset, SpacedDebugDataset
+from .plaicraft_morgan_dataset import PlaicraftDataset as PlaicraftMorganDataset
 
 
 
@@ -42,6 +43,10 @@ video_data_paths_dict = {
         "DEBUG_TOY_ROOT",
         "/ubc/cs/research/plai-scratch/ctardy/projects/plaicraft-data-preprocessing/processed/vdt_corpus/debug_24x40",
     ),
+    "plaicraft_morgan":    os.environ.get(
+        "PLAICRAFT_MORGAN_ROOT",
+        "/ubc/cs/research/plai-scratch/ctardy/projects/plaicraft-data-preprocessing/processed/vdt_corpus/plaicraft_morgan_24x40",
+    ),
 }
 
 default_T_dict = {
@@ -60,6 +65,7 @@ default_T_dict = {
     "egolife":             20,
     "streaming_egolife":   20,
     "debug_toy":           20,
+    "plaicraft_morgan":    20,
 }
 
 default_image_size_dict = {
@@ -78,6 +84,7 @@ default_image_size_dict = {
     "egolife":             64,
     "streaming_egolife":   64,
     "debug_toy":           40,
+    "plaicraft_morgan":    40,
 }
 
 default_full_image_size_dict = {
@@ -96,6 +103,7 @@ default_full_image_size_dict = {
     "egolife":             (64, 64),
     "streaming_egolife":   (64, 64),
     "debug_toy":           (24, 40),
+    "plaicraft_morgan":    (24, 40),
 }
 
 eval_dataset_configs = {"default": "default", "continuous": "continuous", "chunked": "chunked"}
@@ -115,7 +123,7 @@ def get_data_path(dataset_name):
 def load_data(dataset_name, batch_size, T=None, deterministic=False, num_workers=1, return_dataset=False,
               resume_id='', seed=0, buffer_size=None, n_sequential=1, save_every=None, frame_range=(0, None),
               action_encoding="raw", tokenizer_checkpoint=None, num_classes=0,
-              player_homogeneous_batches=False):
+              player_homogeneous_batches=False, global_database_path=None):
     data_path = get_data_path(dataset_name)
     T = default_T_dict[dataset_name] if T is None else T
     shard = MPI.COMM_WORLD.Get_rank()
@@ -129,6 +137,13 @@ def load_data(dataset_name, batch_size, T=None, deterministic=False, num_workers
         dataset = ContinuousBaseDataset(data_path, T=T, seed=0, frame_range=frame_range)
     elif "wmaze" in dataset_name:
         dataset = ContinuousBaseDataset(data_path, T=T, seed=0, frame_range=frame_range)
+    elif "plaicraft_morgan" in dataset_name:
+        morgan_kwargs = dict(window_length=T, frame_range=frame_range,
+                             action_encoding=action_encoding, tokenizer_checkpoint=tokenizer_checkpoint,
+                             num_classes=num_classes)
+        if global_database_path:
+            morgan_kwargs["global_database_path"] = global_database_path
+        dataset = PlaicraftMorganDataset(data_path, **morgan_kwargs)
     elif "plaicraft" in dataset_name:
         dataset = ContinuousPlaicraftDataset(data_path, window_length=T,
                                              player_names_train=["Alex"],
@@ -175,12 +190,20 @@ def load_data(dataset_name, batch_size, T=None, deterministic=False, num_workers
 
 def get_eval_dataset(dataset_name, T=None, seed=0, train=False, eval_dataset_config=eval_dataset_configs["default"],
                      frame_range=(0, None), spacing_kwargs=dict(n_data=None), custom_clip_path=None,
-                     action_encoding="raw", tokenizer_checkpoint=None, num_classes=0):
+                     action_encoding="raw", tokenizer_checkpoint=None, num_classes=0,
+                     global_database_path=None):
     """
     """
     data_path = get_data_path(dataset_name)
     T = default_T_dict[dataset_name] if T is None else T
-    if "ball_stn" in dataset_name:
+    if "plaicraft_morgan" in dataset_name:
+        morgan_kwargs = dict(dataset_path=data_path, window_length=T, frame_range=frame_range,
+                             action_encoding=action_encoding, tokenizer_checkpoint=tokenizer_checkpoint,
+                             num_classes=num_classes)
+        if global_database_path:
+            morgan_kwargs["global_database_path"] = global_database_path
+        dataset = PlaicraftMorganDataset(**morgan_kwargs)
+    elif "ball_stn" in dataset_name:
         shared_args = dict(dataset_path=data_path, T=T, seed=seed, frame_range=frame_range)
         if eval_dataset_config == eval_dataset_configs["continuous"]:
             dataset = ContinuousBaseDataset(**shared_args)

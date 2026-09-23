@@ -62,3 +62,19 @@ def test_decode_latents_chunked_divides_by_latent_scale():
     latents = torch.ones(1, 4, 2, 2) * dd._LATENT_SCALE
     dd.decode_latents_chunked(vae, latents, chunk_size=10)
     assert torch.allclose(vae.seen, torch.ones(1, 4, 2, 2))
+
+
+def test_render_clip_decodes_latents_and_draws_one_frame_per_tick(tmp_path, monkeypatch):
+    import h5py
+    import scripts.render_session_overlay as rso
+    sd = tmp_path / "abcd"
+    (sd / "encoded_video_hdf5").mkdir(parents=True)
+    with h5py.File(sd / "encoded_video_hdf5" / "abcd.hdf5", "w") as f:
+        f.create_dataset("frames", data=np.zeros((12, 4, 24, 40), np.float16))
+    monkeypatch.setattr(rso, "load_or_build_raw", lambda d, action_builder: (np.zeros((12, 8)), np.zeros((12, 2))))
+    written = []
+    monkeypatch.setattr(rso.imageio, "get_writer", lambda *a, **k: type("W", (), {
+        "append_data": lambda s, im: written.append(im.shape), "close": lambda s: None})())
+    vae = _StubVAE()
+    assert rso.render_clip(sd, 2, 5, tmp_path / "o.mp4", vae=vae) == 5
+    assert vae.calls and len(written) == 5 and written[0][2] == 3

@@ -926,6 +926,19 @@ def run_debug_validation(model, diffusion, valset, device, out_dir,
                         logger.logkv(f"val/swap_overlay/{slug}", wandb.Video(str(mp4_swap)), distributed=False)
                 except Exception as e:
                     fails.record(f"swap_row_{row['num']}", step, e)
+            # No swap overlay for this row (plaicraft-debug#93): still show GT beside the model's own rollout.
+            if log_videos and not (swap_test and row_has_swap) and keypress_raw_chunk is not None:
+                try:
+                    gt_bars = (keypress_raw_chunk[j].cpu().numpy(), mouse_raw_chunk[j].cpu().numpy())
+                    gen_bars = ((p_key_chunk[j].cpu().numpy(), p_mouse_chunk[j].cpu().numpy())
+                                if p_key_chunk is not None and p_mouse_chunk is not None else gt_bars)
+                    mp4 = out_dir / f"step{step}_{slug}_gen.mp4"
+                    _render_panels((gt.cpu().numpy(), pred.cpu().numpy()), (gt_bars, gen_bars),
+                                   ["GT", "GEN"], n_obs, str(mp4), ncols=2)
+                    import wandb
+                    logger.logkv(f"val/overlay/{slug}", wandb.Video(str(mp4)), distributed=False)
+                except Exception as e:
+                    fails.record(f"overlay_row_{row['num']}", step, e)
 
     # Key naming mirrors plaicraft-model-pi0's `val/video/*` so the same wandb
     # panels line up against the DiT runs.

@@ -73,8 +73,9 @@ class PlaicraftDataset(ContinuousDebugDataset):
         matches = sorted(hdf5_dir.glob("*.hdf5"))
         if matches:
             with h5py.File(matches[0], "r") as f:
-                if "fps" in f.attrs:
-                    return float(f.attrs["fps"])
+                attrs = f["frames"].attrs if "fps" in f["frames"].attrs else f.attrs  # encoder stamps the dataset
+                if "fps" in attrs:
+                    return float(attrs["fps"])
         # Real PLAICraft DB, read-only fallback -- the fps column, never other_metadata.
         con = _ro_connect(session_dir / f"{session_dir.name}.db")
         try:

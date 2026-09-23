@@ -14,7 +14,7 @@ def _make_session(corpus_dir, sid, n_ticks=4, fps=12.5, session_fps=30.0, other_
     (session_dir / "encoded_video_hdf5").mkdir(parents=True)
     with h5py.File(session_dir / "encoded_video_hdf5" / f"{sid}.hdf5", "w") as f:
         f.create_dataset("frames", data=np.zeros((n_ticks, 4, 24, 40), dtype=np.float16))
-        f.attrs["fps"] = fps
+        f["frames"].attrs["fps"] = fps  # where the #93 encoder stamps it
     con = sqlite3.connect(str(session_dir / f"{sid}.db"))
     con.execute("CREATE TABLE session (fps REAL, other_metadata TEXT)")
     con.execute(

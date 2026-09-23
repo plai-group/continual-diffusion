@@ -48,8 +48,8 @@ SUBBINS_PER_TICK = debug_actions.SUBBINS_PER_TICK
 
 # LPIPS runs a VGG backbone with five 2x downsamples; a 24x40 frame collapses to
 # nothing by the last stage. Upsample (nearest, to avoid inventing detail that
-# is not in the source pixels) before scoring.
-LPIPS_UPSAMPLE = 4
+# is not in the source pixels) to LPIPS_MIN_SIDE before scoring; larger (VAE-decoded) frames pass as-is.
+LPIPS_MIN_SIDE = 96
 
 
 class DebugValidationSet:
@@ -200,8 +200,9 @@ class _Metrics:
             "rmse": float(th.sqrt(th.mean((p01 - g01) ** 2))),
             "l1": float(th.mean(th.abs(p01 - g01))),
         }
-        if LPIPS_UPSAMPLE > 1:
-            up = lambda t: th.nn.functional.interpolate(t, scale_factor=LPIPS_UPSAMPLE, mode="nearest")
+        scale = max(1, LPIPS_MIN_SIDE // min(pred.shape[-2:]))  # 4 for debug's 24x40, 1 for 192x320
+        if scale > 1:
+            up = lambda t: th.nn.functional.interpolate(t, scale_factor=scale, mode="nearest")
             pred, gt = up(pred), up(gt)
         out["lpips"] = float(self.lpips(pred, gt).mean())
         return out

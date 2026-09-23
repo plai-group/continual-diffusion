@@ -726,8 +726,11 @@ class TrainLoop:
             )
             if isinstance(samples, tuple):
                 samples, _ = samples
-            # NOTE: Don't decode latent samples
             samples = (samples.cpu() * latent_mask + batch * obs_mask).float()
+            if self.diffusion.diffusion_space == "latent":
+                # VAE-decode before the marker/uint8 conversion below, both of which assume
+                # 3-channel [-1, 1] pixels (plaicraft-debug#93 B3).
+                samples = self.decode(samples.to(dist_util.dev())).cpu()
             _mark_as_observed(samples[:, :n_obs])
             samples = ((samples + 1) * 127.5).clamp(0, 255).to(th.uint8).cpu().numpy()
             for i, video in enumerate(samples):
@@ -737,12 +740,13 @@ class TrainLoop:
             # same 10/10 split the model was trained on. Never let it kill a run.
             if self.debug_validation is not None:
                 from .debug_validation import run_debug_validation
-                valset, val_out_dir, per_task = self.debug_validation
+                valset, val_out_dir, per_task, swap_test = self.debug_validation
                 try:
                     run_debug_validation(
                         self.model, self.diffusion, valset, dist_util.dev(),
                         out_dir=val_out_dir, step=self.step,
                         per_task_scalars=per_task, log_videos=log_videos,
+                        swap_test=swap_test,
                     )
                 except Exception as e:
                     print(f"[debug_validation] skipped at step {self.step}: {e!r}")

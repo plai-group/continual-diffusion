@@ -74,7 +74,9 @@ class CorpusValidationSet:
                 prompt=name,
                 test_type="exercise",
                 session_id=session_ids[i],
-                swap_kind=ex["swap_kind"],
+                # None (plaicraft-debug#93): a manifest with no swap package at all, e.g.
+                # plaicraft_morgan's -- run_debug_validation skips the swap test per row.
+                swap_kind=ex.get("swap_kind"),
                 swap_dim=ex.get("swap_dim"),
                 swap_counterpart_dim=ex.get("swap_counterpart_dim"),
                 window_start=window_start,

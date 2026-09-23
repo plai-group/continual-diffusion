@@ -34,6 +34,15 @@ from .decode_debug import _to_uint8_frame, _overlay_frame, DECODE_VIDEO_FPS
 VIDEO_FPS = 12.5  # plaicraft-debug#80: the corpus's session.fps
 MS_PER_FRAME = 1000.0 / VIDEO_FPS
 
+
+def _decode_if_latent(diffusion, video):
+    """VAE-decode latents to pixel space before any overlay, FVD or pixel metric
+    (plaicraft-debug#93 B3); a no-op for diffusion_space=="pixel", so existing debug-world
+    validation is byte-identical."""
+    if getattr(diffusion, "diffusion_space", "pixel") != "latent":
+        return video
+    return diffusion.decode(video)
+
 # plaicraft-debug#80: a tick's raw action broadcasts across its 8 sub-bins when live-encoding an intervention.
 SUBBINS_PER_TICK = debug_actions.SUBBINS_PER_TICK
 
@@ -630,7 +639,7 @@ def run_debug_validation(model, diffusion, valset, device, out_dir,
     # CorpusValidationSet (issue #81) rows carry swap_kind: their swap test targets
     # only the single boundary action, not the whole generated region.
     is_corpus_valset = bool(valset.rows) and "swap_kind" in valset.rows[0]
-    x0_all = valset.load_all()  # (N, T, 3, H, W)
+    x0_all = valset.load_all()  # (N, T, 3, H, W) pixel space, or (N, T, 4, H, W) latents
     n_rows = x0_all.shape[0]
     if actions and action_conditioned:
         keypress_all, mouse_all = valset.load_all_actions()  # native encoding: model conditioning
@@ -707,19 +716,24 @@ def run_debug_validation(model, diffusion, valset, device, out_dir,
         samples = samples.to(device)
         # Keep the observed half exactly as given; only the generated half is model output.
         samples = samples * latent_mask + x0 * obs_mask
+        # x0/samples stay latent (the swap-test block below re-samples from them); these
+        # decoded copies are what every downstream metric, FVD feature and overlay reads.
+        x0_px = _decode_if_latent(diffusion, x0)
+        samples_px = _decode_if_latent(diffusion, samples)
 
         # x0/samples are rebound each iteration, so features must be taken here, not at aggregation.
         if fvd_repeats:
             try:
                 extract = frechet_video_distance._get_video_features(device)
-                feats_real.append(extract(x0[:, n_obs:]))
-                feats_fake.append(extract(samples[:, n_obs:]))
+                feats_real.append(extract(x0_px[:, n_obs:]))
+                feats_fake.append(extract(samples_px[:, n_obs:]))
                 # Extra fake draws only: widens the generated side and is what makes kvd_std
                 # informative (it is degenerate when both sides are the same size).
                 for _ in range(fvd_repeats - 1):
                     extra = _sample_chunk()
                     extra = (extra[0] if isinstance(extra, tuple) else extra).to(device)
-                    feats_fake.append(extract((extra * latent_mask + x0 * obs_mask)[:, n_obs:]))
+                    extra_px = _decode_if_latent(diffusion, extra * latent_mask + x0 * obs_mask)
+                    feats_fake.append(extract(extra_px[:, n_obs:]))
             except Exception as e:
                 fails.record("fvd_features", step, e)
                 """Drop what was collected: a pool truncated mid-loop is indistinguishable
@@ -754,7 +768,7 @@ def run_debug_validation(model, diffusion, valset, device, out_dir,
 
         for j in range(b):
             row = valset.rows[lo + j]
-            pred, gt = samples[j], x0[j]
+            pred, gt = samples_px[j], x0_px[j]  # pixel space; x0/samples (latent) are for sampling only
 
             # frame 10 == first generated frame: the cleanest world-reconstruction read
             m_next = metrics(pred[n_obs:n_obs + 1], gt[n_obs:n_obs + 1])
@@ -796,7 +810,11 @@ def run_debug_validation(model, diffusion, valset, device, out_dir,
 
             # The swap test (acceptance criterion): true/swapped/zero actions on the same context.
             # Intervenes on the RAW 8+2 arrays (see the note above _invert_actions), encoding km_fsq live per pass.
-            if swap_test and action_conditioned and keypress_raw_chunk is not None and mouse_raw_chunk is not None:
+            # A corpus_valset row with no swap_kind (plaicraft-debug#93's plaicraft_morgan
+            # manifest has none) has no swap package to intervene with -- skip it, not raise.
+            row_has_swap = row.get("swap_kind") is not None if is_corpus_valset else True
+            if (swap_test and row_has_swap and action_conditioned
+                    and keypress_raw_chunk is not None and mouse_raw_chunk is not None):
                 try:
                     key_true_j = keypress_raw_chunk[j:j + 1]
                     mouse_true_j = mouse_raw_chunk[j:j + 1]
@@ -857,7 +875,9 @@ def run_debug_validation(model, diffusion, valset, device, out_dir,
                             s, second = s
                             key_out, mouse_out = _unpack_action_mouse_out(second, generates_actions, generates_mouse)
                         s = s.to(device)
-                        video = (s * latent_mask_j + x0_j * obs_mask_j)[0]
+                        # x0_j is latent (needed above for the model's own x0 kwarg); decode
+                        # the merged result to pixel space before any overlay/psnr reads it.
+                        video = _decode_if_latent(diffusion, s * latent_mask_j + x0_j * obs_mask_j)[0]
                         if is_km_fsq and key_out is not None:
                             # Same snap-then-decode as the main pass, still batch=1 here.
                             act_out = debug_actions.quantize_km_fsq(key_out) if action_quantization == "fsq" else key_out

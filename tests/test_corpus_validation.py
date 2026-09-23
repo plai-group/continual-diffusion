@@ -77,6 +77,46 @@ def test_rows_carry_swap_metadata(tmp_path):
     assert vs.rows[0]["boundary_tick"] == 100 + N_OBS
 
 
+def _make_fixture_no_swap(tmp_path, n_channels=4):
+    """plaicraft-debug#93: a manifest with no swap package at all (plaicraft_morgan's), and
+    C=4 latent frames instead of C=3 pixels."""
+    vdir = tmp_path / "validation"
+    vdir.mkdir()
+    n = len(NAMES)
+    rng = np.random.RandomState(0)
+    frames = rng.uniform(-1, 1, size=(n, T, n_channels, H, W)).astype(np.float32)
+    keypress = rng.rand(n, T, 8).astype(np.float32)
+    mouse = rng.randn(n, T, 2).astype(np.float32)
+    window_start_ticks = np.array([100, 200, 300], dtype=np.int64)
+    boundary_ticks = window_start_ticks + N_OBS
+    np.savez(
+        vdir / "validation.npz", frames=frames, keypress=keypress, mouse=mouse,
+        names=np.array(NAMES), session_ids=np.array([f"sess{i}" for i in range(n)]),
+        window_start_ticks=window_start_ticks, boundary_ticks=boundary_ticks,
+    )
+    manifest = {
+        "schema_version": "1", "corpus_dir": str(tmp_path), "tick_ms": 80, "subbin_ms": 10,
+        "subbin_rule_version": "1", "T": T, "n_observed": N_OBS, "n_held_out_sessions": 20,
+        "built_at": "2026-01-01T00:00:00Z",
+        "exercises": [{"index": i, "name": name, "session_id": f"sess{i}"}
+                     for i, name in enumerate(NAMES)],  # no swap_kind key at all
+    }
+    (vdir / "manifest.json").write_text(json.dumps(manifest))
+    return vdir
+
+
+def test_manifest_without_swap_kind_loads_with_swap_kind_none(tmp_path):
+    vdir = _make_fixture_no_swap(tmp_path)
+    vs = CorpusValidationSet(vdir)
+    assert all(row["swap_kind"] is None for row in vs.rows)
+
+
+def test_c4_latent_frames_load(tmp_path):
+    vdir = _make_fixture_no_swap(tmp_path, n_channels=4)
+    vs = CorpusValidationSet(vdir)
+    assert vs.load_all().shape == (3, T, 4, H, W)
+
+
 def test_mismatched_T_raises(tmp_path):
     vdir, *_ = _make_fixture(tmp_path)
     with pytest.raises(ValueError) as exc:

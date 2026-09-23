@@ -126,7 +126,7 @@ def _load_default_vae():
     if _default_vae is None:
         from diffusers import AutoencoderKL
         _default_vae = AutoencoderKL.from_pretrained(_VAE_ID, torch_dtype=torch.float16)
-        _default_vae.eval()
+        _default_vae.to("cuda" if torch.cuda.is_available() else "cpu").eval()  # fp16 on CPU crawls
         for p in _default_vae.parameters():
             p.requires_grad = False
     return _default_vae

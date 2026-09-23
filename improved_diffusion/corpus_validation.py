@@ -19,8 +19,10 @@ class CorpusValidationSet:
     """The 13 frozen exercises plus the frames/actions each one needs."""
 
     def __init__(self, validation_dir, T=None, n_observed=None, action_encoding="raw",
-                 tokenizer_checkpoint=None, device=None):
+                 tokenizer_checkpoint=None, device=None, session_root=None, action_builder="raw8"):
         self.validation_dir = Path(validation_dir)
+        self.session_root = Path(session_root) if session_root else None  # set: actions come from the sessions' own caches
+        self.action_builder = action_builder
         self.action_encoding = action_encoding
         self.tokenizer_checkpoint = tokenizer_checkpoint
         self.device = device
@@ -44,12 +46,17 @@ class CorpusValidationSet:
 
         npz = np.load(npz_path, allow_pickle=False)
         self._frames = np.asarray(npz["frames"], dtype=np.float32)
-        self._keypress = np.asarray(npz["keypress"], dtype=np.float32)
-        self._mouse = np.asarray(npz["mouse"], dtype=np.float32)
+        self._keypress = np.asarray(npz["keypress"], dtype=np.float32) if "keypress" in npz.files else None
+        self._mouse = np.asarray(npz["mouse"], dtype=np.float32) if "mouse" in npz.files else None
         names = [str(n) for n in npz["names"]]
         session_ids = [str(s) for s in npz["session_ids"]]
         window_start_ticks = npz["window_start_ticks"]
         boundary_ticks = npz["boundary_ticks"]
+        if self.session_root is not None:
+            self._keypress, self._mouse = map(np.stack, zip(*(
+                (np.asarray(k[w:w + self.T], dtype=np.float32), np.asarray(m[w:w + self.T], dtype=np.float32))
+                for sid, w in zip(session_ids, window_start_ticks)
+                for k, m in [debug_actions.load_or_build_raw(self.session_root / sid, action_builder=self.action_builder)])))
 
         self._validate_shapes(names, session_ids, window_start_ticks, boundary_ticks)
 
@@ -134,6 +141,12 @@ class CorpusValidationSet:
             fused = np.concatenate([self._keypress, debug_actions._symlog(self._mouse)], axis=-1).astype(np.float32)
             empty_mouse = np.zeros((*fused.shape[:-1], 0), dtype=np.float32)
             return th.from_numpy(fused), th.from_numpy(empty_mouse)
+        if self.action_encoding == "km_fsq" and self.session_root is not None:
+            km_codes = np.stack([np.asarray(debug_actions.load_or_build(
+                self.session_root / r["session_id"], action_encoding="km_fsq", tokenizer_checkpoint=self.tokenizer_checkpoint,
+                device=self.device, action_builder=self.action_builder)[0][r["window_start"]:r["window_start"] + self.T],
+                dtype=np.float32) for r in self.rows])
+            return th.from_numpy(km_codes), th.from_numpy(np.zeros((*km_codes.shape[:2], 0), dtype=np.float32))
         if self.action_encoding == "km_fsq":
             from scripts.build_debug_validation_km_codes import build_km_codes
             from improved_diffusion.km_tokenizer.model import DEFAULT_CHECKPOINT

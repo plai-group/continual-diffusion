@@ -87,6 +87,11 @@ default_image_size_dict = {
     "plaicraft_morgan":    40,
 }
 
+def plaicraft_valset_kwargs(dataset):
+    """Real PLAICraft validation slices its actions from the corpus sessions' own raw79 caches, as training does."""
+    return dict(session_root=video_data_paths_dict[dataset], action_builder="raw79") if dataset == "plaicraft_morgan" else {}
+
+
 default_full_image_size_dict = {
     "ball_stn":            (32, 32),
     "ball_nstn":           (32, 32),

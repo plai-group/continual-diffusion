@@ -198,3 +198,33 @@ def test_mouse_wrong_column_count_raises(tmp_path):
     with pytest.raises(ValueError) as exc:
         CorpusValidationSet(vdir)
     assert "mouse" in str(exc.value)
+
+
+def test_session_root_slices_actions_from_the_sessions_own_raw79_caches(tmp_path, monkeypatch):
+    """plaicraft-debug#93: validation must condition on the same 79-key cache training reads, not the npz."""
+    from improved_diffusion import debug_actions
+    vdir = _make_fixture_no_swap(tmp_path)
+    caches = {f"sess{i}": (np.random.RandomState(i).rand(400, 8).astype(np.float32),
+                           np.random.RandomState(10 + i).randn(400, 2).astype(np.float32)) for i in range(len(NAMES))}
+    seen = []
+    monkeypatch.setattr(debug_actions, "load_or_build_raw",
+                        lambda d, action_builder: (seen.append(action_builder), caches[d.name])[1])
+    vs = CorpusValidationSet(vdir, T=T, n_observed=N_OBS, session_root=tmp_path / "corpus", action_builder="raw79")
+    keypress, mouse = vs.load_all_actions_raw()
+    for i, w in enumerate([100, 200, 300]):
+        assert np.array_equal(keypress[i].numpy(), caches[f"sess{i}"][0][w:w + T])
+        assert np.array_equal(mouse[i].numpy(), caches[f"sess{i}"][1][w:w + T])
+    assert set(seen) == {"raw79"}
+
+
+def test_session_root_km_codes_come_from_the_session_km_cache(tmp_path, monkeypatch):
+    from improved_diffusion import debug_actions
+    vdir = _make_fixture_no_swap(tmp_path)
+    monkeypatch.setattr(debug_actions, "load_or_build_raw", lambda d, action_builder: (np.zeros((400, 8)), np.zeros((400, 2))))
+    codes = {f"sess{i}": np.random.RandomState(i).rand(400, 36).astype(np.float32) for i in range(len(NAMES))}
+    monkeypatch.setattr(debug_actions, "load_or_build",
+                        lambda d, action_encoding, tokenizer_checkpoint, device, action_builder: (codes[d.name], None))
+    vs = CorpusValidationSet(vdir, T=T, n_observed=N_OBS, action_encoding="km_fsq",
+                             session_root=tmp_path / "corpus", action_builder="raw79")
+    km, mouse = vs.load_all_actions()
+    assert np.array_equal(km[1].numpy(), codes["sess1"][200:200 + T]) and mouse.shape[-1] == 0

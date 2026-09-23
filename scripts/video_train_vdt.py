@@ -10,7 +10,7 @@ import torch
 import torch.distributed as dist
 
 from improved_diffusion import dist_util
-from improved_diffusion.video_datasets import load_data, default_T_dict, default_full_image_size_dict
+from improved_diffusion.video_datasets import load_data, default_T_dict, default_full_image_size_dict, plaicraft_valset_kwargs
 from improved_diffusion.resample import create_named_schedule_sampler
 from improved_diffusion.script_util import (
     model_and_diffusion_defaults,
@@ -154,7 +154,7 @@ def main():
         valset = CorpusValidationSet(
             args.debug_validation_dir, T=args.T, n_observed=args.T // 2,
             action_encoding=args.action_encoding, tokenizer_checkpoint=args.km_tokenizer_checkpoint,
-            device=dist_util.dev(),
+            device=dist_util.dev(), **plaicraft_valset_kwargs(args.dataset),
         )
         out_dir = args.debug_validation_out or os.path.join("results", "debug_validation")
         print(f"debug validation (corpus): {len(valset.rows)} rows -> {out_dir}")

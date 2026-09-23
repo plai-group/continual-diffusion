@@ -24,6 +24,7 @@ from improved_diffusion.debug_validation import (
     DebugValidationSet, run_debug_validation, run_player_validation,
 )
 from improved_diffusion.km_tokenizer.model import DEFAULT_CHECKPOINT
+from improved_diffusion.video_datasets import plaicraft_valset_kwargs
 from improved_diffusion.script_util import (
     args_to_dict,
     backfill_action_encoding,
@@ -105,7 +106,7 @@ def main():
             args.debug_validation_dir, T=ns.T, n_observed=ns.T // 2,
             action_encoding=getattr(ns, "action_encoding", "raw"),
             tokenizer_checkpoint=getattr(ns, "km_tokenizer_checkpoint", DEFAULT_CHECKPOINT),
-            device=args.device,
+            device=args.device, **plaicraft_valset_kwargs(getattr(ns, "dataset", "")),
         )
         print(f"validation rows: {len(valset.rows)}")
         for r in valset.rows:

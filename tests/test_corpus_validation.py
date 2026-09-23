@@ -228,3 +228,13 @@ def test_session_root_km_codes_come_from_the_session_km_cache(tmp_path, monkeypa
                              session_root=tmp_path / "corpus", action_builder="raw79")
     km, mouse = vs.load_all_actions()
     assert np.array_equal(km[1].numpy(), codes["sess1"][200:200 + T]) and mouse.shape[-1] == 0
+
+
+def test_player_index_fn_labels_each_row_with_its_session_player(tmp_path, monkeypatch):
+    from improved_diffusion import debug_actions
+    monkeypatch.setattr(debug_actions, "load_or_build_raw", lambda d, action_builder: (np.zeros((400, 8)), np.zeros((400, 2))))
+    vdir = _make_fixture_no_swap(tmp_path)
+    vs = CorpusValidationSet(vdir, T=T, n_observed=N_OBS, player_index_fn=lambda d: int(d.name[-1]) + 7,
+                             session_root=tmp_path / "corpus")
+    assert vs.player_labels.tolist() == [7, 8, 9]
+    assert CorpusValidationSet(vdir, T=T, n_observed=N_OBS).player_labels is None

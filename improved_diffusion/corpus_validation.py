@@ -19,7 +19,8 @@ class CorpusValidationSet:
     """The 13 frozen exercises plus the frames/actions each one needs."""
 
     def __init__(self, validation_dir, T=None, n_observed=None, action_encoding="raw",
-                 tokenizer_checkpoint=None, device=None, session_root=None, action_builder="raw8"):
+                 tokenizer_checkpoint=None, device=None, session_root=None, action_builder="raw8",
+                 player_index_fn=None):
         self.validation_dir = Path(validation_dir)
         self.session_root = Path(session_root) if session_root else None  # set: actions come from the sessions' own caches
         self.action_builder = action_builder
@@ -52,6 +53,9 @@ class CorpusValidationSet:
         session_ids = [str(s) for s in npz["session_ids"]]
         window_start_ticks = npz["window_start_ticks"]
         boundary_ticks = npz["boundary_ticks"]
+        # Each row's own player label (the one it trained under); None leaves the model's default y.
+        self.player_labels = (th.tensor([player_index_fn(self.session_root / sid) for sid in session_ids])
+                              if player_index_fn is not None else None)
         if self.session_root is not None:
             self._keypress, self._mouse = map(np.stack, zip(*(
                 (np.asarray(k[w:w + self.T], dtype=np.float32), np.asarray(m[w:w + self.T], dtype=np.float32))

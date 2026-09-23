@@ -24,6 +24,48 @@ def _ro_connect(path):
     return sqlite3.connect(f"file:{path}?mode=ro", uri=True)
 
 
+def _name_from_global_db(session_id, global_database_path):
+    con = _ro_connect(global_database_path)
+    try:
+        row = con.execute(
+            "SELECT player_name FROM session_metadata WHERE session_id = ?", (session_id,)
+        ).fetchone()
+    finally:
+        con.close()
+    return row[0] if row else None
+
+
+def _name_from_other_metadata(session_dir):
+    sid = session_dir.name
+    con = _ro_connect(session_dir / f"{sid}.db")
+    try:
+        row = con.execute("SELECT other_metadata FROM session").fetchone()
+    except sqlite3.OperationalError:
+        return None
+    finally:
+        con.close()
+    if row is None or not row[0]:
+        return None
+    try:
+        return json.loads(row[0]).get("name")
+    except (json.JSONDecodeError, TypeError):
+        return None
+
+
+def session_player_index(session_dir, num_classes, global_database_path=DEFAULT_GLOBAL_DATABASE_PATH):
+    """md5(player_name) % num_classes; name from the global DB, else the session DB's other_metadata."""
+    session_dir = Path(session_dir)
+    name = _name_from_global_db(session_dir.name, global_database_path)
+    if name is None:
+        name = _name_from_other_metadata(session_dir)
+    if name is None:
+        raise ValueError(
+            f"plaicraft_morgan: no player name for session {session_dir.name} in the "
+            f"global DB ({global_database_path}) or its session.other_metadata."
+        )
+    return _hash_to_bucket(name, num_classes)
+
+
 class PlaicraftDataset(ContinuousDebugDataset):
     """ContinuousDebugDataset, with four overrides for the real (non-synthetic) corpus:
     - split: sessions listed in validation.db are test, the rest are train;
@@ -95,49 +137,12 @@ class PlaicraftDataset(ContinuousDebugDataset):
     # player
     # ------------------------------------------------------------------ #
 
-    def _name_from_global_db(self, session_id):
-        con = _ro_connect(self.global_database_path)
-        try:
-            row = con.execute(
-                "SELECT player_name FROM session_metadata WHERE session_id = ?", (session_id,)
-            ).fetchone()
-        finally:
-            con.close()
-        return row[0] if row else None
-
-    def _name_from_other_metadata(self, session_dir):
-        sid = session_dir.name
-        con = _ro_connect(session_dir / f"{sid}.db")
-        try:
-            row = con.execute("SELECT other_metadata FROM session").fetchone()
-        except sqlite3.OperationalError:
-            return None
-        finally:
-            con.close()
-        if row is None or not row[0]:
-            return None
-        try:
-            return json.loads(row[0]).get("name")
-        except (json.JSONDecodeError, TypeError):
-            return None
-
-    def _player_name(self, session_dir):
-        name = self._name_from_global_db(session_dir.name)
-        if name is None:
-            name = self._name_from_other_metadata(session_dir)
-        if name is None:
-            raise ValueError(
-                f"plaicraft_morgan: no player name for session {session_dir.name} in the "
-                f"global DB ({self.global_database_path}) or its session.other_metadata."
-            )
-        return name
-
     def _resolve_players(self):
         self._session_players = {}
         for _fs, _fe, path in self.file_boundaries:
             session_dir = path.parent.parent
             if self.num_classes > 0:
-                idx = _hash_to_bucket(self._player_name(session_dir), self.num_classes)
+                idx = session_player_index(session_dir, self.num_classes, self.global_database_path)
             else:
                 idx = 0
             self._session_players[session_dir] = idx

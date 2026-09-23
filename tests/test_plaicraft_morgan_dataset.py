@@ -6,6 +6,7 @@ import h5py
 import numpy as np
 import pytest
 
+from improved_diffusion import plaicraft_morgan_dataset as pmd
 from improved_diffusion.plaicraft_morgan_dataset import PlaicraftDataset, _hash_to_bucket
 
 
@@ -105,7 +106,7 @@ def test_player_falls_back_to_other_metadata_when_absent_from_global_db(corpus):
 def test_num_classes_zero_skips_player_lookup_entirely(corpus, monkeypatch):
     def _boom(*a, **k):
         raise AssertionError("should never query player identity when num_classes==0")
-    monkeypatch.setattr(PlaicraftDataset, "_player_name", _boom)
+    monkeypatch.setattr(pmd, "session_player_index", _boom)
     ds = _dataset(corpus, num_classes=0)
     assert all(v == 0 for v in ds._session_players.values())
 

@@ -675,6 +675,8 @@ def run_debug_validation(model, diffusion, valset, device, out_dir,
             "obs_mask": obs_mask,
             "latent_mask": latent_mask,
         }
+        if getattr(valset, "player_labels", None) is not None:  # else y defaults to 0, an untrained row on PLAICraft
+            model_kwargs["y"] = valset.player_labels[lo:hi].to(device)
         # Teacher forcing pins the observed prefix's actions to GT (mask lags the frame mask by one row, see action_masks); False pins nothing, i.e. free rollout.
         if keypress_chunk is not None:
             model_kwargs["actions"] = keypress_chunk

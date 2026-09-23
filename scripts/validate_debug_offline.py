@@ -106,7 +106,8 @@ def main():
             args.debug_validation_dir, T=ns.T, n_observed=ns.T // 2,
             action_encoding=getattr(ns, "action_encoding", "raw"),
             tokenizer_checkpoint=getattr(ns, "km_tokenizer_checkpoint", DEFAULT_CHECKPOINT),
-            device=args.device, **plaicraft_valset_kwargs(getattr(ns, "dataset", "")),
+            device=args.device, **plaicraft_valset_kwargs(getattr(ns, "dataset", ""), getattr(ns, "num_classes", 0),
+                                                                getattr(ns, "global_database_path", "")),
         )
         print(f"validation rows: {len(valset.rows)}")
         for r in valset.rows:

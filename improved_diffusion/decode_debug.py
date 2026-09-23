@@ -6,6 +6,7 @@
 
 import cv2
 import numpy as np
+import torch
 
 # ------------------------------------------------------------------ #
 #  Layout constants — copied verbatim from plaicraft-model-pi0's
@@ -108,6 +109,53 @@ def _overlay_frame(frame_uint8, action, border):
         h, w, _ = frame.shape
         cv2.rectangle(frame, (0, 0), (w - 1, h - 1), (255, 0, 0), 4)
     return frame
+
+
+# ------------------------------------------------------------------ #
+#  plaicraft-debug#93 B4: VAE-decode when a session's hdf5 stores latents
+#  (4 channels) instead of pixels (3 channels). Same VAE/scale as
+#  gaussian_diffusion.decode -- see that module for why.
+# ------------------------------------------------------------------ #
+_LATENT_SCALE = 0.13025
+_VAE_ID = "madebyollin/sdxl-vae-fp16-fix"
+_default_vae = None
+
+
+def _load_default_vae():
+    global _default_vae
+    if _default_vae is None:
+        from diffusers import AutoencoderKL
+        _default_vae = AutoencoderKL.from_pretrained(_VAE_ID, torch_dtype=torch.float16)
+        _default_vae.eval()
+        for p in _default_vae.parameters():
+            p.requires_grad = False
+    return _default_vae
+
+
+@torch.no_grad()
+def decode_latents_chunked(vae, latents, chunk_size=20):
+    """(N, 4, H, W) scaled latents -> (N, 3, H', W') pixels in [-1, 1], chunked to bound
+    peak memory over a full session."""
+    outs = [vae.decode(latents[i:i + chunk_size] / _LATENT_SCALE).sample
+           for i in range(0, latents.shape[0], chunk_size)]
+    return torch.cat(outs, dim=0)
+
+
+def maybe_decode_frames(frames, vae=None, chunk_size=20):
+    """frames: (N, C, H, W). C==3 passes through unchanged (debug-world sessions render
+    exactly as before); C==4 VAE-decodes to pixel space first, so the overlay below it
+    (_to_uint8_frame/_overlay_frame) never has to know the corpus was latent."""
+    c = frames.shape[1]
+    if c == 3:
+        return frames
+    if c != 4:
+        raise ValueError(f"decode_debug: unexpected frame channel count {c}, expected 3 or 4")
+    vae = vae or _load_default_vae()
+    t = frames if torch.is_tensor(frames) else torch.from_numpy(np.asarray(frames))
+    param = next(vae.parameters(), None)
+    if param is not None:
+        t = t.to(device=param.device, dtype=param.dtype)
+    return decode_latents_chunked(vae, t, chunk_size=chunk_size).cpu()
 
 
 def _to_uint8_frame(frame_chw):

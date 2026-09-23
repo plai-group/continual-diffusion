@@ -30,13 +30,15 @@ class ContinuousDebugDataset(Dataset):
     N_TEST_SESSIONS = 20
 
     def __init__(self, dataset_path, window_length=20, frame_range=(0, None),
-                 action_encoding="raw", tokenizer_checkpoint=None, num_classes=0):
+                 action_encoding="raw", tokenizer_checkpoint=None, num_classes=0,
+                 action_builder="raw8"):
         self.dataset_path = Path(dataset_path)
         self.window_length = self.T = window_length
         self.is_test = False
         self.original_frame_range = frame_range
         self.action_encoding = action_encoding
         self.tokenizer_checkpoint = tokenizer_checkpoint
+        self.action_builder = action_builder  # plaicraft-debug#93: "raw79" for the PLAIOmni builder
         # >0 means the model conditions on a player label, so every session must declare one.
         self.num_classes = num_classes
 
@@ -197,6 +199,7 @@ class ContinuousDebugDataset(Dataset):
             keypress, mouse = load_or_build_actions(
                 session_dir, action_encoding=self.action_encoding,
                 tokenizer_checkpoint=self.tokenizer_checkpoint,
+                action_builder=self.action_builder,
             )
             self._keypress_arrays[session_dir] = keypress
             self._mouse_arrays[session_dir] = mouse

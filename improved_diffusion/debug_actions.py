@@ -24,6 +24,11 @@ SUBBINS_PER_TICK = TICK_MS // SUBBIN_MS  # 8, matches the km tokenizer's block_s
 # Fixed key order for dims 0-5: [w, a, s, d, space, shift]
 _KEY_IDS = ["87", "65", "83", "68", "32", "340"]
 
+KEYPRESS_DIM_79 = 79  # PLAIOmni's full key/mouse-button vocabulary (plaicraft-debug#93)
+ACTION_FPS_79 = 1000 // SUBBIN_MS  # 100, PLAIOmni's action_fps at 10ms sub-bins
+MOUSE_ABS_CLAMP_X = 1280.0  # what km_tokenizer actually clamps to (720p frame size), not PLAIOmni's 150px default
+MOUSE_ABS_CLAMP_Y = 720.0
+
 
 def quantize_keypress(x):
     """Snap a continuous (..., 8) keypress prediction to the nearest of the 256 valid
@@ -214,10 +219,106 @@ def build_action_array(session_db_path, n_ticks):
     return out_k.reshape(n_sub, KEYPRESS_DIM), out_m.reshape(n_sub, MOUSE_DIM)
 
 
+def _mark_key_interval_79(out, key, start_ms, end_ms, n_sub):
+    """Mirrors PLAIOmni's _mark_key_interval_session (plaicraft.py:1024-1053): KEYPRESS_LOOKUP
+    dispatch (raw id, then lowercased id/name), unknown keys silently skipped, a zero/negative
+    -length interval marks its single floor(start) bin, otherwise floor(start)..ceil(end)."""
+    from .km_tokenizer.keypress_lookup import KEYPRESS_LOOKUP
+
+    key_idx = KEYPRESS_LOOKUP.get(key)
+    if key_idx is None:
+        key_idx = KEYPRESS_LOOKUP.get(key.lower())
+    if key_idx is None:
+        return
+    if end_ms <= start_ms:
+        bin_idx = int(np.floor(start_ms * ACTION_FPS_79 / 1000.0))
+        if 0 <= bin_idx < n_sub:
+            out[bin_idx, key_idx] = 1
+        return
+    start_bin = max(int(np.floor(start_ms * ACTION_FPS_79 / 1000.0)), 0)
+    end_bin = min(int(np.ceil(end_ms * ACTION_FPS_79 / 1000.0)), n_sub)
+    if start_bin < end_bin:
+        out[start_bin:end_bin, key_idx] = 1
+
+
+def build_action_array_79(session_db_path, n_ticks):
+    """PLAIOmni-semantics 79-wide builder (plaicraft.py:925-1055), for real PLAICraft DBs whose
+    keyboard/click rows can have a NULL end_timestamp and use the full 79-key vocabulary (not just
+    debug's 6 keys + 2 buttons): 10ms sub-bins, floor/ceil interval marking via
+    _mark_key_interval_79, NULL keyboard end -> session end, NULL/zero-length click end -> a
+    single bin, mouse clamped to +-MOUSE_ABS_CLAMP_X/Y. Then the same per-tick causal shift as
+    build_action_array. Returns (n_ticks*8, 79) keypress + (n_ticks*8, 2) raw-pixel mouse.
+    """
+    # Real PLAICraft DBs, opened read-only -- this builder must never write to source data.
+    con = sqlite3.connect(f"file:{session_db_path}?mode=ro", uri=True)
+    cur = con.cursor()
+    cur.execute("SELECT key_id, start_timestamp, end_timestamp FROM keyboard")
+    key_rows = cur.fetchall()
+    cur.execute("SELECT mouse_key_type, start_timestamp, end_timestamp FROM mouse_click")
+    click_rows = cur.fetchall()
+    cur.execute("SELECT timestamp, mouseDX, mouseDY FROM mouse_movement")
+    mouse_rows = cur.fetchall()
+    con.close()
+
+    n_sub = n_ticks * SUBBINS_PER_TICK
+    session_duration_ms = n_sub * SUBBIN_MS
+
+    K = np.zeros((n_sub, KEYPRESS_DIM_79), dtype=np.float32)
+    for key_id, s, e in key_rows:
+        end_ms = session_duration_ms if e is None else float(e)
+        _mark_key_interval_79(K, str(key_id), float(s), end_ms, n_sub)
+    for mouse_key_type, s, e in click_rows:
+        end_ms = float(s) if e is None else float(e)  # NULL click end -> zero-length, single bin
+        _mark_key_interval_79(K, str(mouse_key_type), float(s), end_ms, n_sub)
+
+    M = np.zeros((n_sub, MOUSE_DIM), dtype=np.float32)
+    if mouse_rows:
+        ts = np.array([r[0] for r in mouse_rows], dtype=np.float64)
+        dx = np.array([r[1] for r in mouse_rows], dtype=np.float64)
+        dy = np.array([r[2] for r in mouse_rows], dtype=np.float64)
+        bin_idx = np.floor(ts * ACTION_FPS_79 / 1000.0).astype(np.int64)
+        valid = (bin_idx >= 0) & (bin_idx < n_sub)
+        bin_idx, dx, dy = bin_idx[valid], dx[valid], dy[valid]
+        np.add.at(M[:, 0], bin_idx, dx)
+        np.add.at(M[:, 1], bin_idx, dy)
+    np.clip(M[:, 0], -MOUSE_ABS_CLAMP_X, MOUSE_ABS_CLAMP_X, out=M[:, 0])
+    np.clip(M[:, 1], -MOUSE_ABS_CLAMP_Y, MOUSE_ABS_CLAMP_Y, out=M[:, 1])
+
+    K = K.reshape(n_ticks, SUBBINS_PER_TICK, KEYPRESS_DIM_79)
+    M = M.reshape(n_ticks, SUBBINS_PER_TICK, MOUSE_DIM)
+    out_k = np.zeros_like(K)
+    out_k[1:] = K[:-1]
+    out_m = np.zeros_like(M)
+    out_m[1:] = M[:-1]
+    return out_k.reshape(n_sub, KEYPRESS_DIM_79), out_m.reshape(n_sub, MOUSE_DIM)
+
+
+def _run_builder(action_builder, db_path, n_ticks):
+    if action_builder == "raw8":
+        return build_action_array(db_path, n_ticks)
+    if action_builder == "raw79":
+        return build_action_array_79(db_path, n_ticks)
+    raise ValueError(f"unknown action_builder {action_builder!r}, expected 'raw8' or 'raw79'")
+
+
+def _builder_sidecar_fields(action_builder):
+    """Only stamps a field when the builder differs from the legacy default, so every existing
+    debug-world sidecar (which predates this field) still compares equal and stays valid."""
+    fields = {"subbin_rule_version": SUBBIN_RULE_VERSION}
+    if action_builder != "raw8":
+        fields["action_builder"] = action_builder
+    return fields
+
+
 def _n_ticks_from_hdf5(session_dir):
-    sid = Path(session_dir).name
-    hdf5_path = Path(session_dir) / "encoded_video_hdf5" / f"{sid}_encoded_video.hdf5"
-    with h5py.File(hdf5_path, "r") as f:
+    """Glob rather than assume debug world's <sid>_encoded_video.hdf5 name: the plaicraft_morgan
+    corpus (plaicraft-debug#93) names its file <sid>.hdf5 instead, matching how
+    ContinuousDebugDataset itself discovers sessions (debug_dataset.py's own glob)."""
+    hdf5_dir = Path(session_dir) / "encoded_video_hdf5"
+    matches = sorted(hdf5_dir.glob("*.hdf5"))
+    if not matches:
+        raise FileNotFoundError(f"no hdf5 file under {hdf5_dir}")
+    with h5py.File(matches[0], "r") as f:
         return f["frames"].shape[0]
 
 
@@ -234,10 +335,14 @@ def _raw_cache_paths(session_dir):
             session_dir / "actions_raw.json")
 
 
-def load_or_build_raw(session_dir):
+def load_or_build_raw(session_dir, action_builder="raw8"):
     """Tick-resolution ground truth, for overlays and interventions: (n_ticks, 8) keys
     (OR-reduced over the tick's 8 sub-bins) + (n_ticks, 2) raw-pixel mouse (summed over
     the tick's 8 sub-bins). Already causally shifted -- see build_action_array.
+
+    action_builder="raw79" (plaicraft-debug#93) runs the PLAIOmni 79-key builder and slices
+    the compact 8 dims back out at _RAW_POSITIONS before the same OR/sum reduction, so
+    overlays and raw-encoding metrics see an identical (n_ticks, 8) shape either way.
 
     Cached to a sidecar recording the binning rule, same pattern as the km codes cache --
     a pre-#80 cache has the identical (n_ticks, dim) shape (100ms bins, exact-timestamp
@@ -247,7 +352,7 @@ def load_or_build_raw(session_dir):
     sid = session_dir.name
     n_ticks = _n_ticks_from_hdf5(session_dir)
     keypress_path, mouse_path, sidecar_path = _raw_cache_paths(session_dir)
-    expected_sidecar = {"subbin_rule_version": SUBBIN_RULE_VERSION}
+    expected_sidecar = _builder_sidecar_fields(action_builder)
 
     if sidecar_path.exists():
         try:
@@ -261,7 +366,10 @@ def load_or_build_raw(session_dir):
                 return keypress, mouse
 
     db_path = session_dir / f"{sid}.db"
-    key_sub, mouse_sub = build_action_array(db_path, n_ticks)
+    key_sub, mouse_sub = _run_builder(action_builder, db_path, n_ticks)
+    if action_builder == "raw79":
+        from .km_tokenizer.keypress_scatter import _RAW_POSITIONS
+        key_sub = key_sub[:, _RAW_POSITIONS]
     keypress = key_sub.reshape(n_ticks, SUBBINS_PER_TICK, KEYPRESS_DIM).any(axis=1).astype(np.float32)
     mouse = mouse_sub.reshape(n_ticks, SUBBINS_PER_TICK, MOUSE_DIM).sum(axis=1).astype(np.float32)
     for path, arr in ((keypress_path, keypress), (mouse_path, mouse)):
@@ -279,11 +387,12 @@ def _km_cache_paths(session_dir):
     return session_dir / "actions_km_codes.npy", session_dir / "actions_km_codes.json"
 
 
-def _load_or_build_km_codes(session_dir, tokenizer_checkpoint, device):
-    """Scatter the 8 compact dims to 79-wide at _RAW_POSITIONS, run the km tokenizer once,
-    cache the (n_ticks, 36) post-FSQ quantized codes plus a sidecar recording which
-    checkpoint and which binning rule produced them. A sidecar mismatch rebuilds, it
-    never fails -- the cache is just stale, not corrupt."""
+def _load_or_build_km_codes(session_dir, tokenizer_checkpoint, device, action_builder="raw8"):
+    """Scatter the 8 compact dims to 79-wide at _RAW_POSITIONS (raw8) -- or, for the PLAIOmni
+    builder (raw79), feed its already-79-wide keys straight to the tokenizer, no scatter -- then
+    run the km tokenizer once and cache the (n_ticks, 36) post-FSQ quantized codes plus a sidecar
+    recording which checkpoint and which binning rule produced them. A sidecar mismatch
+    rebuilds, it never fails -- the cache is just stale, not corrupt."""
     from .km_tokenizer.keypress_scatter import scatter_keypress
     from .km_tokenizer.model import _sha256, load_tokenizer
 
@@ -295,7 +404,7 @@ def _load_or_build_km_codes(session_dir, tokenizer_checkpoint, device):
     checkpoint_path = Path(tokenizer_checkpoint)
     expected_sidecar = {
         "tokenizer_sha256": _sha256(checkpoint_path),
-        "subbin_rule_version": SUBBIN_RULE_VERSION,
+        **_builder_sidecar_fields(action_builder),
     }
 
     if codes_path.exists() and sidecar_path.exists():
@@ -309,10 +418,11 @@ def _load_or_build_km_codes(session_dir, tokenizer_checkpoint, device):
                 return codes
 
     db_path = session_dir / f"{sid}.db"
-    key_sub, mouse_sub = build_action_array(db_path, n_ticks)
+    key_sub, mouse_sub = _run_builder(action_builder, db_path, n_ticks)
     device = device or ("cuda" if torch.cuda.is_available() else "cpu")
     tokenizer = load_tokenizer(checkpoint_path=checkpoint_path, device=device)
-    key_press = scatter_keypress(torch.from_numpy(key_sub).float()).unsqueeze(0).to(device)
+    key_press_t = torch.from_numpy(key_sub).float()
+    key_press = (key_press_t if action_builder == "raw79" else scatter_keypress(key_press_t)).unsqueeze(0).to(device)
     mouse_movement = torch.from_numpy(mouse_sub).float().unsqueeze(0).to(device)
     with torch.no_grad():
         prequantized, _frame_mask, _block_mask = tokenizer._encode_prequantized(key_press, mouse_movement)
@@ -329,14 +439,17 @@ def _load_or_build_km_codes(session_dir, tokenizer_checkpoint, device):
     return np.load(codes_path, mmap_mode="r")
 
 
-def load_or_build(session_dir, action_encoding="raw", tokenizer_checkpoint=None, device=None):
+def load_or_build(session_dir, action_encoding="raw", tokenizer_checkpoint=None, device=None,
+                  action_builder="raw8"):
     """raw -> (n_ticks, 8) keypress + (n_ticks, 2) symlog-compressed mouse -- the MODEL'S
     NATIVE CONDITIONING encoding, not ground truth (see load_or_build_raw for that).
     km_fsq -> (n_ticks, 36) quantized codes + (n_ticks, 0) empty mouse (folded into the codes).
     raw_fused -> (n_ticks, 10) [keypress, symlog(mouse)] + (n_ticks, 0) empty mouse; reuses
-    load_or_build_raw's cache, so a raw and a raw_fused run share one warmed corpus."""
+    load_or_build_raw's cache, so a raw and a raw_fused run share one warmed corpus.
+    action_builder="raw79" (plaicraft-debug#93) swaps in the PLAIOmni 79-key builder; the
+    default "raw8" is byte-identical to the pre-#93 debug-world behaviour."""
     if action_encoding == "raw":
-        keypress, mouse = load_or_build_raw(session_dir)
+        keypress, mouse = load_or_build_raw(session_dir, action_builder=action_builder)
         # symlog the mouse here, used everywhere except validation overlays
         mouse = _symlog(np.asarray(mouse))
         return keypress, mouse
@@ -344,11 +457,11 @@ def load_or_build(session_dir, action_encoding="raw", tokenizer_checkpoint=None,
         from .km_tokenizer.model import DEFAULT_CHECKPOINT
 
         checkpoint = tokenizer_checkpoint or DEFAULT_CHECKPOINT
-        codes = _load_or_build_km_codes(session_dir, checkpoint, device)
+        codes = _load_or_build_km_codes(session_dir, checkpoint, device, action_builder=action_builder)
         n_ticks = codes.shape[0]
         return codes, np.zeros((n_ticks, 0), dtype=np.float32)
     if action_encoding == "raw_fused":
-        keypress, mouse = load_or_build_raw(session_dir)
+        keypress, mouse = load_or_build_raw(session_dir, action_builder=action_builder)
         fused = np.concatenate([keypress, _symlog(mouse)], axis=1).astype(np.float32)
         return fused, np.zeros((fused.shape[0], 0), dtype=np.float32)
     raise ValueError(f"unknown action_encoding {action_encoding!r}, expected 'raw', 'km_fsq', or 'raw_fused'")

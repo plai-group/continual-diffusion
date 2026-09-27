@@ -314,7 +314,8 @@ class GaussianDiffusion:
         def process_xstart(x):
             if denoised_fn is not None:
                 x = denoised_fn(x)
-            if clip_denoised:
+            # SDXL latents are not in [-1,1] (30% of PLAICraft's lie outside); clamping them washes the decode out to tan.
+            if clip_denoised and self.diffusion_space != "latent":
                 return x.clamp(-1, 1)
             return x
 

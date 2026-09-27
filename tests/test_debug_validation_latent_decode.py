@@ -104,3 +104,16 @@ def test_swap_skipped_when_rows_have_no_swap_kind(monkeypatch, tmp_path):
 def test_swap_test_false_also_skips_it(monkeypatch, tmp_path):
     res = _run(monkeypatch, tmp_path, _LatentDiffusion(), swap_test=False)
     assert not any(k.startswith("val/swap/") for k in res["aggregate"])
+
+
+def _x0_through_p_mean_variance(space):
+    from improved_diffusion.script_util import create_gaussian_diffusion
+    diffusion = create_gaussian_diffusion(steps=1000, diffusion_space_kwargs={"diffusion_space": space, "pre_encoded": True})
+    x = torch.full((1, 4, 2, 2), 3.0)
+    zero_eps = lambda x, **kw: (torch.zeros_like(x), None)
+    return diffusion.p_mean_variance(zero_eps, x, torch.tensor([0]), clip_denoised=True)["pred_xstart"]
+
+
+def test_latent_x0_is_not_clamped_to_the_pixel_range():
+    assert _x0_through_p_mean_variance("latent").min() > 2.9
+    assert _x0_through_p_mean_variance("pixel").max() == 1.0

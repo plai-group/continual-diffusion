@@ -182,3 +182,14 @@ def test_km_codes_are_identical_whether_or_not_the_session_is_chunked(tmp_path, 
     chunked = np.asarray(da.load_or_build(_make_session_dir_79(tmp_path / "b", n_ticks=10, key_events=events),
                                           action_encoding="km_fsq", action_builder="raw79")[0])
     assert np.array_equal(whole, chunked)
+
+
+def test_load_ticks_79_keeps_every_key_the_8key_slice_drops(tmp_path):
+    from improved_diffusion.km_tokenizer.keypress_scatter import _RAW_POSITIONS
+    session_dir = _make_session_dir_79(
+        tmp_path, n_ticks=2, key_events=[("87", 0, da.TICK_MS), ("69", 0, da.TICK_MS)])  # w, and e (not a debug key)
+    ticks = da.load_ticks_79(session_dir)
+    keypress, _ = da.load_or_build_raw(session_dir, action_builder="raw79")
+    assert ticks.shape == (2, da.KEYPRESS_DIM_79)
+    np.testing.assert_array_equal(ticks[:, _RAW_POSITIONS], keypress)
+    assert ticks[1, KEYPRESS_LOOKUP["e"]] == 1.0

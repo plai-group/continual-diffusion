@@ -170,6 +170,16 @@ class CorpusValidationSet:
         tensor (mirrors DebugValidationSet.load_all_actions_raw, plaicraft-debug#80/81)."""
         return th.from_numpy(self._keypress.copy()), th.from_numpy(self._mouse.copy())
 
+    def load_all_keys79(self):
+        """(rows, T, 79) keys over PLAICraft's whole vocabulary (plaicraft-debug#93), or None when
+        the corpus has only the 8 debug keys. Built from each session's DB on first call."""
+        if self.session_root is None or self.action_builder != "raw79":
+            return None
+        if getattr(self, "_keys79", None) is None:
+            ticks = {sid: debug_actions.load_ticks_79(self.session_root / sid) for sid in {r["session_id"] for r in self.rows}}
+            self._keys79 = np.stack([ticks[r["session_id"]][r["window_start"]:r["window_start"] + self.T] for r in self.rows])
+        return th.from_numpy(self._keys79.copy())
+
 
 class PlayerValidationSet(CorpusValidationSet):
     """The issue-85 paired package: the same exercises, but two frame stacks per row.

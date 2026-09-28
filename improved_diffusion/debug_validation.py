@@ -241,9 +241,10 @@ def _symlog(v):
     return th.sign(v) * th.log1p(th.abs(v))
 
 
-def _decode_km_actions(tokenizer, codes):
-    """(B, T, 36) quantized km codes -> ((B, T, 8) keys bool, (B, T, 2) mouse raw pixels, (B, T, 8) key probs).
-    keys: sigmoid(key_logits) at _RAW_POSITIONS, mean over the tick's 8 sub-bins, thresholded.
+def _decode_km_actions(tokenizer, codes, all_keys=False):
+    """(B, T, 36) quantized km codes -> ((B, T, K) keys bool, (B, T, 2) mouse raw pixels, (B, T, K) key probs).
+    keys: sigmoid(key_logits) at _RAW_POSITIONS (K=8), or at all 79 with all_keys (PLAICraft,
+    plaicraft-debug#93), mean over the tick's 8 sub-bins, thresholded.
     mouse: mouse_pred summed over the tick's 8 sub-bins."""
     from .km_tokenizer.keypress_scatter import _RAW_POSITIONS
 
@@ -252,7 +253,7 @@ def _decode_km_actions(tokenizer, codes):
     key_logits, _mouse_logits, mouse_pred = tokenizer.decode_codes(
         codes.reshape(B, T, tokenizer.config.num_tokens, tokenizer.config.fsq_dim)
     )
-    probs = th.sigmoid(key_logits[..., _RAW_POSITIONS]).mean(dim=2)  # (B, T, 8)
+    probs = th.sigmoid(key_logits if all_keys else key_logits[..., _RAW_POSITIONS]).mean(dim=2)  # (B, T, K)
     keys = (probs > 0.5).float()
     mouse = mouse_pred.sum(dim=2)  # (B, T, 2), raw pixels
     return keys, mouse, probs
@@ -423,11 +424,19 @@ def _action_vec_to_bar(key_vec, mouse_vec):
     """
     key_vec = np.asarray(key_vec, dtype=np.float32)
     mouse_vec = np.asarray(mouse_vec, dtype=np.float32)
+    extra = {}
+    if key_vec.shape[-1] == debug_actions.KEYPRESS_DIM_79:
+        # PLAICraft (plaicraft-debug#93): the 8 debug keys keep their boxes, every other held key is named.
+        from .km_tokenizer.keypress_lookup import INDEX_TO_KEYPRESS_LABEL
+        from .km_tokenizer.keypress_scatter import _RAW_POSITIONS
+        extra = {"extra": [INDEX_TO_KEYPRESS_LABEL[i] for i in np.flatnonzero(key_vec > 0.5) if i not in _RAW_POSITIONS]}
+        key_vec = key_vec[_RAW_POSITIONS]
     return {
         "keys": [n for i, n in enumerate(_ACTION_KEY_NAMES) if key_vec[i] > 0.5],
         "clicks": [n for i, n in enumerate(_ACTION_CLICK_NAMES) if key_vec[6 + i] > 0.5],
         "mouseDX": float(mouse_vec[0]),
         "mouseDY": float(mouse_vec[1]),
+        **extra,
     }
 
 
@@ -648,10 +657,14 @@ def run_debug_validation(model, diffusion, valset, device, out_dir,
     else:
         keypress_all, mouse_all = None, None
         keypress_raw_all, mouse_raw_all = None, None
+    # PLAICraft's km codes carry all 79 keys (plaicraft-debug#93): score and draw them all; elsewhere the 8 debug keys.
+    keys79_all = (valset.load_all_keys79() if is_km_fsq and keypress_raw_all is not None
+                  and hasattr(valset, "load_all_keys79") else None)
+    key_true_all = keys79_all if keys79_all is not None else keypress_raw_all
     # The unconditional keypress distribution over the whole pool: the fixed anchor CE has
     # to beat. Every row and every frame, observed half included -- it is the same policy.
-    key_baserate_q = (keypress_raw_all.reshape(-1, keypress_raw_all.shape[-1]).mean(dim=0).to(device)
-                      if keypress_raw_all is not None else None)
+    key_baserate_q = (key_true_all.reshape(-1, key_true_all.shape[-1]).mean(dim=0).to(device)
+                      if key_true_all is not None else None)
 
     per_row, agg, swap_rows, feats_real, feats_fake = [], {}, [], [], []
     fails = ValidationFailures()
@@ -662,6 +675,7 @@ def run_debug_validation(model, diffusion, valset, device, out_dir,
         keypress_chunk = keypress_all[lo:hi].to(device) if keypress_all is not None else None
         mouse_chunk = mouse_all[lo:hi].to(device) if mouse_all is not None else None
         keypress_raw_chunk = keypress_raw_all[lo:hi].to(device) if keypress_raw_all is not None else None
+        key_true_chunk = key_true_all[lo:hi].to(device) if key_true_all is not None else None
         mouse_raw_chunk = mouse_raw_all[lo:hi].to(device) if mouse_raw_all is not None else None
 
         obs_mask = th.zeros(b, T, 1, 1, 1, device=device)
@@ -750,9 +764,10 @@ def run_debug_validation(model, diffusion, valset, device, out_dir,
             # VDT regresses continuous codes; snap to the nearest FSQ lattice point here, at inference, never during training.
             act_for_decode = (debug_actions.quantize_km_fsq(samples_act)
                               if action_quantization == "fsq" and samples_act is not None else samples_act)
-            p_key_chunk, p_mouse_chunk, p_key_prob_chunk = (_decode_km_actions(km_tokenizer, act_for_decode)
+            all_keys = keys79_all is not None
+            p_key_chunk, p_mouse_chunk, p_key_prob_chunk = (_decode_km_actions(km_tokenizer, act_for_decode, all_keys)
                                           if act_for_decode is not None else (None, None, None))
-            g_key_chunk, g_mouse_chunk, _g_key_prob_chunk = (_decode_km_actions(km_tokenizer, keypress_chunk)
+            g_key_chunk, g_mouse_chunk, _g_key_prob_chunk = (_decode_km_actions(km_tokenizer, keypress_chunk, all_keys)
                                           if keypress_chunk is not None else (None, None, None))
             metrics_quantize = "none"  # already hard-thresholded booleans; nothing left to snap
         elif is_raw_fused:
@@ -783,7 +798,7 @@ def run_debug_validation(model, diffusion, valset, device, out_dir,
             rec.update({f"roll/{k}": v for k, v in m_roll.items()})
             # CE scores against the real multi-hot, not g_key -- under km_fsq that is itself a thresholded round-trip.
             p_key_prob = p_key_prob_chunk[j].to(device) if p_key_prob_chunk is not None else None
-            g_key_true = keypress_raw_chunk[j].to(device) if keypress_raw_chunk is not None else None
+            g_key_true = key_true_chunk[j] if key_true_chunk is not None else None
             p_key = p_key_chunk[j].to(device) if p_key_chunk is not None and g_key_chunk is not None else None
             g_key = g_key_chunk[j].to(device) if p_key is not None else None
             p_mouse = p_mouse_chunk[j].to(device) if p_mouse_chunk is not None and g_mouse_chunk is not None else None
@@ -931,7 +946,7 @@ def run_debug_validation(model, diffusion, valset, device, out_dir,
             # No swap overlay for this row (plaicraft-debug#93): still show GT beside the model's own rollout.
             if log_videos and not (swap_test and row_has_swap) and keypress_raw_chunk is not None:
                 try:
-                    gt_bars = (keypress_raw_chunk[j].cpu().numpy(), mouse_raw_chunk[j].cpu().numpy())
+                    gt_bars = (key_true_chunk[j].cpu().numpy(), mouse_raw_chunk[j].cpu().numpy())
                     gen_bars = ((p_key_chunk[j].cpu().numpy(), p_mouse_chunk[j].cpu().numpy())
                                 if p_key_chunk is not None and p_mouse_chunk is not None else gt_bars)
                     mp4 = out_dir / f"step{step}_{slug}_gen.mp4"

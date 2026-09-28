@@ -238,3 +238,16 @@ def test_player_index_fn_labels_each_row_with_its_session_player(tmp_path, monke
                              session_root=tmp_path / "corpus")
     assert vs.player_labels.tolist() == [7, 8, 9]
     assert CorpusValidationSet(vdir, T=T, n_observed=N_OBS).player_labels is None
+
+
+def test_load_all_keys79_slices_each_rows_window_from_the_79key_ticks(tmp_path, monkeypatch):
+    from improved_diffusion import debug_actions
+    vdir = _make_fixture_no_swap(tmp_path)
+    monkeypatch.setattr(debug_actions, "load_or_build_raw", lambda d, action_builder: (np.zeros((400, 8)), np.zeros((400, 2))))
+    ticks = {f"sess{i}": np.random.RandomState(i).rand(400, 79).astype(np.float32) for i in range(len(NAMES))}
+    monkeypatch.setattr(debug_actions, "load_ticks_79", lambda d: ticks[d.name])
+    vs = CorpusValidationSet(vdir, T=T, n_observed=N_OBS, session_root=tmp_path / "corpus", action_builder="raw79")
+    keys79 = vs.load_all_keys79()
+    assert keys79.shape == (len(NAMES), T, 79)
+    assert np.array_equal(keys79[2].numpy(), ticks["sess2"][300:300 + T])
+    assert CorpusValidationSet(vdir, T=T, n_observed=N_OBS).load_all_keys79() is None  # debug world: 8 keys only

@@ -117,3 +117,48 @@ def _x0_through_p_mean_variance(space):
 def test_latent_x0_is_not_clamped_to_the_pixel_range():
     assert _x0_through_p_mean_variance("latent").min() > 2.9
     assert _x0_through_p_mean_variance("pixel").max() == 1.0
+
+
+class _KmValset(_LatentValset):
+    """PLAICraft rows whose ground truth holds only e, a key the 8-key readout cannot see."""
+    E = 5  # KEYPRESS_LOOKUP["e"]
+
+    def load_all_actions(self):
+        return torch.zeros(3, T, 36), torch.zeros(3, T, 0)
+
+    def load_all_keys79(self):
+        keys = torch.zeros(3, T, 79)
+        keys[:, N_OBS:, self.E] = 1
+        return keys
+
+
+class _KmDiffusion(_LatentDiffusion):
+    action_encoding = "km_fsq"
+
+    def heun_sample(self, model, shape, **kwargs):
+        video = (torch.rand(*shape) * 2 - 1).double()
+        return (video, (torch.zeros(shape[0], shape[1], 36).double(), None)), None
+
+
+class _KmModel(_StubModel):
+    mouse_dim, generate_mouse = 0, False  # km_fsq folds the mouse into its codes
+
+
+def test_km_fsq_scores_all_79_keys_when_the_valset_has_them(monkeypatch, tmp_path):
+    seen = []
+
+    def decode(tokenizer, codes, all_keys=False):
+        seen.append(all_keys)
+        probs = torch.zeros(*codes.shape[:2], 79 if all_keys else 8)
+        probs[..., _KmValset.E] = 1.0  # the model holds e throughout
+        return (probs > 0.5).float(), torch.zeros(*codes.shape[:2], 2), probs
+
+    monkeypatch.setattr(dv, "_get_km_tokenizer", lambda *a, **k: object())
+    monkeypatch.setattr(dv, "_decode_km_actions", decode)
+    monkeypatch.setattr(dv, "_METRICS", lambda pred, gt: dict.fromkeys(("psnr", "ssim", "lpips", "l2", "rmse", "l1"), 1.0))
+    monkeypatch.setattr(fvdmod, "_FEATURES", _features)
+    res = dv.run_debug_validation(_KmModel(), _KmDiffusion(), _KmValset(), "cpu", out_dir=tmp_path,
+                                  log_videos=False, swap_test=False)
+    assert seen and all(seen)
+    assert res["aggregate"]["val/action_roll/key_cross_entropy"] < 0.01
+    assert res["aggregate"]["val/action_roll/key_jaccard_distance"] == 0.0

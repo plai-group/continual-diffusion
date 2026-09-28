@@ -336,6 +336,16 @@ def _raw_cache_paths(session_dir):
             session_dir / "actions_raw.json")
 
 
+def load_ticks_79(session_dir):
+    """(n_ticks, 79) tick-resolution keys over PLAICraft's whole vocabulary: load_or_build_raw's
+    raw79 arm without its slice down to the 8 debug keys (plaicraft-debug#93). Uncached, as only
+    validation reads it, once per session."""
+    session_dir = Path(session_dir)
+    n_ticks = _n_ticks_from_hdf5(session_dir)
+    key_sub, _ = build_action_array_79(session_dir / f"{session_dir.name}.db", n_ticks)
+    return key_sub.reshape(n_ticks, SUBBINS_PER_TICK, KEYPRESS_DIM_79).any(axis=1).astype(np.float32)
+
+
 def load_or_build_raw(session_dir, action_builder="raw8"):
     """Tick-resolution ground truth, for overlays and interventions: (n_ticks, 8) keys
     (OR-reduced over the tick's 8 sub-bins) + (n_ticks, 2) raw-pixel mouse (summed over

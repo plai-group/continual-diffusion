@@ -94,10 +94,23 @@ def _draw_mouse_arrow(content, dx, dy):
                     cv2.LINE_AA, tipLength=DECODE_MOUSE_ARROW_TIP_LEN)
 
 
+def _draw_extra_keys(content, names):
+    """Held keys beyond the 8 boxed debug ones (PLAICraft's full vocabulary, plaicraft-debug#93), one line along the bottom."""
+    if not names:
+        return
+    text = " ".join(names)
+    (w, h), _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, DECODE_KEY_FONT_SCALE, DECODE_KEY_FONT_THICKNESS)
+    x, y = 10, content.shape[0] - 12
+    cv2.rectangle(content, (x - 6, y - h - 8), (x + w + 6, y + 8), (255, 255, 255), -1)
+    cv2.putText(content, text, (x, y), cv2.FONT_HERSHEY_SIMPLEX, DECODE_KEY_FONT_SCALE,
+                (0, 0, 0), DECODE_KEY_FONT_THICKNESS, cv2.LINE_AA)
+
+
 def _overlay_frame(frame_uint8, action, border):
     """frame_uint8: (H, W, 3) uint8 RGB content frame, already upscaled."""
     content = frame_uint8.copy()
     _draw_mouse_arrow(content, action["mouseDX"], action["mouseDY"])
+    _draw_extra_keys(content, action.get("extra"))
 
     c_h, c_w = content.shape[:2]
     top_bar = np.full((DECODE_TOP_BAR_HEIGHT, c_w, 3), 255, dtype=np.uint8)

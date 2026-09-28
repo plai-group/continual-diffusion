@@ -71,6 +71,7 @@ def test_decode_then_encode_km_actions_round_trip():
     # A trained tokenizer should recover simple, sparse actions near-exactly.
     assert (mouse_hat - mouse_raw).abs().mean().item() < 2.0
     assert torch.equal((probs_hat > 0.5).float(), keys_hat)
+    assert dv._decode_km_actions(tokenizer, codes, all_keys=True)[2].shape == (1, 3, 79)
 
 
 def test_decode_pred_actions_returns_two_values_for_every_encoding():
@@ -123,3 +124,20 @@ def test_load_action_window_raw_ignores_action_encoding(tmp_path):
     expected_keypress, expected_mouse = da.load_or_build_raw(session_dir)
     assert torch.equal(raw_keypress, torch.from_numpy(np.asarray(expected_keypress, dtype=np.float32)))
     assert torch.equal(raw_mouse, torch.from_numpy(np.asarray(expected_mouse, dtype=np.float32)))
+
+
+def test_action_vec_to_bar_names_held_keys_outside_the_debug_eight():
+    from improved_diffusion.km_tokenizer.keypress_lookup import KEYPRESS_LOOKUP
+    vec = np.zeros(79)
+    vec[[KEYPRESS_LOOKUP["w"], KEYPRESS_LOOKUP["e"], KEYPRESS_LOOKUP["1"]]] = 1
+    bar = dv._action_vec_to_bar(vec, [0.0, 0.0])
+    assert bar["keys"] == ["w"] and bar["clicks"] == [] and bar["extra"] == ["e", "1"]
+    assert "extra" not in dv._action_vec_to_bar(np.eye(8)[0], [0.0, 0.0])  # debug-world bars unchanged
+
+
+def test_overlay_names_extra_keys_along_the_bottom_only():
+    from improved_diffusion.decode_debug import _overlay_frame
+    frame = np.zeros((192, 320, 3), np.uint8)
+    base = dict(keys=[], clicks=[], mouseDX=0.0, mouseDY=0.0)
+    plain, named = _overlay_frame(frame, base, False), _overlay_frame(frame, {**base, "extra": ["e"]}, False)
+    assert (plain != named).any() and (plain[:-70] == named[:-70]).all()

@@ -1,4 +1,5 @@
 import math
+import numpy as np
 from typing import TypeVar, Optional, Iterator, Dict, Any
 import blobfile as bf
 
@@ -141,19 +142,25 @@ class DistributedOfflineSampler(DistributedSampler):
         self.start_index = 0
         self.next_index = self.start_index
 
-    def __iter__(self) -> Iterator[T_co]:
+    def _build_indices(self):
+        """The flat index stream; consecutive runs of batch_size become one gradient step."""
         indices = []
         for b_index in range(self.batch_size):
             g = torch.Generator()
             g.manual_seed(self.seed + b_index)
             b_indices = torch.randperm(len(self.dataset), generator=g).tolist()  # type: ignore[arg-type]
             indices += b_indices
+        assert len(self.dataset) * self.batch_size <= len(indices)
+        return indices
+
+    def __iter__(self) -> Iterator[T_co]:
+        indices = self._build_indices()
 
         # add extra samples to make it evenly divisible among replicas
         padding_size = len(indices) % self.num_replicas
         if padding_size > 0:
             indices += indices[:padding_size]
-        assert len(self.dataset) * self.batch_size <= len(indices) and len(indices) % self.num_replicas == 0
+        assert len(indices) % self.num_replicas == 0
 
         local_indices = indices[self.start_index+self.rank : len(indices) : self.num_replicas]
 
@@ -184,3 +191,53 @@ class DistributedOfflineSampler(DistributedSampler):
         to_save = dict(next_index=self.next_index)
         with bf.BlobFile(path, "wb") as f:
             torch.save(to_save, f)
+
+
+class PlayerBlockSampler(DistributedOfflineSampler):
+    """DistributedOfflineSampler, but every gradient step draws its windows from ONE player.
+
+    The default sampler permutes all windows together, so a batch mixes players and the MSE the
+    optimizer sees is an average over two conditional distributions -- both embedding rows are
+    then updated from one shared error signal. Blocking by player removes that: each step's
+    gradient comes from a single conditional.
+
+    plaicraft-model-pi0 gets the same effect incidentally, by leaving shuffle off over an index
+    the SQL already returned `ORDER BY player_name` (mapstyle.py:120). Sorting our index that way
+    would ALSO impose a curriculum, since our sessions interleave players by id; shuffling whole
+    single-player batches keeps the change to batch composition alone.
+    """
+
+    def _build_indices(self):
+        if not hasattr(self.dataset, "window_players"):
+            raise TypeError(
+                f"player-homogeneous batching needs a dataset exposing window_players(); "
+                f"{type(self.dataset).__name__} does not."
+            )
+        players = np.asarray(self.dataset.window_players())
+        assert len(players) == len(self.dataset), "window_players() must align with __getitem__"
+
+        batches = []
+        for rep in range(self.batch_size):
+            for player in np.unique(players):
+                member = np.flatnonzero(players == player)
+                if len(member) < self.batch_size:
+                    continue  # too few windows to fill even one pure batch
+                g = torch.Generator()
+                g.manual_seed(self.seed + 10007 * rep + int(player))
+                perm = member[torch.randperm(len(member), generator=g).numpy()]
+                # Drop the remainder rather than topping it up from another player: a single
+                # mixed batch would silently defeat the whole point of this sampler.
+                keep = (len(perm) // self.batch_size) * self.batch_size
+                batches.append(perm[:keep].reshape(-1, self.batch_size))
+
+        if not batches:
+            raise ValueError(
+                f"no player has at least batch_size={self.batch_size} windows; "
+                f"cannot build a single player-homogeneous batch."
+            )
+
+        stacked = np.concatenate(batches, axis=0)
+        g = torch.Generator()
+        g.manual_seed(self.seed)
+        order = torch.randperm(len(stacked), generator=g).numpy()
+        return stacked[order].reshape(-1).tolist()

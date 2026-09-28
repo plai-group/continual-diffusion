@@ -10,7 +10,7 @@ from pathlib import Path
 import shutil
 from typing import Tuple
 from mpi4py import MPI
-from improved_diffusion.data_sampler import DistributedReplaySampler, DistributedOfflineSampler
+from improved_diffusion.data_sampler import DistributedReplaySampler, DistributedOfflineSampler, PlayerBlockSampler
 
 from .train_util import get_blob_logdir
 from .test_util import Protect
@@ -114,7 +114,8 @@ def get_data_path(dataset_name):
 
 def load_data(dataset_name, batch_size, T=None, deterministic=False, num_workers=1, return_dataset=False,
               resume_id='', seed=0, buffer_size=None, n_sequential=1, save_every=None, frame_range=(0, None),
-              action_encoding="raw", tokenizer_checkpoint=None):
+              action_encoding="raw", tokenizer_checkpoint=None, num_classes=0,
+              player_homogeneous_batches=False):
     data_path = get_data_path(dataset_name)
     T = default_T_dict[dataset_name] if T is None else T
     shard = MPI.COMM_WORLD.Get_rank()
@@ -140,7 +141,8 @@ def load_data(dataset_name, batch_size, T=None, deterministic=False, num_workers
         dataset = ContinuousEgoLifeDataset(data_path, window_length=T, frame_range=frame_range)
     elif "debug_toy" in dataset_name:
         dataset = ContinuousDebugDataset(data_path, window_length=T, frame_range=frame_range,
-                                         action_encoding=action_encoding, tokenizer_checkpoint=tokenizer_checkpoint)
+                                         action_encoding=action_encoding, tokenizer_checkpoint=tokenizer_checkpoint,
+                                         num_classes=num_classes)
     else:
         raise Exception("no dataset", dataset_name)
 
@@ -151,6 +153,8 @@ def load_data(dataset_name, batch_size, T=None, deterministic=False, num_workers
     if deterministic:
         sampler = DistributedReplaySampler(dataset, batch_size, buffer_size=buffer_size, seed=seed,
                                            n_sequential=n_sequential, save_args=dict(path=save_path, every=save_every))
+    elif player_homogeneous_batches:
+        sampler = PlayerBlockSampler(dataset, batch_size, seed=seed, save_args=dict(path=save_path, every=save_every))
     else:
         sampler = DistributedOfflineSampler(dataset, batch_size, seed=seed, save_args=dict(path=save_path, every=save_every))
 
@@ -158,6 +162,10 @@ def load_data(dataset_name, batch_size, T=None, deterministic=False, num_workers
         load_path = os.path.join(get_blob_logdir(resume_id), 'replay_state.pt')
         sampler.load_sampler(path=load_path)
         print(f"starting sampler from data index {sampler.start_index}.")
+
+    # Which sampler ran is the whole variable in the #85 A/B; without this a flag that silently
+    # failed to take would look identical in the logs to one that did.
+    print(f"sampler: {type(sampler).__name__}")
 
     batch_size = batch_size // dist.get_world_size()
     loader = DataLoader(dataset, batch_size=batch_size, num_workers=num_workers, sampler=sampler)
@@ -167,7 +175,7 @@ def load_data(dataset_name, batch_size, T=None, deterministic=False, num_workers
 
 def get_eval_dataset(dataset_name, T=None, seed=0, train=False, eval_dataset_config=eval_dataset_configs["default"],
                      frame_range=(0, None), spacing_kwargs=dict(n_data=None), custom_clip_path=None,
-                     action_encoding="raw", tokenizer_checkpoint=None):
+                     action_encoding="raw", tokenizer_checkpoint=None, num_classes=0):
     """
     """
     data_path = get_data_path(dataset_name)
@@ -229,7 +237,8 @@ def get_eval_dataset(dataset_name, T=None, seed=0, train=False, eval_dataset_con
             dataset = SpacedEgoLifeDataset(**spacing_kwargs, **shared_args)
     elif "debug_toy" in dataset_name:
         shared_args = dict(dataset_path=data_path, window_length=T, frame_range=frame_range,
-                           action_encoding=action_encoding, tokenizer_checkpoint=tokenizer_checkpoint)
+                           action_encoding=action_encoding, tokenizer_checkpoint=tokenizer_checkpoint,
+                           num_classes=num_classes)
         if eval_dataset_config == eval_dataset_configs["continuous"]:
             dataset = ContinuousDebugDataset(**shared_args)
         elif eval_dataset_config == eval_dataset_configs["chunked"]:

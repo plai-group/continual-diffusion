@@ -6,7 +6,7 @@ import h5py
 import imageio
 import numpy as np
 
-from improved_diffusion.debug_actions import load_or_build_raw
+from improved_diffusion.debug_actions import load_or_build_raw, load_ticks_79
 from improved_diffusion.debug_validation import _action_bars
 from improved_diffusion.decode_debug import DECODE_VIDEO_FPS, _overlay_frame, _to_uint8_frame, maybe_decode_frames
 
@@ -17,6 +17,8 @@ def render_clip(session_dir, start, length, out_path, action_builder="raw79", va
         frames = f["frames"][start:start + length]
     pixels = np.asarray(maybe_decode_frames(np.asarray(frames, dtype=np.float32), vae=vae), dtype=np.float32)
     keypress, mouse = load_or_build_raw(session_dir, action_builder=action_builder)
+    if action_builder == "raw79":
+        keypress = load_ticks_79(session_dir)  # all 79 keys, causally shifted like the cache
     bars = _action_bars(keypress[start:start + len(pixels)], mouse[start:start + len(pixels)])
     writer = imageio.get_writer(str(out_path), fps=DECODE_VIDEO_FPS)
     for px, bar in zip(pixels, bars):

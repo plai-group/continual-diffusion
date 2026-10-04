@@ -414,7 +414,7 @@ _ACTION_CLICK_NAMES = ["left", "right"]
 
 
 def _action_vec_to_bar(key_vec, mouse_vec):
-    """One 8-d keypress vector + one 2-d mouse vector (raw pixels, plaicraft-debug#80 --
+    """One 8-d (debug) or 79-d (PLAICraft) keypress vector + one 2-d mouse vector (raw pixels, plaicraft-debug#80 --
     NOT symlog) -> the dict decode_debug._overlay_frame draws.
 
     Lets each row of the swap overlay show the actions it was ACTUALLY generated
@@ -424,20 +424,15 @@ def _action_vec_to_bar(key_vec, mouse_vec):
     """
     key_vec = np.asarray(key_vec, dtype=np.float32)
     mouse_vec = np.asarray(mouse_vec, dtype=np.float32)
-    extra = {}
     if key_vec.shape[-1] == debug_actions.KEYPRESS_DIM_79:
-        # PLAICraft (plaicraft-debug#93): the 8 debug keys keep their boxes, every other held key is named.
+        # PLAICraft (plaicraft-debug#93): every held key of the 79 is boxed top-left; mouse buttons go to the click box.
         from .km_tokenizer.keypress_lookup import INDEX_TO_KEYPRESS_LABEL
-        from .km_tokenizer.keypress_scatter import _RAW_POSITIONS
-        extra = {"extra": [INDEX_TO_KEYPRESS_LABEL[i] for i in np.flatnonzero(key_vec > 0.5) if i not in _RAW_POSITIONS]}
-        key_vec = key_vec[_RAW_POSITIONS]
-    return {
-        "keys": [n for i, n in enumerate(_ACTION_KEY_NAMES) if key_vec[i] > 0.5],
-        "clicks": [n for i, n in enumerate(_ACTION_CLICK_NAMES) if key_vec[6 + i] > 0.5],
-        "mouseDX": float(mouse_vec[0]),
-        "mouseDY": float(mouse_vec[1]),
-        **extra,
-    }
+        held = [INDEX_TO_KEYPRESS_LABEL[i] for i in np.flatnonzero(key_vec > 0.5)]
+        keys, clicks = [n for n in held if not n.startswith("mouse_")], [n[6:] for n in held if n.startswith("mouse_")]
+    else:
+        keys = [n for i, n in enumerate(_ACTION_KEY_NAMES) if key_vec[i] > 0.5]
+        clicks = [n for i, n in enumerate(_ACTION_CLICK_NAMES) if key_vec[6 + i] > 0.5]
+    return {"keys": keys, "clicks": clicks, "mouseDX": float(mouse_vec[0]), "mouseDY": float(mouse_vec[1])}
 
 
 def _to_display_actions(a):
@@ -462,7 +457,7 @@ def _to_display_actions(a):
 
 
 def _action_bars(keypress, mouse):
-    """(T, 8) + (T, 2) causal action arrays -> the T bar dicts _overlay_frame draws."""
+    """(T, 8 or 79) + (T, 2) causal action arrays -> the T bar dicts _overlay_frame draws."""
     dk, dm = _to_display_actions(keypress), _to_display_actions(mouse)
     return [_action_vec_to_bar(dk[t], dm[t]) for t in range(dk.shape[0])]
 

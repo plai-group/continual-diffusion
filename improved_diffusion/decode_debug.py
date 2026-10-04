@@ -37,30 +37,33 @@ KEY_ID_TO_NAME = {
 # ------------------------------------------------------------------ #
 #  Drawing helpers (ported from plaicraft-model-pi0's decode_debug.py)
 # ------------------------------------------------------------------ #
+def _fit_key_boxes(pressed_names, frame_w):
+    """Row-wrapped key boxes in the bar's left section; font, box and gap shrink together until every held key fits."""
+    max_w, scale = int(frame_w * DECODE_LEFT_SECTION_MAX_W), DECODE_KEY_FONT_SCALE
+    while True:
+        k = scale / DECODE_KEY_FONT_SCALE
+        box_h, pad, gap, thick = int(DECODE_KEY_BOX_HEIGHT * k), max(2, int(DECODE_KEY_BOX_PADDING_X * k)), max(2, int(DECODE_KEY_ROW_GAP * k)), 2 if k > 0.5 else 1
+        x, y, boxes = 10, 10, []
+        for name in pressed_names:
+            (text_w, text_h), _ = cv2.getTextSize(name, cv2.FONT_HERSHEY_SIMPLEX, scale, thick)
+            box_w = text_w + 2 * pad
+            if x > 10 and x + box_w > max_w:
+                x, y = 10, y + box_h + gap
+            boxes.append((name, x, y, box_w, text_w, text_h))
+            x += box_w + gap
+        if scale < 0.15 or (y + box_h <= DECODE_TOP_BAR_HEIGHT and all(bx + bw <= max_w for _, bx, _, bw, _, _ in boxes)):
+            return boxes, box_h, scale, thick
+        scale *= 0.9
+
+
 def _draw_keyboard_keys(bar, pressed_names, frame_w):
     if not pressed_names:
         return
-    key_x, key_y = 10, 10
-    max_w = int(frame_w * DECODE_LEFT_SECTION_MAX_W)
-    for key_name in pressed_names:
-        (text_w, text_h), _ = cv2.getTextSize(
-            key_name, cv2.FONT_HERSHEY_SIMPLEX,
-            DECODE_KEY_FONT_SCALE, DECODE_KEY_FONT_THICKNESS
-        )
-        box_w = text_w + 2 * DECODE_KEY_BOX_PADDING_X
-        if key_x + box_w > max_w:
-            key_x = 10
-            key_y += DECODE_KEY_BOX_HEIGHT + DECODE_KEY_ROW_GAP
-            if key_y + DECODE_KEY_BOX_HEIGHT > DECODE_TOP_BAR_HEIGHT:
-                break
-        cv2.rectangle(bar, (key_x, key_y),
-                      (key_x + box_w, key_y + DECODE_KEY_BOX_HEIGHT), (0, 0, 0), 2)
-        text_x = key_x + (box_w - text_w) // 2
-        text_y = key_y + (DECODE_KEY_BOX_HEIGHT + text_h) // 2
-        cv2.putText(bar, key_name, (text_x, text_y),
-                    cv2.FONT_HERSHEY_SIMPLEX, DECODE_KEY_FONT_SCALE,
-                    (0, 0, 0), DECODE_KEY_FONT_THICKNESS, cv2.LINE_AA)
-        key_x += box_w + DECODE_KEY_ROW_GAP
+    boxes, box_h, scale, thick = _fit_key_boxes(pressed_names, frame_w)
+    for name, x, y, box_w, text_w, text_h in boxes:
+        cv2.rectangle(bar, (x, y), (x + box_w, y + box_h), (0, 0, 0), thick)
+        cv2.putText(bar, name, (x + (box_w - text_w) // 2, y + (box_h + text_h) // 2),
+                    cv2.FONT_HERSHEY_SIMPLEX, scale, (0, 0, 0), thick, cv2.LINE_AA)
 
 
 def _draw_mouse_clicks(bar, pressed_clicks, frame_w):
@@ -94,23 +97,10 @@ def _draw_mouse_arrow(content, dx, dy):
                     cv2.LINE_AA, tipLength=DECODE_MOUSE_ARROW_TIP_LEN)
 
 
-def _draw_extra_keys(content, names):
-    """Held keys beyond the 8 boxed debug ones (PLAICraft's full vocabulary, plaicraft-debug#93), one line along the bottom."""
-    if not names:
-        return
-    text = " ".join(names)
-    (w, h), _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, DECODE_KEY_FONT_SCALE, DECODE_KEY_FONT_THICKNESS)
-    x, y = 10, content.shape[0] - 12
-    cv2.rectangle(content, (x - 6, y - h - 8), (x + w + 6, y + 8), (255, 255, 255), -1)
-    cv2.putText(content, text, (x, y), cv2.FONT_HERSHEY_SIMPLEX, DECODE_KEY_FONT_SCALE,
-                (0, 0, 0), DECODE_KEY_FONT_THICKNESS, cv2.LINE_AA)
-
-
 def _overlay_frame(frame_uint8, action, border):
     """frame_uint8: (H, W, 3) uint8 RGB content frame, already upscaled."""
     content = frame_uint8.copy()
     _draw_mouse_arrow(content, action["mouseDX"], action["mouseDY"])
-    _draw_extra_keys(content, action.get("extra"))
 
     c_h, c_w = content.shape[:2]
     top_bar = np.full((DECODE_TOP_BAR_HEIGHT, c_w, 3), 255, dtype=np.uint8)

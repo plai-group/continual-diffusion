@@ -72,6 +72,7 @@ def test_render_clip_decodes_latents_and_draws_one_frame_per_tick(tmp_path, monk
     with h5py.File(sd / "encoded_video_hdf5" / "abcd.hdf5", "w") as f:
         f.create_dataset("frames", data=np.zeros((12, 4, 24, 40), np.float16))
     monkeypatch.setattr(rso, "load_or_build_raw", lambda d, action_builder: (np.zeros((12, 8)), np.zeros((12, 2))))
+    monkeypatch.setattr(rso, "load_ticks_79", lambda d: np.zeros((12, 79)))  # raw79 sessions draw all 79 keys
     written = []
     monkeypatch.setattr(rso.imageio, "get_writer", lambda *a, **k: type("W", (), {
         "append_data": lambda s, im: written.append(im.shape), "close": lambda s: None})())

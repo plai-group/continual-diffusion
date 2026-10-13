@@ -32,7 +32,7 @@ def test_action_vec_to_bar_passes_pixels_through_unchanged():
 
 
 def test_get_km_tokenizer_is_cached_singleton():
-    dv._KM_TOKENIZER = None
+    dv._KM_TOKENIZERS.clear()
     t1 = dv._get_km_tokenizer("cpu")
     t2 = dv._get_km_tokenizer("cpu")
     assert t1 is t2

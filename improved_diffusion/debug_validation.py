@@ -218,19 +218,24 @@ def _get_metrics(device):
     return _METRICS
 
 
-_KM_TOKENIZER = None
+_KM_TOKENIZERS = {}
 
 
-def _get_km_tokenizer(device, checkpoint=None):
-    """Lazily load the frozen km tokenizer once, cached like _get_metrics -- validation is
-    the only place this module needs it, for decoding a km_fsq run's generated codes and
-    for encoding a swap/zero intervention live (plaicraft-debug#80)."""
-    global _KM_TOKENIZER
-    if _KM_TOKENIZER is None:
-        from .km_tokenizer.model import DEFAULT_CHECKPOINT, load_tokenizer
+def _get_km_tokenizer(device, checkpoint=None, encoding="km_fsq"):
+    """Lazily load the frozen km tokenizer once per encoding, cached like _get_metrics --
+    validation is the only place this module needs one, for decoding a run's generated codes
+    and for encoding a swap/zero intervention live (plaicraft-debug#80, #96)."""
+    if encoding not in _KM_TOKENIZERS:
+        if encoding == "km_ctx14":
+            from .km_tokenizer.ctx14_10hz import DEFAULT_CHECKPOINT_DIR, load_ctx14_tokenizer
 
-        _KM_TOKENIZER = load_tokenizer(checkpoint_path=checkpoint or DEFAULT_CHECKPOINT, device=device)
-    return _KM_TOKENIZER
+            _KM_TOKENIZERS[encoding] = load_ctx14_tokenizer(
+                checkpoint_dir=checkpoint or DEFAULT_CHECKPOINT_DIR, device=device)
+        else:
+            from .km_tokenizer.model import DEFAULT_CHECKPOINT, load_tokenizer
+
+            _KM_TOKENIZERS[encoding] = load_tokenizer(checkpoint_path=checkpoint or DEFAULT_CHECKPOINT, device=device)
+    return _KM_TOKENIZERS[encoding]
 
 
 def _symlog(v):
@@ -249,7 +254,9 @@ def _decode_km_actions(tokenizer, codes, all_keys=False):
     from .km_tokenizer.keypress_scatter import _RAW_POSITIONS
 
     B, T, _ = codes.shape
-    codes = codes.to(dtype=tokenizer.frame_pos.dtype)  # heun_sample's noise math can drift to float64
+    # heun_sample's noise math can drift to float64; any parameter's dtype works, km_ctx14's
+    # tokenizer has no top-level frame_pos like km_fsq's (plaicraft-debug#96).
+    codes = codes.to(dtype=next(tokenizer.parameters()).dtype)
     key_logits, _mouse_logits, mouse_pred = tokenizer.decode_codes(
         codes.reshape(B, T, tokenizer.config.num_tokens, tokenizer.config.fsq_dim)
     )
@@ -636,8 +643,10 @@ def run_debug_validation(model, diffusion, valset, device, out_dir,
     action_quantization = getattr(diffusion, "action_quantization", "none")
     action_encoding = getattr(diffusion, "action_encoding", "raw")
     is_km_fsq = action_encoding == "km_fsq"
+    is_km_ctx14 = action_encoding == "km_ctx14"
     is_raw_fused = action_encoding == "raw_fused"
-    km_tokenizer = _get_km_tokenizer(device, getattr(valset, "tokenizer_checkpoint", None)) if is_km_fsq else None
+    km_tokenizer = (_get_km_tokenizer(device, getattr(valset, "tokenizer_checkpoint", None), encoding=action_encoding)
+                    if is_km_fsq or is_km_ctx14 else None)
     sampling_model = _guided(model, cfg_scale, label_cfg_scale)
 
     T, n_obs = valset.T, valset.n_observed
@@ -653,7 +662,7 @@ def run_debug_validation(model, diffusion, valset, device, out_dir,
         keypress_all, mouse_all = None, None
         keypress_raw_all, mouse_raw_all = None, None
     # PLAICraft's km codes carry all 79 keys (plaicraft-debug#93): score and draw them all; elsewhere the 8 debug keys.
-    keys79_all = (valset.load_all_keys79() if is_km_fsq and keypress_raw_all is not None
+    keys79_all = (valset.load_all_keys79() if (is_km_fsq or is_km_ctx14) and keypress_raw_all is not None
                   and hasattr(valset, "load_all_keys79") else None)
     key_true_all = keys79_all if keys79_all is not None else keypress_raw_all
     # The unconditional keypress distribution over the whole pool: the fixed anchor CE has
@@ -755,11 +764,12 @@ def run_debug_validation(model, diffusion, valset, device, out_dir,
                 feats_fake.clear()
                 fvd_repeats = 0
 
-        if is_km_fsq:
+        if is_km_fsq or is_km_ctx14:
             # VDT regresses continuous codes; snap to the nearest FSQ lattice point here, at inference, never during training.
-            act_for_decode = (debug_actions.quantize_km_fsq(samples_act)
+            quantize_fn = debug_actions.quantize_km_ctx14 if is_km_ctx14 else debug_actions.quantize_km_fsq
+            act_for_decode = (quantize_fn(samples_act)
                               if action_quantization == "fsq" and samples_act is not None else samples_act)
-            all_keys = keys79_all is not None
+            all_keys = is_km_ctx14 or keys79_all is not None
             p_key_chunk, p_mouse_chunk, p_key_prob_chunk = (_decode_km_actions(km_tokenizer, act_for_decode, all_keys)
                                           if act_for_decode is not None else (None, None, None))
             g_key_chunk, g_mouse_chunk, _g_key_prob_chunk = (_decode_km_actions(km_tokenizer, keypress_chunk, all_keys)
@@ -807,7 +817,7 @@ def run_debug_validation(model, diffusion, valset, device, out_dir,
                     rec.update({f"{scope}/{k}": v
                                 for k, v in _action_metrics(p_key, g_key, p_mouse, g_mouse, sl,
                                                              metrics_quantize,
-                                                             is_km_fsq=is_km_fsq or is_raw_fused,
+                                                             is_km_fsq=is_km_fsq or is_km_ctx14 or is_raw_fused,
                                                              p_key_prob=p_key_prob,
                                                              g_key_true=g_key_true,
                                                              key_baserate_q=key_baserate_q).items()})

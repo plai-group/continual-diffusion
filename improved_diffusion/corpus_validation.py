@@ -138,6 +138,11 @@ class CorpusValidationSet:
         validation_dir/km_codes.npz; a stale or missing cache is rebuilt automatically.
         raw_fused -> (13, T, 10) [keypress, symlog(mouse)] + (13, T, 0) empty mouse; the
         npz's mouse array is raw pixels, so this symlog-compresses it, no tokenizer involved.
+        km_ctx14 -> (N, T, 32) codes + (N, T, 0) empty mouse, session_root only: the generated
+        region is a slice of the full-session cache (same as km_fsq), but the context region
+        [window_start, boundary_tick) is re-encoded in isolation (plaicraft-debug#96) -- ctx14's
+        encoder is bidirectional, so slicing it out of the full-session cache would let context
+        ticks near the boundary see the generated future through their +-14 tick reach.
         """
         if self.action_encoding == "raw":
             return self.load_all_actions_raw()
@@ -160,7 +165,29 @@ class CorpusValidationSet:
             km_codes = np.asarray(np.load(codes_path)["km_codes"], dtype=np.float32)
             empty_mouse = np.zeros((km_codes.shape[0], km_codes.shape[1], 0), dtype=np.float32)
             return th.from_numpy(km_codes), th.from_numpy(empty_mouse)
-        raise ValueError(f"unknown action_encoding {self.action_encoding!r}, expected 'raw', 'km_fsq', or 'raw_fused'")
+        if self.action_encoding == "km_ctx14" and self.session_root is not None:
+            from .km_tokenizer.ctx14_10hz import DEFAULT_CHECKPOINT_DIR, load_ctx14_tokenizer
+
+            checkpoint = self.tokenizer_checkpoint or DEFAULT_CHECKPOINT_DIR
+            tokenizer = load_ctx14_tokenizer(checkpoint_dir=checkpoint, device=self.device)
+            rows = []
+            for r in self.rows:
+                session_dir = self.session_root / r["session_id"]
+                full = np.asarray(debug_actions.load_or_build(
+                    session_dir, action_encoding="km_ctx14", tokenizer_checkpoint=checkpoint,
+                    device=self.device, action_builder=self.action_builder)[0], dtype=np.float32)
+                window = full[r["window_start"]:r["window_start"] + self.T].copy()
+                n_ctx = r["boundary_tick"] - r["window_start"]
+                # The non-causal encoder would otherwise leak the generated future into context
+                # codes near the boundary -- re-encode [window_start, boundary_tick) alone.
+                window[:n_ctx] = debug_actions.encode_km_ctx14_context(
+                    session_dir, r["window_start"], r["boundary_tick"], tokenizer, self.device, self.action_builder)
+                rows.append(window)
+            km_codes = np.stack(rows)
+            return th.from_numpy(km_codes), th.from_numpy(np.zeros((*km_codes.shape[:2], 0), dtype=np.float32))
+        raise ValueError(
+            f"unknown action_encoding {self.action_encoding!r}, expected 'raw', 'km_fsq', 'raw_fused', or 'km_ctx14'"
+        )
 
     def load_all_actions_raw(self):
         """(keypress: (13, T, 8), mouse: (13, T, 2)) float32, straight from the npz.

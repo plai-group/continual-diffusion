@@ -112,6 +112,26 @@ def test_km_ctx14_codes_are_identical_whether_or_not_the_session_is_chunked(tmp_
     assert np.allclose(np.asarray(whole), np.asarray(chunked), atol=1e-5)
 
 
+def test_encode_km_ctx14_context_ignores_actions_after_boundary(tmp_path):
+    """plaicraft-debug#96 B4: the bidirectional encoder must never see past `boundary` --
+    two sessions identical up to it, differing only after, must encode identically."""
+    from improved_diffusion.km_tokenizer.ctx14_10hz import KmTokenizerCtx14_10Hz, KmTokenizerCtx14_10HzConfig
+
+    torch.manual_seed(0)
+    tokenizer = KmTokenizerCtx14_10Hz(KmTokenizerCtx14_10HzConfig())
+    tokenizer.eval()
+
+    window_start, boundary = 2, 5
+    shared = [("87", 0, 300)]  # held through the shared prefix
+    a = _make_session_79(tmp_path / "a", fps=10.0, n_ticks=20, key_events=shared + [("65", 600, 900)])
+    b = _make_session_79(tmp_path / "b", fps=10.0, n_ticks=20, key_events=shared + [("83", 600, 1900)])
+
+    codes_a = da.encode_km_ctx14_context(a, window_start, boundary, tokenizer, "cpu", "raw79")
+    codes_b = da.encode_km_ctx14_context(b, window_start, boundary, tokenizer, "cpu", "raw79")
+    assert codes_a.shape == (boundary - window_start, da.KM_CTX14_CODE_DIM)
+    assert np.array_equal(codes_a, codes_b)
+
+
 def test_km_fsq_sub_binning_still_defaults_to_legacy_constant(tmp_path):
     """build_action_array_79 with no subbins_per_tick override must stay byte-identical to
     pre-#96 (km_fsq/raw's path, always 8)."""

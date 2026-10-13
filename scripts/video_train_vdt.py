@@ -117,6 +117,7 @@ def main():
         "latent": 4,
     }[args.diffusion_space]
     args.upper_frame_range = int(args.upper_frame_range) if args.upper_frame_range is not None else None
+    args.attn_window = int(args.attn_window) if args.attn_window is not None else None
     args.diffusion_space_kwargs = {
         "diffusion_space": args.diffusion_space,
         "pre_encoded": args.diffusion_space == "latent",

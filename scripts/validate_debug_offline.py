@@ -31,6 +31,7 @@ from improved_diffusion.script_util import (
     backfill_cond_combine,
     backfill_label_embedding_frozen,
     backfill_label_init_std,
+    backfill_attn_window,
     create_model_and_diffusion,
     model_and_diffusion_defaults,
 )
@@ -74,6 +75,7 @@ def main():
     backfill_cond_combine(ns)  # pre-#85-follow-up checkpoints predate the flag
     backfill_label_embedding_frozen(ns)  # pre-frozen-label checkpoints predate the flag
     backfill_label_init_std(ns)  # predates the flag; DiT's 0.02
+    backfill_attn_window(ns)  # predates the flag; unwindowed
     model, diffusion = create_model_and_diffusion(
         model_type=ns.model_type,
         **args_to_dict(ns, model_and_diffusion_defaults(model_type=ns.model_type).keys()),

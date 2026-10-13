@@ -207,6 +207,7 @@ def vdt_model_and_diffusion_defaults():
         label_frozen_scale=1.5,  # row norm of those orthogonal rows; inert unless frozen
         label_init_std=0.02,  # DiT's small init; 1.0 is nn.Embedding's own default
         independent_action_t=False,  # sample the action token's noise level separately from the video's; see plaicraft-debug#85
+        attn_window=None,  # spatial sublayer attends across +-attn_window frames for action/mouse tokens; see plaicraft-debug#97
         keypress_loss_weight=1.0,
         mouse_loss_weight=1.0,
         action_quantization="none",  # "none" | "codebook" | "fsq"; see plaicraft-debug#77, #80
@@ -250,6 +251,7 @@ def create_vdt_model_and_diffusion(
     label_frozen_scale=1.5,
     label_init_std=0.02,
     independent_action_t=False,
+    attn_window=None,
 ):
     diffusion = create_gaussian_diffusion(
         steps=diffusion_steps,
@@ -288,6 +290,7 @@ def create_vdt_model_and_diffusion(
         label_frozen_scale=label_frozen_scale,
         label_init_std=label_init_std,
         independent_action_t=independent_action_t,
+        attn_window=attn_window,
     )
     return model, diffusion
 
@@ -389,6 +392,12 @@ def backfill_label_init_std(model_args):
     """Pre-#85-third-pass checkpoints have no label_init_std saved; they all used DiT's 0.02."""
     if not hasattr(model_args, "label_init_std"):
         model_args.label_init_std = 0.02
+
+
+def backfill_attn_window(model_args):
+    """Pre-#97 checkpoints have no attn_window saved; they all trained the unwindowed path."""
+    if not hasattr(model_args, "attn_window"):
+        model_args.attn_window = None
 
 
 def str2bool(v):

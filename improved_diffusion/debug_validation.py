@@ -533,10 +533,12 @@ def _label_panel(panel, text):
     return panel
 
 
-def _render_panels(frames_list, actions_list, labels, n_observed, out_path, ncols):
+def _render_panels(frames_list, actions_list, labels, n_observed, out_path, ncols, fps=DECODE_VIDEO_FPS):
     """Shared writer for _render_triple_overlay: one panel per (frames, actions, label),
     arranged in an `ncols`-wide grid -- cv2's mp4v encodes fine and then will not play
-    in wandb, so this uses imageio/libx264 instead.
+    in wandb, so this uses imageio/libx264 instead. fps defaults to the 12.5Hz debug-world
+    rate; km_ctx14's 10Hz corpus passes its own (plaicraft-debug#96), else playback runs
+    ~25% fast.
     """
     frames_list = [np.asarray(f) for f in frames_list]
     T = frames_list[0].shape[0]
@@ -548,7 +550,7 @@ def _render_panels(frames_list, actions_list, labels, n_observed, out_path, ncol
     import imageio
 
     writer = imageio.get_writer(
-        str(out_path), fps=DECODE_VIDEO_FPS, codec="libx264",
+        str(out_path), fps=fps, codec="libx264",
         macro_block_size=1,
         ffmpeg_params=["-pix_fmt", "yuv420p"],
     )
@@ -569,7 +571,7 @@ def _render_panels(frames_list, actions_list, labels, n_observed, out_path, ncol
 
 def _render_triple_overlay(frames_gt, frames_true, frames_swap, frames_zero,
                            actions_gt, actions_true, actions_swap, actions_zero,
-                           n_observed, out_path, true_label="TRUE"):
+                           n_observed, out_path, true_label="TRUE", fps=DECODE_VIDEO_FPS):
     """2x2 grid mp4:  GT | TRUE  over  SWAP | ZERO.
 
     GT is included so the generated half can be judged against reality, not only
@@ -590,7 +592,7 @@ def _render_triple_overlay(frames_gt, frames_true, frames_swap, frames_zero,
         (frames_gt, frames_true, frames_swap, frames_zero),
         (actions_gt, actions_true, actions_swap, actions_zero),
         ["GT", true_label, "SWAP", "ZERO"],
-        n_observed, out_path, ncols=2,
+        n_observed, out_path, ncols=2, fps=fps,
     )
 
 
@@ -648,6 +650,8 @@ def run_debug_validation(model, diffusion, valset, device, out_dir,
     km_tokenizer = (_get_km_tokenizer(device, getattr(valset, "tokenizer_checkpoint", None), encoding=action_encoding)
                     if is_km_fsq or is_km_ctx14 else None)
     sampling_model = _guided(model, cfg_scale, label_cfg_scale)
+    # Overlay mp4s must play back at the corpus's own rate, not the 12.5Hz debug-world default.
+    overlay_fps = debug_actions.KM_CTX14_FPS if is_km_ctx14 else DECODE_VIDEO_FPS
 
     T, n_obs = valset.T, valset.n_observed
     # CorpusValidationSet (issue #81) rows carry swap_kind: their swap test targets
@@ -942,7 +946,7 @@ def run_debug_validation(model, diffusion, valset, device, out_dir,
                             actions_zero=((zero_key if zero_key is not None else key_zero_j[0]).cpu().numpy(),
                                           (zero_mouse if zero_mouse is not None else mouse_zero_j[0]).cpu().numpy()),
                             true_label=("GEN" if (true_key is not None or true_mouse is not None) else "TRUE"),
-                            n_observed=n_obs, out_path=str(mp4_swap),
+                            n_observed=n_obs, out_path=str(mp4_swap), fps=overlay_fps,
                         )
                         import wandb
                         logger.logkv(f"val/swap_overlay/{slug}", wandb.Video(str(mp4_swap)), distributed=False)
@@ -956,7 +960,7 @@ def run_debug_validation(model, diffusion, valset, device, out_dir,
                                 if p_key_chunk is not None and p_mouse_chunk is not None else gt_bars)
                     mp4 = out_dir / f"step{step}_{slug}_gen.mp4"
                     _render_panels((gt.cpu().numpy(), pred.cpu().numpy()), (gt_bars, gen_bars),
-                                   ["GT", "GEN"], n_obs, str(mp4), ncols=2)
+                                   ["GT", "GEN"], n_obs, str(mp4), ncols=2, fps=overlay_fps)
                     import wandb
                     logger.logkv(f"val/overlay/{slug}", wandb.Video(str(mp4)), distributed=False)
                 except Exception as e:
@@ -1010,7 +1014,7 @@ def run_debug_validation(model, diffusion, valset, device, out_dir,
 
 
 def _render_player_arm_overlay(frames_gt, frames_gen, actions_gt, actions_gen,
-                               n_observed, out_path, label="P0 red"):
+                               n_observed, out_path, label="P0 red", fps=DECODE_VIDEO_FPS):
     """1x2 mp4 for ONE player: its ground truth beside its own generation.
 
     This used to pack both players into a 2x2. One file per arm makes each readable alone and
@@ -1023,7 +1027,7 @@ def _render_player_arm_overlay(frames_gt, frames_gen, actions_gt, actions_gen,
     # The GT panel is named for the player it belongs to: "P0 red" -> "GT red".
     return _render_panels(
         (frames_gt, frames_gen), (actions_gt, actions_gen),
-        [f"GT {label.split()[-1]}", label], n_observed, out_path, ncols=2,
+        [f"GT {label.split()[-1]}", label], n_observed, out_path, ncols=2, fps=fps,
     )
 
 

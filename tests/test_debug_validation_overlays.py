@@ -85,6 +85,63 @@ def test_swap_overlay_draws_gt_and_generated_separately(monkeypatched=None):
     print("  [PASS] swap overlay draws GT and generated actions from separate arrays")
 
 
+def test_render_panels_defaults_to_the_12_5hz_debug_world_rate():
+    """plaicraft-debug#96: a caller that doesn't pass fps must stay byte-identical to pre-#96."""
+    seen = {}
+    orig = _patch_writer(seen)
+    try:
+        dv._render_panels((_frames(), _frames()), (_actions(0), _actions(1)), ["GT", "GEN"], 3, "/dev/null", ncols=2)
+    finally:
+        _unpatch_writer(orig)
+    assert seen["fps"] == dv.DECODE_VIDEO_FPS
+
+
+def test_render_panels_honours_an_explicit_fps():
+    """km_ctx14's 10Hz corpus must write its overlays at 10fps, not 12.5 (plaicraft-debug#96)."""
+    seen = {}
+    orig = _patch_writer(seen)
+    try:
+        dv._render_panels((_frames(), _frames()), (_actions(0), _actions(1)), ["GT", "GEN"], 3, "/dev/null", ncols=2, fps=10.0)
+    finally:
+        _unpatch_writer(orig)
+    assert seen["fps"] == 10.0
+
+
+def test_render_triple_overlay_and_player_arm_overlay_pass_fps_through():
+    for call in (
+        lambda fps: dv._render_triple_overlay(
+            frames_gt=_frames(), frames_true=_frames(), frames_swap=_frames(), frames_zero=_frames(),
+            actions_gt=_actions(0), actions_true=_actions(1), actions_swap=_actions(2), actions_zero=_actions(3),
+            n_observed=3, out_path="/dev/null", fps=fps),
+        lambda fps: dv._render_player_arm_overlay(
+            frames_gt=_frames(), frames_gen=_frames(), actions_gt=_actions(0), actions_gen=_actions(1),
+            n_observed=3, out_path="/dev/null", fps=fps),
+    ):
+        seen = {}
+        orig = _patch_writer(seen)
+        try:
+            call(10.0)
+        finally:
+            _unpatch_writer(orig)
+        assert seen["fps"] == 10.0
+
+
+def _patch_writer(seen):
+    import imageio
+    orig = imageio.get_writer
+
+    def _fake(*a, **k):
+        seen["fps"] = k.get("fps")
+        return _NullWriter()
+    imageio.get_writer = _fake
+    return orig
+
+
+def _unpatch_writer(orig):
+    import imageio
+    imageio.get_writer = orig
+
+
 # ---- stub out the mp4 writer; these tests are about wiring, not encoding ----
 class _NullWriter:
     def append_data(self, frame): pass

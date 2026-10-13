@@ -134,7 +134,7 @@ def get_data_path(dataset_name):
 def load_data(dataset_name, batch_size, T=None, deterministic=False, num_workers=1, return_dataset=False,
               resume_id='', seed=0, buffer_size=None, n_sequential=1, save_every=None, frame_range=(0, None),
               action_encoding="raw", tokenizer_checkpoint=None, num_classes=0,
-              player_homogeneous_batches=False, global_database_path=None):
+              player_homogeneous_batches=False, global_database_path=None, train_session_ids=None):
     data_path = get_data_path(dataset_name)
     T = default_T_dict[dataset_name] if T is None else T
     shard = MPI.COMM_WORLD.Get_rank()
@@ -154,6 +154,8 @@ def load_data(dataset_name, batch_size, T=None, deterministic=False, num_workers
                              num_classes=num_classes)
         if global_database_path:
             morgan_kwargs["global_database_path"] = global_database_path
+        if train_session_ids:
+            morgan_kwargs["train_session_ids"] = train_session_ids
         dataset = PlaicraftMorganDataset(data_path, **morgan_kwargs)
     elif "plaicraft" in dataset_name:
         dataset = ContinuousPlaicraftDataset(data_path, window_length=T,

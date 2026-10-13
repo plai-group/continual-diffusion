@@ -84,6 +84,33 @@ def test_split_uses_validation_db_membership(corpus):
     assert test_sids == {"valSess"}
 
 
+def test_train_session_ids_overrides_train_split(corpus):
+    ds = _dataset(corpus, train_session_ids=["valSess"])
+    train_sids = {p.parent.parent.name for _fs, _fe, p in ds.file_boundaries}
+    assert train_sids == {"valSess"}
+    ds.set_test()
+    test_sids = {p.parent.parent.name for _fs, _fe, p in ds.file_boundaries}
+    assert test_sids == {"valSess"}
+
+
+def test_train_session_ids_unknown_id_raises(corpus):
+    with pytest.raises(ValueError, match="nope"):
+        _dataset(corpus, train_session_ids=["nope"])
+
+
+def test_frame_range_caps_window_count_for_overfit_run(tmp_path):
+    corpus_dir = tmp_path / "corpus"
+    corpus_dir.mkdir()
+    _make_session(corpus_dir, "longSess", n_ticks=50)
+    global_db = tmp_path / "global.db"
+    _make_global_db(global_db, [("longSess", "Morgan")])
+    validation_db = tmp_path / "validation.db"
+    _make_validation_db(validation_db, ["longSess"])
+    small_corpus = dict(corpus_dir=corpus_dir, global_db=global_db, validation_db=validation_db)
+    ds = _dataset(small_corpus, frame_range=(0, 10), train_session_ids=["longSess"])
+    assert len(ds) == 10 - 3 + 1
+
+
 def test_fps_read_from_hdf5_attr_not_session_fps(corpus):
     ds = _dataset(corpus, action_encoding="raw_fused")  # strict fps==12.5 check
     session_dir = corpus["corpus_dir"] / "trainA"

@@ -151,11 +151,9 @@ def load_data(dataset_name, batch_size, T=None, deterministic=False, num_workers
     elif "plaicraft_morgan" in dataset_name:
         morgan_kwargs = dict(window_length=T, frame_range=frame_range,
                              action_encoding=action_encoding, tokenizer_checkpoint=tokenizer_checkpoint,
-                             num_classes=num_classes)
+                             num_classes=num_classes, train_session_ids=train_session_ids)
         if global_database_path:
             morgan_kwargs["global_database_path"] = global_database_path
-        if train_session_ids:
-            morgan_kwargs["train_session_ids"] = train_session_ids
         dataset = PlaicraftMorganDataset(data_path, **morgan_kwargs)
     elif "plaicraft" in dataset_name:
         dataset = ContinuousPlaicraftDataset(data_path, window_length=T,

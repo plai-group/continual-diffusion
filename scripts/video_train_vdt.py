@@ -140,8 +140,7 @@ def main():
         num_classes=args.num_classes,
         player_homogeneous_batches=args.player_homogeneous_batches,
         global_database_path=args.global_database_path or None,
-        # plaicraft-debug#95: train on exactly these sessions, e.g. a held-out one for an overfit run
-        train_session_ids=[s for s in args.train_session_ids.split(",") if s] or None,
+        train_session_ids=[s for s in args.train_session_ids.split(",") if s],
     )
 
     # Issue-58: fixed prompt set from the plaicraft-debug validation recording.

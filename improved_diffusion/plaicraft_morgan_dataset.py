@@ -68,7 +68,8 @@ def session_player_index(session_dir, num_classes, global_database_path=DEFAULT_
 
 class PlaicraftDataset(ContinuousDebugDataset):
     """ContinuousDebugDataset, with four overrides for the real (non-synthetic) corpus:
-    - split: sessions listed in validation.db are test, the rest are train (train_session_ids overrides the train side);
+    - split: sessions listed in validation.db are test, the rest are train, unless
+      train_session_ids names the train sessions;
     - fps: the HDF5's own `fps` attr, falling back to session.fps;
     - player: md5(name) % num_classes, name from the global DB or, failing that, the
       session DB's other_metadata (the val session predates the global DB);
@@ -102,13 +103,13 @@ class PlaicraftDataset(ContinuousDebugDataset):
         )
         if not files:
             raise ValueError(f"No hdf5 files found under {self.dataset_path}")
-        test_sids = self._validation_session_ids()
-        test_files = [f for f in files if f.parent.parent.name in test_sids]
         if self.train_session_ids and not self.is_test:
             missing = set(self.train_session_ids) - {f.parent.parent.name for f in files}
             if missing:
                 raise ValueError(f"plaicraft_morgan: train_session_ids not in corpus: {sorted(missing)}")
             return [f for f in files if f.parent.parent.name in self.train_session_ids]
+        test_sids = self._validation_session_ids()
+        test_files = [f for f in files if f.parent.parent.name in test_sids]
         train_files = [f for f in files if f.parent.parent.name not in test_sids]
         return test_files if self.is_test else train_files
 

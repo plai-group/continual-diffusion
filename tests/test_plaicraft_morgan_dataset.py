@@ -85,9 +85,9 @@ def test_split_uses_validation_db_membership(corpus):
 
 
 def test_train_session_ids_overrides_train_split(corpus):
-    ds = _dataset(corpus, train_session_ids=["valSess"])
+    ds = _dataset(corpus, train_session_ids=["trainA", "valSess"])
     train_sids = {p.parent.parent.name for _fs, _fe, p in ds.file_boundaries}
-    assert train_sids == {"valSess"}
+    assert train_sids == {"trainA", "valSess"}
     ds.set_test()
     test_sids = {p.parent.parent.name for _fs, _fe, p in ds.file_boundaries}
     assert test_sids == {"valSess"}
@@ -98,16 +98,9 @@ def test_train_session_ids_unknown_id_raises(corpus):
         _dataset(corpus, train_session_ids=["nope"])
 
 
-def test_frame_range_caps_window_count_for_overfit_run(tmp_path):
-    corpus_dir = tmp_path / "corpus"
-    corpus_dir.mkdir()
-    _make_session(corpus_dir, "longSess", n_ticks=50)
-    global_db = tmp_path / "global.db"
-    _make_global_db(global_db, [("longSess", "Morgan")])
-    validation_db = tmp_path / "validation.db"
-    _make_validation_db(validation_db, ["longSess"])
-    small_corpus = dict(corpus_dir=corpus_dir, global_db=global_db, validation_db=validation_db)
-    ds = _dataset(small_corpus, frame_range=(0, 10), train_session_ids=["longSess"])
+def test_frame_range_caps_window_count_for_overfit_run(corpus):
+    _make_session(corpus["corpus_dir"], "longSess", n_ticks=50)
+    ds = _dataset(corpus, window_length=3, num_classes=0, frame_range=(0, 10), train_session_ids=["longSess"])
     assert len(ds) == 10 - 3 + 1
 
 

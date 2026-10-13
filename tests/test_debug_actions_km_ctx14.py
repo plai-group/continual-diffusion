@@ -132,6 +132,53 @@ def test_encode_km_ctx14_context_ignores_actions_after_boundary(tmp_path):
     assert np.array_equal(codes_a, codes_b)
 
 
+def test_load_ticks_79_bins_a_10hz_session_at_its_own_tick_rate(tmp_path):
+    """plaicraft-debug#96: a key held at t=1000ms must land in tick 10 of a 10Hz session
+    (100ms/tick), not tick 12 -- the GT drift a fixed 8-subbin assumption would cause."""
+    session_dir = _make_session_79(tmp_path, fps=10.0, n_ticks=20, key_events=[("87", 1000, 1100)])
+    ticks = da.load_ticks_79(session_dir)
+    from improved_diffusion.km_tokenizer.keypress_lookup import KEYPRESS_LOOKUP
+    w_idx = KEYPRESS_LOOKUP["87"]
+    hit_ticks = np.nonzero(ticks[:, w_idx])[0]
+    assert list(hit_ticks) == [11]  # raw tick 10 (1000-1100ms), shifted +1 by the causal shift
+
+
+def test_load_ticks_79_on_a_12_5hz_session_is_unchanged(tmp_path):
+    """A 12.5Hz (80ms/tick) session: a key held through [960,1040)ms (exactly tick 12's
+    window) lands in tick 12, not 10 -- the pre-#96 8-subbin behaviour, byte-identical."""
+    session_dir = _make_session_79(tmp_path, fps=12.5, n_ticks=20, key_events=[("87", 960, 1040)])
+    ticks = da.load_ticks_79(session_dir)
+    from improved_diffusion.km_tokenizer.keypress_lookup import KEYPRESS_LOOKUP
+    w_idx = KEYPRESS_LOOKUP["87"]
+    hit_ticks = np.nonzero(ticks[:, w_idx])[0]
+    assert list(hit_ticks) == [13]  # raw tick 12 (960-1040ms), shifted +1 by the causal shift
+
+
+def test_load_or_build_raw_raw79_bins_a_10hz_session_at_its_own_tick_rate(tmp_path):
+    session_dir = _make_session_79(tmp_path, fps=10.0, n_ticks=20, key_events=[("87", 1000, 1100)])
+    keypress, _ = da.load_or_build_raw(session_dir, action_builder="raw79")
+    assert keypress.shape == (20, da.KEYPRESS_DIM)
+    assert np.nonzero(keypress[:, 0])[0].tolist() == [11]
+
+
+def test_raw79_cache_sidecar_invalidates_between_10hz_and_12_5hz(tmp_path):
+    session_dir = _make_session_79(tmp_path, fps=10.0, n_ticks=5, key_events=[("87", 0, 100)])
+    da.load_or_build_raw(session_dir, action_builder="raw79")
+    _, _, sidecar_path = da._raw_cache_paths(session_dir)
+    sidecar = json.loads(sidecar_path.read_text())
+    assert sidecar == {
+        "subbin_rule_version": da.SUBBIN_RULE_VERSION, "action_builder": "raw79", "subbins_per_tick": 10,
+    }
+    # Flip the on-disk session fps to 12.5Hz without touching the cache -- it must rebuild, not reuse a stale 10-subbin cache.
+    con = sqlite3.connect(str(session_dir / "sess.db"))
+    con.execute("UPDATE session SET fps = 12.5")
+    con.commit()
+    con.close()
+    da.load_or_build_raw(session_dir, action_builder="raw79")
+    sidecar2 = json.loads(sidecar_path.read_text())
+    assert sidecar2 == {"subbin_rule_version": da.SUBBIN_RULE_VERSION, "action_builder": "raw79"}
+
+
 def test_km_fsq_sub_binning_still_defaults_to_legacy_constant(tmp_path):
     """build_action_array_79 with no subbins_per_tick override must stay byte-identical to
     pre-#96 (km_fsq/raw's path, always 8)."""

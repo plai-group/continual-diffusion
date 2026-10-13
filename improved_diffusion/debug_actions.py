@@ -115,6 +115,18 @@ def read_session_fps(session_dir):
     return float(row[0]) if row is not None else None
 
 
+def _subbins_per_tick_for_session(session_dir):
+    """subbins_per_tick_for_fps(session fps), falling back to the legacy 8 (12.5Hz) when the
+    session has no `session` table at all. Every real corpus (plaicraft_morgan onward) has
+    one; only old debug-world/pre-#93 test fixtures predate it, and they are always 12.5Hz
+    anyway, so this fallback changes nothing for them (plaicraft-debug#96)."""
+    try:
+        fps = read_session_fps(session_dir)
+    except sqlite3.OperationalError:
+        fps = None
+    return subbins_per_tick_for_fps(fps) if fps is not None else SUBBINS_PER_TICK
+
+
 def read_session_player(session_dir):
     """The session's player index from other_metadata, or None if the corpus predates issue #85.
 
@@ -335,12 +347,16 @@ def _run_builder(action_builder, db_path, n_ticks, subbins_per_tick=SUBBINS_PER_
     raise ValueError(f"unknown action_builder {action_builder!r}, expected 'raw8' or 'raw79'")
 
 
-def _builder_sidecar_fields(action_builder):
-    """Only stamps a field when the builder differs from the legacy default, so every existing
-    debug-world sidecar (which predates this field) still compares equal and stays valid."""
+def _builder_sidecar_fields(action_builder, subbins_per_tick=SUBBINS_PER_TICK):
+    """Only stamps a field when it differs from the legacy default, so every existing
+    debug-world sidecar (which predates these fields) still compares equal and stays valid.
+    subbins_per_tick (plaicraft-debug#96): a raw79 cache built at 10 subbins/tick must not be
+    silently reused as if it were the legacy 8 (or vice versa) -- this invalidates it."""
     fields = {"subbin_rule_version": SUBBIN_RULE_VERSION}
     if action_builder != "raw8":
         fields["action_builder"] = action_builder
+    if subbins_per_tick != SUBBINS_PER_TICK:
+        fields["subbins_per_tick"] = subbins_per_tick
     return fields
 
 
@@ -372,11 +388,14 @@ def _raw_cache_paths(session_dir):
 def load_ticks_79(session_dir):
     """(n_ticks, 79) tick-resolution keys over PLAICraft's whole vocabulary: load_or_build_raw's
     raw79 arm without its slice down to the 8 debug keys (plaicraft-debug#93). Uncached, as only
-    validation reads it, once per session."""
+    validation reads it, once per session. Bins at the session's own tick rate -- 10 subbins/
+    tick at 10Hz, 8 at 12.5Hz (plaicraft-debug#96) -- fixing a 20ms/tick GT drift that a fixed
+    8-subbin assumption would otherwise cause on a 10Hz corpus."""
     session_dir = Path(session_dir)
     n_ticks = _n_ticks_from_hdf5(session_dir)
-    key_sub, _ = build_action_array_79(session_dir / f"{session_dir.name}.db", n_ticks)
-    return key_sub.reshape(n_ticks, SUBBINS_PER_TICK, KEYPRESS_DIM_79).any(axis=1).astype(np.float32)
+    subbins = _subbins_per_tick_for_session(session_dir)
+    key_sub, _ = build_action_array_79(session_dir / f"{session_dir.name}.db", n_ticks, subbins_per_tick=subbins)
+    return key_sub.reshape(n_ticks, subbins, KEYPRESS_DIM_79).any(axis=1).astype(np.float32)
 
 
 def load_or_build_raw(session_dir, action_builder="raw8"):
@@ -386,7 +405,9 @@ def load_or_build_raw(session_dir, action_builder="raw8"):
 
     action_builder="raw79" (plaicraft-debug#93) runs the PLAIOmni 79-key builder and slices
     the compact 8 dims back out at _RAW_POSITIONS before the same OR/sum reduction, so
-    overlays and raw-encoding metrics see an identical (n_ticks, 8) shape either way.
+    overlays and raw-encoding metrics see an identical (n_ticks, 8) shape either way. Its
+    sub-bins come from the session's own tick rate (plaicraft-debug#96): 10 subbins/tick at
+    10Hz, 8 at 12.5Hz. raw8 (debug-world) always stays at the legacy 8 -- it is never 10Hz.
 
     Cached to a sidecar recording the binning rule, same pattern as the km codes cache --
     a pre-#80 cache has the identical (n_ticks, dim) shape (100ms bins, exact-timestamp
@@ -395,8 +416,9 @@ def load_or_build_raw(session_dir, action_builder="raw8"):
     session_dir = Path(session_dir)
     sid = session_dir.name
     n_ticks = _n_ticks_from_hdf5(session_dir)
+    subbins = _subbins_per_tick_for_session(session_dir) if action_builder == "raw79" else SUBBINS_PER_TICK
     keypress_path, mouse_path, sidecar_path = _raw_cache_paths(session_dir)
-    expected_sidecar = _builder_sidecar_fields(action_builder)
+    expected_sidecar = _builder_sidecar_fields(action_builder, subbins_per_tick=subbins)
 
     if sidecar_path.exists():
         try:
@@ -410,12 +432,12 @@ def load_or_build_raw(session_dir, action_builder="raw8"):
                 return keypress, mouse
 
     db_path = session_dir / f"{sid}.db"
-    key_sub, mouse_sub = _run_builder(action_builder, db_path, n_ticks)
+    key_sub, mouse_sub = _run_builder(action_builder, db_path, n_ticks, subbins_per_tick=subbins)
     if action_builder == "raw79":
         from .km_tokenizer.keypress_scatter import _RAW_POSITIONS
         key_sub = key_sub[:, _RAW_POSITIONS]
-    keypress = key_sub.reshape(n_ticks, SUBBINS_PER_TICK, KEYPRESS_DIM).any(axis=1).astype(np.float32)
-    mouse = mouse_sub.reshape(n_ticks, SUBBINS_PER_TICK, MOUSE_DIM).sum(axis=1).astype(np.float32)
+    keypress = key_sub.reshape(n_ticks, subbins, KEYPRESS_DIM).any(axis=1).astype(np.float32)
+    mouse = mouse_sub.reshape(n_ticks, subbins, MOUSE_DIM).sum(axis=1).astype(np.float32)
     for path, arr in ((keypress_path, keypress), (mouse_path, mouse)):
         tmp_path = path.with_name(f".{path.stem}.{os.getpid()}.tmp.npy")
         np.save(tmp_path, arr)

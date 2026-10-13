@@ -86,6 +86,20 @@ def test_validate_action_encoding_unknown_mode_raises():
         validate_action_encoding("bogus")
 
 
+def test_validate_action_encoding_km_ctx14_dims_ok():
+    validate_action_encoding("km_ctx14", fps=10.0, action_dim=32, mouse_dim=0)
+
+
+def test_validate_action_encoding_km_ctx14_wrong_fps_raises():
+    with pytest.raises(ValueError, match="fps"):
+        validate_action_encoding("km_ctx14", fps=12.5)
+
+
+def test_validate_action_encoding_km_ctx14_wrong_action_dim_raises():
+    with pytest.raises(ValueError, match="action_dim"):
+        validate_action_encoding("km_ctx14", action_dim=36)
+
+
 def _make_corpus(tmp_path, fps, n_sessions=2, n_ticks=5):
     for i in range(n_sessions):
         session_dir = tmp_path / f"session_{i:03d}"

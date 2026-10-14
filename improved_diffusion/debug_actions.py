@@ -115,13 +115,23 @@ def read_session_fps(session_dir):
     return float(row[0]) if row is not None else None
 
 
+def read_tick_fps(session_dir):
+    """The corpus tick rate: the hdf5 frames' fps attr, else the DB's. A real PLAICraft DB records its native 30fps, not the rate the corpus was encoded at (plaicraft-debug#96)."""
+    matches = sorted((Path(session_dir) / "encoded_video_hdf5").glob("*.hdf5"))
+    if matches:
+        with h5py.File(matches[0], "r") as f:
+            if "fps" in f["frames"].attrs:
+                return float(f["frames"].attrs["fps"])
+    return read_session_fps(session_dir)
+
+
 def _subbins_per_tick_for_session(session_dir):
     """subbins_per_tick_for_fps(session fps), falling back to the legacy 8 (12.5Hz) when the
     session has no `session` table at all. Every real corpus (plaicraft_morgan onward) has
     one; only old debug-world/pre-#93 test fixtures predate it, and they are always 12.5Hz
     anyway, so this fallback changes nothing for them (plaicraft-debug#96)."""
     try:
-        fps = read_session_fps(session_dir)
+        fps = read_tick_fps(session_dir)
     except sqlite3.OperationalError:
         fps = None
     return subbins_per_tick_for_fps(fps) if fps is not None else SUBBINS_PER_TICK
@@ -528,12 +538,11 @@ def _load_or_build_km_ctx14_codes(session_dir, tokenizer_checkpoint, device, act
     codes_path, sidecar_path = _km_ctx14_cache_paths(session_dir)
 
     checkpoint_dir = Path(tokenizer_checkpoint)
-    fps = read_session_fps(session_dir)
-    subbins = subbins_per_tick_for_fps(fps)
+    subbins = _subbins_per_tick_for_session(session_dir)
     expected_sidecar = {
         "tokenizer": "km_ctx14_10hz",
         "tokenizer_sha256": _sha256(checkpoint_dir / "model.safetensors"),
-        **_builder_sidecar_fields(action_builder),
+        **_builder_sidecar_fields(action_builder, subbins_per_tick=subbins),
     }
 
     if codes_path.exists() and sidecar_path.exists():
@@ -585,8 +594,7 @@ def encode_km_ctx14_context(session_dir, window_start, boundary, tokenizer, devi
     into the generated future when a validation row's context is sliced from the full-session
     cache (plaicraft-debug#96 B4)."""
     session_dir = Path(session_dir)
-    fps = read_session_fps(session_dir)
-    subbins = subbins_per_tick_for_fps(fps)
+    subbins = _subbins_per_tick_for_session(session_dir)
     db_path = session_dir / f"{session_dir.name}.db"
     key_sub, mouse_sub = _run_builder(action_builder, db_path, boundary, subbins_per_tick=subbins)
     key_sub, mouse_sub = key_sub[window_start * subbins:], mouse_sub[window_start * subbins:]

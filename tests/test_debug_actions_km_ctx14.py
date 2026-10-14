@@ -11,11 +11,13 @@ from improved_diffusion import debug_actions as da
 from improved_diffusion.km_tokenizer.ctx14_10hz import CHECKPOINT_SHA256, DEFAULT_CHECKPOINT_DIR
 
 
-def _make_session_79(tmp_path, fps, n_ticks=3, key_events=(), mouse_rows=()):
+def _make_session_79(tmp_path, fps, n_ticks=3, key_events=(), mouse_rows=(), h5_fps=None):
     session_dir = tmp_path / "sess"
     (session_dir / "encoded_video_hdf5").mkdir(parents=True)
     with h5py.File(session_dir / "encoded_video_hdf5" / "sess.hdf5", "w") as f:
         f.create_dataset("frames", data=np.zeros((n_ticks, 3, 2, 2), dtype=np.float32))
+        if h5_fps is not None:
+            f["frames"].attrs["fps"] = h5_fps
     con = sqlite3.connect(str(session_dir / "sess.db"))
     con.execute("CREATE TABLE session (fps REAL)")
     con.execute("INSERT INTO session VALUES (?)", (fps,))
@@ -84,7 +86,7 @@ def test_load_or_build_km_ctx14_shape_and_cache_files(tmp_path):
     sidecar = json.loads(sidecar_path.read_text())
     assert sidecar == {
         "tokenizer": "km_ctx14_10hz", "tokenizer_sha256": CHECKPOINT_SHA256,
-        "subbin_rule_version": da.SUBBIN_RULE_VERSION, "action_builder": "raw79",
+        "subbin_rule_version": da.SUBBIN_RULE_VERSION, "action_builder": "raw79", "subbins_per_tick": 10,
     }
 
 
@@ -186,3 +188,11 @@ def test_km_fsq_sub_binning_still_defaults_to_legacy_constant(tmp_path):
     key_sub, mouse_sub = da.build_action_array_79(session_dir / "sess.db", n_ticks=3)
     assert key_sub.shape == (3 * da.SUBBINS_PER_TICK, da.KEYPRESS_DIM_79)
     assert mouse_sub.shape == (3 * da.SUBBINS_PER_TICK, da.MOUSE_DIM)
+
+
+def test_tick_rate_comes_from_the_hdf5_not_the_native_30fps_db(tmp_path):
+    """plaicraft-debug#96: a real PLAICraft DB says fps=30; the 10Hz corpus's hdf5 says 10. Binning must follow the hdf5."""
+    session_dir = _make_session_79(tmp_path, fps=30.0, n_ticks=20, key_events=[("87", 1000, 1100)], h5_fps=10.0)
+    assert da.read_tick_fps(session_dir) == 10.0
+    from improved_diffusion.km_tokenizer.keypress_lookup import KEYPRESS_LOOKUP
+    assert list(np.nonzero(da.load_ticks_79(session_dir)[:, KEYPRESS_LOOKUP["87"]])[0]) == [11]

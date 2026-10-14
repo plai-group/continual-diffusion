@@ -140,6 +140,7 @@ def main():
         num_classes=args.num_classes,
         player_homogeneous_batches=args.player_homogeneous_batches,
         global_database_path=args.global_database_path or None,
+        train_session_ids=[s for s in args.train_session_ids.split(",") if s],
     )
 
     # Issue-58: fixed prompt set from the plaicraft-debug validation recording.
@@ -270,6 +271,7 @@ def create_argparser():
         init_from_checkpoint="",
         km_tokenizer_checkpoint=str(KM_TOKENIZER_DEFAULT_CHECKPOINT),
         global_database_path="",  # plaicraft_morgan: player-name lookup DB; "" -> dataset's own default
+        train_session_ids="",  # plaicraft-debug#95: comma-separated train sessions; "" -> validation.db split
         swap_test=True,  # plaicraft-debug#93: off for corpora with no swap package (e.g. plaicraft_morgan)
     )
     defaults.update(model_and_diffusion_defaults(model_type='vdt'))

@@ -68,7 +68,8 @@ def session_player_index(session_dir, num_classes, global_database_path=DEFAULT_
 
 class PlaicraftDataset(ContinuousDebugDataset):
     """ContinuousDebugDataset, with four overrides for the real (non-synthetic) corpus:
-    - split: sessions listed in validation.db are test, the rest are train;
+    - split: sessions listed in validation.db are test, the rest are train, unless
+      train_session_ids names the train sessions;
     - fps: the HDF5's own `fps` attr, falling back to session.fps;
     - player: md5(name) % num_classes, name from the global DB or, failing that, the
       session DB's other_metadata (the val session predates the global DB);
@@ -76,9 +77,11 @@ class PlaicraftDataset(ContinuousDebugDataset):
     """
 
     def __init__(self, dataset_path, *args, global_database_path=DEFAULT_GLOBAL_DATABASE_PATH,
-                 validation_db_path=DEFAULT_VALIDATION_DB_PATH, action_builder="raw79", **kwargs):
+                 validation_db_path=DEFAULT_VALIDATION_DB_PATH, action_builder="raw79",
+                 train_session_ids=None, **kwargs):
         self.global_database_path = Path(global_database_path)
         self.validation_db_path = Path(validation_db_path)
+        self.train_session_ids = train_session_ids
         super().__init__(dataset_path, *args, action_builder=action_builder, **kwargs)
 
     # ------------------------------------------------------------------ #
@@ -100,6 +103,11 @@ class PlaicraftDataset(ContinuousDebugDataset):
         )
         if not files:
             raise ValueError(f"No hdf5 files found under {self.dataset_path}")
+        if self.train_session_ids and not self.is_test:
+            missing = set(self.train_session_ids) - {f.parent.parent.name for f in files}
+            if missing:
+                raise ValueError(f"plaicraft_morgan: train_session_ids not in corpus: {sorted(missing)}")
+            return [f for f in files if f.parent.parent.name in self.train_session_ids]
         test_sids = self._validation_session_ids()
         test_files = [f for f in files if f.parent.parent.name in test_sids]
         train_files = [f for f in files if f.parent.parent.name not in test_sids]

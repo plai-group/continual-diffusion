@@ -87,8 +87,15 @@ default_image_size_dict = {
     "plaicraft_morgan":    40,
 }
 
-def plaicraft_valset_kwargs(dataset, num_classes=0, global_database_path=""):
+def debug_toy_builder(dataset, action_encoding):
+    """km_ctx14 on debug_toy needs the 10Hz-aware 79-key builder (plaicraft-debug#96); all else stays raw8."""
+    return "raw79" if "debug_toy" in dataset and action_encoding == "km_ctx14" else "raw8"
+
+
+def plaicraft_valset_kwargs(dataset, num_classes=0, global_database_path="", action_encoding=""):
     """Real PLAICraft validation reads its actions and player labels from the corpus sessions, as training does."""
+    if dataset == "debug_toy" and action_encoding == "km_ctx14":
+        return dict(session_root=video_data_paths_dict[dataset], action_builder="raw79")
     if dataset != "plaicraft_morgan":
         return {}
     from functools import partial
@@ -168,7 +175,7 @@ def load_data(dataset_name, batch_size, T=None, deterministic=False, num_workers
     elif "debug_toy" in dataset_name:
         dataset = ContinuousDebugDataset(data_path, window_length=T, frame_range=frame_range,
                                          action_encoding=action_encoding, tokenizer_checkpoint=tokenizer_checkpoint,
-                                         num_classes=num_classes)
+                                         num_classes=num_classes, action_builder=debug_toy_builder(dataset_name, action_encoding))
     else:
         raise Exception("no dataset", dataset_name)
 
@@ -272,7 +279,7 @@ def get_eval_dataset(dataset_name, T=None, seed=0, train=False, eval_dataset_con
     elif "debug_toy" in dataset_name:
         shared_args = dict(dataset_path=data_path, window_length=T, frame_range=frame_range,
                            action_encoding=action_encoding, tokenizer_checkpoint=tokenizer_checkpoint,
-                           num_classes=num_classes)
+                           num_classes=num_classes, action_builder=debug_toy_builder(dataset_name, action_encoding))
         if eval_dataset_config == eval_dataset_configs["continuous"]:
             dataset = ContinuousDebugDataset(**shared_args)
         elif eval_dataset_config == eval_dataset_configs["chunked"]:

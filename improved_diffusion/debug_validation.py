@@ -277,16 +277,21 @@ def _encode_km_actions(tokenizer, keys_raw, mouse_raw):
     from .km_tokenizer.keypress_scatter import scatter_keypress
 
     B, T, _ = keys_raw.shape
-    n = SUBBINS_PER_TICK
-    dtype = tokenizer.frame_pos.dtype
+    ctx14 = not hasattr(tokenizer, "frame_pos")  # km_ctx14: 10 sub-bins, 32-d codes (plaicraft-debug#96)
+    n = 10 if ctx14 else SUBBINS_PER_TICK
+    dtype = next(tokenizer.parameters()).dtype
     keys_raw, mouse_raw = keys_raw.to(dtype=dtype), mouse_raw.to(dtype=dtype)
     keys_sub = keys_raw.unsqueeze(2).expand(B, T, n, 8).reshape(B, T * n, 8)
-    mouse_sub = (mouse_raw / n).unsqueeze(2).expand(B, T, n, 2).reshape(B, T * n, 2)
+    if ctx14:  # integer cumulative-round split, as the generator writes 10Hz rows (plaicraft-debug _split_mouse_delta)
+        cum = th.round(th.round(mouse_raw).unsqueeze(2) * th.arange(1, n + 1, dtype=dtype, device=mouse_raw.device).view(1, 1, n, 1) / n)
+        mouse_sub = th.diff(cum, dim=2, prepend=th.zeros_like(cum[:, :, :1])).reshape(B, T * n, 2)
+    else:
+        mouse_sub = (mouse_raw / n).unsqueeze(2).expand(B, T, n, 2).reshape(B, T * n, 2)
     key_press = scatter_keypress(keys_sub)
     with th.no_grad():
-        prequantized, _frame_mask, _block_mask = tokenizer._encode_prequantized(key_press, mouse_sub)
+        prequantized = tokenizer._encode_prequantized(key_press, mouse_sub)[0]
         _token_ids, codes = tokenizer._quantize(prequantized)
-    return codes.reshape(B, T, debug_actions.KM_CODE_DIM)
+    return codes.reshape(B, T, debug_actions.KM_CTX14_CODE_DIM if ctx14 else debug_actions.KM_CODE_DIM)
 
 
 class _CFGWrapper(nn.Module):
@@ -870,7 +875,7 @@ def run_debug_validation(model, diffusion, valset, device, out_dir,
                     swap_seed = 20250813 + int(row["num"])
 
                     def _sample_with_actions(key_raw, mouse_raw):
-                        if is_km_fsq:
+                        if is_km_fsq or is_km_ctx14:
                             actions_in = _encode_km_actions(km_tokenizer, key_raw, mouse_raw)
                             mouse_in = key_raw.new_zeros(key_raw.shape[0], key_raw.shape[1], 0)
                         elif is_raw_fused:
@@ -905,9 +910,10 @@ def run_debug_validation(model, diffusion, valset, device, out_dir,
                         # x0_j is latent (needed above for the model's own x0 kwarg); decode
                         # the merged result to pixel space before any overlay/psnr reads it.
                         video = _decode_if_latent(diffusion, s * latent_mask_j + x0_j * obs_mask_j)[0]
-                        if is_km_fsq and key_out is not None:
+                        if (is_km_fsq or is_km_ctx14) and key_out is not None:
                             # Same snap-then-decode as the main pass, still batch=1 here.
-                            act_out = debug_actions.quantize_km_fsq(key_out) if action_quantization == "fsq" else key_out
+                            snap = debug_actions.quantize_km_ctx14 if is_km_ctx14 else debug_actions.quantize_km_fsq
+                            act_out = snap(key_out) if action_quantization == "fsq" else key_out
                             key_out, mouse_out, _ = _decode_km_actions(km_tokenizer, act_out)
                         elif is_raw_fused and key_out is not None:
                             key_out, mouse_out = key_out[..., :8], debug_actions._inv_symlog(key_out[..., 8:])

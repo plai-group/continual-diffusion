@@ -44,3 +44,16 @@ def test_decode_km_actions_with_the_staged_tokenizer_shapes():
     assert keys.shape == (2, 4, 79)
     assert mouse.shape == (2, 4, 2)
     assert probs.shape == (2, 4, 79)
+
+
+@pytest.mark.skipif(not DEFAULT_CHECKPOINT_DIR.exists(), reason="staged km_ctx14 checkpoint not present")
+def test_encode_km_actions_ctx14_round_trips_a_swap_intervention():
+    tokenizer = dv._get_km_tokenizer("cpu", encoding="km_ctx14")
+    T = 20
+    keys = torch.zeros(1, T, 8); keys[0, 5:15, 0] = 1  # w held for 1s
+    mouse = torch.zeros(1, T, 2); mouse[0, 8:12, 0] = 37.0
+    codes = dv._encode_km_actions(tokenizer, keys, mouse)
+    assert codes.shape == (1, T, da.KM_CTX14_CODE_DIM)
+    keys_hat, mouse_hat, _ = dv._decode_km_actions(tokenizer, codes)
+    assert torch.equal(keys_hat, keys)
+    assert torch.allclose(mouse_hat, mouse, atol=1.0)

@@ -446,6 +446,7 @@ class VDT(nn.Module):
         attn_window=None,
         pos_encoding='sincos',
         attention='factorized',
+        ticks_per_latent=1,
     ):
         super().__init__()
         self.learn_sigma = learn_sigma
@@ -456,7 +457,12 @@ class VDT(nn.Module):
         assert pos_encoding in ('sincos', 'rope3d'), f"unknown pos_encoding {pos_encoding}"
         self.pos_encoding = pos_encoding
         # action_dim is the KEYPRESS token's dim by convention; mouse_dim is its sibling for the 2-d mouse token.
-        self.action_dim = action_dim
+        # With k ticks per latent the model sees k*action_dim per frame and splits it into k tokens (plaicraft-debug#99); action_dim stays the PER-TICK dim for the layers.
+        self.ticks_per_latent = k = int(ticks_per_latent)
+        assert k == 1 or mouse_dim == 0, "ticks_per_latent > 1 requires mouse_dim == 0"
+        assert k == 1 or generate_actions or action_token_cond, "ticks_per_latent > 1 requires action tokens"
+        self.tick_action_dim = action_dim
+        self.action_dim = action_dim * k
         self.mouse_dim = mouse_dim
         self.generate_actions = generate_actions
         # Lets the action token's noise level be sampled independently of the video's (issue #85).
@@ -646,6 +652,7 @@ class VDT(nn.Module):
         timesteps: (B,) tensor of diffusion timesteps
         """
         B, T, C, H, W = x.shape
+        k = self.ticks_per_latent
         if obs_mask is not None and x0 is not None:
             x = x * (1 - obs_mask) + x0 * obs_mask
 
@@ -667,12 +674,12 @@ class VDT(nn.Module):
         if use_action_tokens:
             if obs_action_mask is not None and actions0 is not None:
                 actions = actions * (1 - obs_action_mask) + actions0 * obs_action_mask
-            action_tokens = self.action_x_embedder(actions)  # (B, T, D)
+            action_tokens = self.action_x_embedder(actions.reshape(B, T, k, -1))  # (B, T, k, D)
             if self.independent_action_t:
                 # Broadcast (B,1,D) over T: the action token sees its own noise level, not the video's.
                 action_tokens = action_tokens + self.t_embedder(
-                    action_timesteps if action_timesteps is not None else timesteps).unsqueeze(1)
-            action_tokens = rearrange(action_tokens, 'b t d -> (b t) 1 d')  # (B*T, 1, D)
+                    action_timesteps if action_timesteps is not None else timesteps)[:, None, None]
+            action_tokens = rearrange(action_tokens, 'b t k d -> (b t) k d')  # (B*T, k, D)
             if self.action_pos_embed is not None:
                 action_tokens = action_tokens + self.action_pos_embed
             tokens.append(action_tokens)
@@ -711,8 +718,8 @@ class VDT(nn.Module):
 
         rope = None
         if self.pos_encoding == 'rope3d':
-            extra_j = [0] * (int(use_action_tokens) + int(use_mouse_tokens))
-            rope = rope_tables(T, self.x_embedder.grid_size, extra_j, tokens.shape[-1] // self.num_heads, device=tokens.device)
+            extra_j = list(range(k)) * int(use_action_tokens) + [0] * int(use_mouse_tokens)
+            rope = rope_tables(T, self.x_embedder.grid_size, extra_j, tokens.shape[-1] // self.num_heads, k, device=tokens.device)
         for block in self.blocks:
             tokens = block(tokens, c, rope=rope)            # (B*T, N+1, D) or (B*T, N, D)
 
@@ -724,10 +731,10 @@ class VDT(nn.Module):
         # Token order is patch -> keypress -> mouse (vdt.py forward, per issue-71).
         act_out, mouse_out = None, None
         if use_action_tokens and self.action_head is not None:
-            action_tokens_out = tokens[:, N:N + 1, :]  # (B*T, 1, D)
-            act_out = self.action_head(action_tokens_out, c).view(B, T, self.action_dim)
+            action_tokens_out = tokens[:, N:N + k, :]  # (B*T, k, D)
+            act_out = self.action_head(action_tokens_out, c).reshape(B, T, self.action_dim)
         if use_mouse_tokens and self.mouse_head is not None:
-            mouse_offset = N + (1 if use_action_tokens else 0)
+            mouse_offset = N + (k if use_action_tokens else 0)
             mouse_tokens_out = tokens[:, mouse_offset:mouse_offset + 1, :]  # (B*T, 1, D)
             mouse_out = self.mouse_head(mouse_tokens_out, c).view(B, T, self.mouse_dim)
 

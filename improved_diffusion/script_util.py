@@ -210,6 +210,7 @@ def vdt_model_and_diffusion_defaults():
         attn_window=None,  # spatial sublayer attends across +-attn_window frames for action/mouse tokens; see plaicraft-debug#97
         pos_encoding="sincos",  # "sincos" | "rope3d" (Wan 3D RoPE for video, 1D RoPE for actions); see plaicraft-debug#99
         attention="factorized",  # "factorized" | "full" (one attention over all frames' tokens, no temporal sublayer); see plaicraft-debug#99
+        ticks_per_latent=1,  # action ticks per latent frame (Wan: 4); the model splits k*action_dim into k tokens; see plaicraft-debug#99
         keypress_loss_weight=1.0,
         mouse_loss_weight=1.0,
         action_quantization="none",  # "none" | "codebook" | "fsq"; see plaicraft-debug#77, #80
@@ -256,6 +257,7 @@ def create_vdt_model_and_diffusion(
     attn_window=None,
     pos_encoding="sincos",
     attention="factorized",
+    ticks_per_latent=1,
 ):
     diffusion = create_gaussian_diffusion(
         steps=diffusion_steps,
@@ -297,6 +299,7 @@ def create_vdt_model_and_diffusion(
         attn_window=attn_window,
         pos_encoding=pos_encoding,
         attention=attention,
+        ticks_per_latent=ticks_per_latent,
     )
     return model, diffusion
 
@@ -416,6 +419,12 @@ def backfill_attention(model_args):
     """Pre-#99 checkpoints have no attention saved; they all trained factorized spatial+temporal."""
     if not hasattr(model_args, "attention"):
         model_args.attention = "factorized"
+
+
+def backfill_ticks_per_latent(model_args):
+    """Pre-#99 checkpoints have no ticks_per_latent saved; they all had one action token per frame."""
+    if not hasattr(model_args, "ticks_per_latent"):
+        model_args.ticks_per_latent = 1
 
 
 def str2bool(v):

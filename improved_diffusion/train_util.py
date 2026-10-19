@@ -553,6 +553,9 @@ class TrainLoop:
             log_loss_dict(
                 self.diffusion, t, {k: v * weights for k, v in losses.items()}
             )
+            probe = getattr(self.args, "grad_probe_interval", 0)
+            if probe and last_batch and self.step % probe == 0 and "loss_action_weighted" in losses:
+                self._log_grad_probe((losses["loss_video"] * weights).mean(), (losses["loss_action_weighted"] * weights).mean())
             if self.use_fp16:
                 loss_scale = 2 ** self.lg_loss_scale
                 (loss * loss_scale).backward()
@@ -583,6 +586,20 @@ class TrainLoop:
         self.opt.step()
         for rate, params in zip(self.ema_rate, self.ema_params):
             update_ema(params, self.master_params, rate=rate)
+
+    def _log_grad_probe(self, loss_video, loss_action):
+        """Per-loss gradient norms on the shared transformer blocks, before the real backward (plaicraft-debug#98)."""
+        params = [p for p in self.model.blocks.parameters() if p.requires_grad]
+        flat = []
+        for l in (loss_video, loss_action):
+            g = th.autograd.grad(l, params, retain_graph=True, allow_unused=True)
+            flat.append(th.cat([(x if x is not None else th.zeros_like(p)).flatten().float() for x, p in zip(g, params)]))
+        gv, ga = flat
+        nv, na = gv.norm().item(), ga.norm().item()
+        logger.logkv_mean("grad_norm/video_blocks", nv)
+        logger.logkv_mean("grad_norm/action_blocks", na)
+        logger.logkv_mean("grad_norm/action_over_video", na / max(nv, 1e-12))
+        logger.logkv_mean("grad_norm/cos_action_video", th.nn.functional.cosine_similarity(gv, ga, dim=0).item())
 
     def _log_grad_norm(self):
         sqsum = 0.0

@@ -237,6 +237,7 @@ def create_argparser():
         T=-1,
         sample_interval=50000,
         video_log_every=1,  # only render/upload the overlay mp4 every Nth sample call; scalars still log every time
+        grad_probe_interval=0,  # every N steps log video vs action grad norms on model.blocks; 0 = off (plaicraft-debug#98)
         stm_size=-1,  # Only used for flexible and streaming sampling (masking_mode == "flexible")
         ltm_size=-1,
         n_sample_stm=-1,

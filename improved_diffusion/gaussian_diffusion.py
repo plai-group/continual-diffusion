@@ -1149,7 +1149,8 @@ class GaussianDiffusion:
                 # mean_flat is per-element, so equal-weighting over-weights action ~288x; scale by dim_ratio (DreamZero, arXiv:2602.15922) to restore parity.
                 dim_ratio = actions_in[0].numel() / x_start[0].numel()
                 terms["action_dim_ratio"] = th.full_like(loss_video, dim_ratio)
-                total_loss = total_loss + keypress_weight * dim_ratio * mse_action
+                terms["loss_action_weighted"] = keypress_weight * dim_ratio * mse_action
+                total_loss = total_loss + terms["loss_action_weighted"]
 
             if mouse_out is not None and is_mouse_gen:
                 target_mouse = {

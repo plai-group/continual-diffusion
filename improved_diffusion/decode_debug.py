@@ -6,6 +6,7 @@
 
 import cv2
 import numpy as np
+import torch
 
 # ------------------------------------------------------------------ #
 #  Layout constants — copied verbatim from plaicraft-model-pi0's
@@ -36,30 +37,33 @@ KEY_ID_TO_NAME = {
 # ------------------------------------------------------------------ #
 #  Drawing helpers (ported from plaicraft-model-pi0's decode_debug.py)
 # ------------------------------------------------------------------ #
+def _fit_key_boxes(pressed_names, frame_w):
+    """Row-wrapped key boxes in the bar's left section; font, box and gap shrink together until every held key fits."""
+    max_w, scale = int(frame_w * DECODE_LEFT_SECTION_MAX_W), DECODE_KEY_FONT_SCALE
+    while True:
+        k = scale / DECODE_KEY_FONT_SCALE
+        box_h, pad, gap, thick = int(DECODE_KEY_BOX_HEIGHT * k), max(2, int(DECODE_KEY_BOX_PADDING_X * k)), max(2, int(DECODE_KEY_ROW_GAP * k)), 2 if k > 0.5 else 1
+        x, y, boxes = 10, 10, []
+        for name in pressed_names:
+            (text_w, text_h), _ = cv2.getTextSize(name, cv2.FONT_HERSHEY_SIMPLEX, scale, thick)
+            box_w = text_w + 2 * pad
+            if x > 10 and x + box_w > max_w:
+                x, y = 10, y + box_h + gap
+            boxes.append((name, x, y, box_w, text_w, text_h))
+            x += box_w + gap
+        if scale < 0.15 or (y + box_h <= DECODE_TOP_BAR_HEIGHT and all(bx + bw <= max_w for _, bx, _, bw, _, _ in boxes)):
+            return boxes, box_h, scale, thick
+        scale *= 0.9
+
+
 def _draw_keyboard_keys(bar, pressed_names, frame_w):
     if not pressed_names:
         return
-    key_x, key_y = 10, 10
-    max_w = int(frame_w * DECODE_LEFT_SECTION_MAX_W)
-    for key_name in pressed_names:
-        (text_w, text_h), _ = cv2.getTextSize(
-            key_name, cv2.FONT_HERSHEY_SIMPLEX,
-            DECODE_KEY_FONT_SCALE, DECODE_KEY_FONT_THICKNESS
-        )
-        box_w = text_w + 2 * DECODE_KEY_BOX_PADDING_X
-        if key_x + box_w > max_w:
-            key_x = 10
-            key_y += DECODE_KEY_BOX_HEIGHT + DECODE_KEY_ROW_GAP
-            if key_y + DECODE_KEY_BOX_HEIGHT > DECODE_TOP_BAR_HEIGHT:
-                break
-        cv2.rectangle(bar, (key_x, key_y),
-                      (key_x + box_w, key_y + DECODE_KEY_BOX_HEIGHT), (0, 0, 0), 2)
-        text_x = key_x + (box_w - text_w) // 2
-        text_y = key_y + (DECODE_KEY_BOX_HEIGHT + text_h) // 2
-        cv2.putText(bar, key_name, (text_x, text_y),
-                    cv2.FONT_HERSHEY_SIMPLEX, DECODE_KEY_FONT_SCALE,
-                    (0, 0, 0), DECODE_KEY_FONT_THICKNESS, cv2.LINE_AA)
-        key_x += box_w + DECODE_KEY_ROW_GAP
+    boxes, box_h, scale, thick = _fit_key_boxes(pressed_names, frame_w)
+    for name, x, y, box_w, text_w, text_h in boxes:
+        cv2.rectangle(bar, (x, y), (x + box_w, y + box_h), (0, 0, 0), thick)
+        cv2.putText(bar, name, (x + (box_w - text_w) // 2, y + (box_h + text_h) // 2),
+                    cv2.FONT_HERSHEY_SIMPLEX, scale, (0, 0, 0), thick, cv2.LINE_AA)
 
 
 def _draw_mouse_clicks(bar, pressed_clicks, frame_w):
@@ -108,6 +112,53 @@ def _overlay_frame(frame_uint8, action, border):
         h, w, _ = frame.shape
         cv2.rectangle(frame, (0, 0), (w - 1, h - 1), (255, 0, 0), 4)
     return frame
+
+
+# ------------------------------------------------------------------ #
+#  plaicraft-debug#93 B4: VAE-decode when a session's hdf5 stores latents
+#  (4 channels) instead of pixels (3 channels). Same VAE/scale as
+#  gaussian_diffusion.decode -- see that module for why.
+# ------------------------------------------------------------------ #
+_LATENT_SCALE = 0.13025
+_VAE_ID = "madebyollin/sdxl-vae-fp16-fix"
+_default_vae = None
+
+
+def _load_default_vae():
+    global _default_vae
+    if _default_vae is None:
+        from diffusers import AutoencoderKL
+        _default_vae = AutoencoderKL.from_pretrained(_VAE_ID, torch_dtype=torch.float16)
+        _default_vae.to("cuda" if torch.cuda.is_available() else "cpu").eval()  # fp16 on CPU crawls
+        for p in _default_vae.parameters():
+            p.requires_grad = False
+    return _default_vae
+
+
+@torch.no_grad()
+def decode_latents_chunked(vae, latents, chunk_size=20):
+    """(N, 4, H, W) scaled latents -> (N, 3, H', W') pixels in [-1, 1], chunked to bound
+    peak memory over a full session."""
+    outs = [vae.decode(latents[i:i + chunk_size] / _LATENT_SCALE).sample
+           for i in range(0, latents.shape[0], chunk_size)]
+    return torch.cat(outs, dim=0)
+
+
+def maybe_decode_frames(frames, vae=None, chunk_size=20):
+    """frames: (N, C, H, W). C==3 passes through unchanged (debug-world sessions render
+    exactly as before); C==4 VAE-decodes to pixel space first, so the overlay below it
+    (_to_uint8_frame/_overlay_frame) never has to know the corpus was latent."""
+    c = frames.shape[1]
+    if c == 3:
+        return frames
+    if c != 4:
+        raise ValueError(f"decode_debug: unexpected frame channel count {c}, expected 3 or 4")
+    vae = vae or _load_default_vae()
+    t = frames if torch.is_tensor(frames) else torch.from_numpy(np.asarray(frames))
+    param = next(vae.parameters(), None)
+    if param is not None:
+        t = t.to(device=param.device, dtype=param.dtype)
+    return decode_latents_chunked(vae, t, chunk_size=chunk_size).cpu()
 
 
 def _to_uint8_frame(frame_chw):

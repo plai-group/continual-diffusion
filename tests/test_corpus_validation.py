@@ -77,6 +77,46 @@ def test_rows_carry_swap_metadata(tmp_path):
     assert vs.rows[0]["boundary_tick"] == 100 + N_OBS
 
 
+def _make_fixture_no_swap(tmp_path, n_channels=4):
+    """plaicraft-debug#93: a manifest with no swap package at all (plaicraft_morgan's), and
+    C=4 latent frames instead of C=3 pixels."""
+    vdir = tmp_path / "validation"
+    vdir.mkdir()
+    n = len(NAMES)
+    rng = np.random.RandomState(0)
+    frames = rng.uniform(-1, 1, size=(n, T, n_channels, H, W)).astype(np.float32)
+    keypress = rng.rand(n, T, 8).astype(np.float32)
+    mouse = rng.randn(n, T, 2).astype(np.float32)
+    window_start_ticks = np.array([100, 200, 300], dtype=np.int64)
+    boundary_ticks = window_start_ticks + N_OBS
+    np.savez(
+        vdir / "validation.npz", frames=frames, keypress=keypress, mouse=mouse,
+        names=np.array(NAMES), session_ids=np.array([f"sess{i}" for i in range(n)]),
+        window_start_ticks=window_start_ticks, boundary_ticks=boundary_ticks,
+    )
+    manifest = {
+        "schema_version": "1", "corpus_dir": str(tmp_path), "tick_ms": 80, "subbin_ms": 10,
+        "subbin_rule_version": "1", "T": T, "n_observed": N_OBS, "n_held_out_sessions": 20,
+        "built_at": "2026-01-01T00:00:00Z",
+        "exercises": [{"index": i, "name": name, "session_id": f"sess{i}"}
+                     for i, name in enumerate(NAMES)],  # no swap_kind key at all
+    }
+    (vdir / "manifest.json").write_text(json.dumps(manifest))
+    return vdir
+
+
+def test_manifest_without_swap_kind_loads_with_swap_kind_none(tmp_path):
+    vdir = _make_fixture_no_swap(tmp_path)
+    vs = CorpusValidationSet(vdir)
+    assert all(row["swap_kind"] is None for row in vs.rows)
+
+
+def test_c4_latent_frames_load(tmp_path):
+    vdir = _make_fixture_no_swap(tmp_path, n_channels=4)
+    vs = CorpusValidationSet(vdir)
+    assert vs.load_all().shape == (3, T, 4, H, W)
+
+
 def test_mismatched_T_raises(tmp_path):
     vdir, *_ = _make_fixture(tmp_path)
     with pytest.raises(ValueError) as exc:
@@ -158,3 +198,56 @@ def test_mouse_wrong_column_count_raises(tmp_path):
     with pytest.raises(ValueError) as exc:
         CorpusValidationSet(vdir)
     assert "mouse" in str(exc.value)
+
+
+def test_session_root_slices_actions_from_the_sessions_own_raw79_caches(tmp_path, monkeypatch):
+    """plaicraft-debug#93: validation must condition on the same 79-key cache training reads, not the npz."""
+    from improved_diffusion import debug_actions
+    vdir = _make_fixture_no_swap(tmp_path)
+    caches = {f"sess{i}": (np.random.RandomState(i).rand(400, 8).astype(np.float32),
+                           np.random.RandomState(10 + i).randn(400, 2).astype(np.float32)) for i in range(len(NAMES))}
+    seen = []
+    monkeypatch.setattr(debug_actions, "load_or_build_raw",
+                        lambda d, action_builder: (seen.append(action_builder), caches[d.name])[1])
+    vs = CorpusValidationSet(vdir, T=T, n_observed=N_OBS, session_root=tmp_path / "corpus", action_builder="raw79")
+    keypress, mouse = vs.load_all_actions_raw()
+    for i, w in enumerate([100, 200, 300]):
+        assert np.array_equal(keypress[i].numpy(), caches[f"sess{i}"][0][w:w + T])
+        assert np.array_equal(mouse[i].numpy(), caches[f"sess{i}"][1][w:w + T])
+    assert set(seen) == {"raw79"}
+
+
+def test_session_root_km_codes_come_from_the_session_km_cache(tmp_path, monkeypatch):
+    from improved_diffusion import debug_actions
+    vdir = _make_fixture_no_swap(tmp_path)
+    monkeypatch.setattr(debug_actions, "load_or_build_raw", lambda d, action_builder: (np.zeros((400, 8)), np.zeros((400, 2))))
+    codes = {f"sess{i}": np.random.RandomState(i).rand(400, 36).astype(np.float32) for i in range(len(NAMES))}
+    monkeypatch.setattr(debug_actions, "load_or_build",
+                        lambda d, action_encoding, tokenizer_checkpoint, device, action_builder: (codes[d.name], None))
+    vs = CorpusValidationSet(vdir, T=T, n_observed=N_OBS, action_encoding="km_fsq",
+                             session_root=tmp_path / "corpus", action_builder="raw79")
+    km, mouse = vs.load_all_actions()
+    assert np.array_equal(km[1].numpy(), codes["sess1"][200:200 + T]) and mouse.shape[-1] == 0
+
+
+def test_player_index_fn_labels_each_row_with_its_session_player(tmp_path, monkeypatch):
+    from improved_diffusion import debug_actions
+    monkeypatch.setattr(debug_actions, "load_or_build_raw", lambda d, action_builder: (np.zeros((400, 8)), np.zeros((400, 2))))
+    vdir = _make_fixture_no_swap(tmp_path)
+    vs = CorpusValidationSet(vdir, T=T, n_observed=N_OBS, player_index_fn=lambda d: int(d.name[-1]) + 7,
+                             session_root=tmp_path / "corpus")
+    assert vs.player_labels.tolist() == [7, 8, 9]
+    assert CorpusValidationSet(vdir, T=T, n_observed=N_OBS).player_labels is None
+
+
+def test_load_all_keys79_slices_each_rows_window_from_the_79key_ticks(tmp_path, monkeypatch):
+    from improved_diffusion import debug_actions
+    vdir = _make_fixture_no_swap(tmp_path)
+    monkeypatch.setattr(debug_actions, "load_or_build_raw", lambda d, action_builder: (np.zeros((400, 8)), np.zeros((400, 2))))
+    ticks = {f"sess{i}": np.random.RandomState(i).rand(400, 79).astype(np.float32) for i in range(len(NAMES))}
+    monkeypatch.setattr(debug_actions, "load_ticks_79", lambda d: ticks[d.name])
+    vs = CorpusValidationSet(vdir, T=T, n_observed=N_OBS, session_root=tmp_path / "corpus", action_builder="raw79")
+    keys79 = vs.load_all_keys79()
+    assert keys79.shape == (len(NAMES), T, 79)
+    assert np.array_equal(keys79[2].numpy(), ticks["sess2"][300:300 + T])
+    assert CorpusValidationSet(vdir, T=T, n_observed=N_OBS).load_all_keys79() is None  # debug world: 8 keys only

@@ -10,7 +10,7 @@ import torch
 import torch.distributed as dist
 
 from improved_diffusion import dist_util
-from improved_diffusion.video_datasets import load_data, default_T_dict, default_full_image_size_dict
+from improved_diffusion.video_datasets import load_data, default_T_dict, default_full_image_size_dict, plaicraft_valset_kwargs
 from improved_diffusion.resample import create_named_schedule_sampler
 from improved_diffusion.script_util import (
     model_and_diffusion_defaults,
@@ -102,6 +102,9 @@ def main():
     args.diffusion_space_kwargs = {
         "diffusion_space": args.diffusion_space,
         "pre_encoded": args.diffusion_space == "latent",
+        # Loads the VAE so validation/sample-video decode (plaicraft-debug#93 B3) has one; a
+        # no-op for diffusion_space=="pixel" either way.
+        "enable_decoding": args.diffusion_space == "latent",
     }
     args.model_type = 'vdt'
 
@@ -136,6 +139,7 @@ def main():
         # >0 makes the dataset emit a player label per window, and refuse a corpus without one.
         num_classes=args.num_classes,
         player_homogeneous_batches=args.player_homogeneous_batches,
+        global_database_path=args.global_database_path or None,
     )
 
     # Issue-58: fixed prompt set from the plaicraft-debug validation recording.
@@ -150,11 +154,11 @@ def main():
         valset = CorpusValidationSet(
             args.debug_validation_dir, T=args.T, n_observed=args.T // 2,
             action_encoding=args.action_encoding, tokenizer_checkpoint=args.km_tokenizer_checkpoint,
-            device=dist_util.dev(),
+            device=dist_util.dev(), **plaicraft_valset_kwargs(args.dataset, args.num_classes, args.global_database_path),
         )
         out_dir = args.debug_validation_out or os.path.join("results", "debug_validation")
         print(f"debug validation (corpus): {len(valset.rows)} rows -> {out_dir}")
-        debug_validation = (valset, out_dir, args.debug_validation_per_task)
+        debug_validation = (valset, out_dir, args.debug_validation_per_task, args.swap_test)
     elif args.debug_validation_db:
         from improved_diffusion.debug_validation import DebugValidationSet
         valset = DebugValidationSet(
@@ -164,7 +168,7 @@ def main():
         )
         out_dir = args.debug_validation_out or os.path.join("results", "debug_validation")
         print(f"debug validation: {len(valset.rows)} rows -> {out_dir}")
-        debug_validation = (valset, out_dir, args.debug_validation_per_task)
+        debug_validation = (valset, out_dir, args.debug_validation_per_task, args.swap_test)
 
     # Issue-85: independent of the swap validation above -- both can run, either can be off.
     player_validation = None
@@ -265,6 +269,8 @@ def create_argparser():
         # Warm start from a different architecture: step counter stays 0, optimizer/EMA stay fresh (--resume_checkpoint loads strict and reads the step from the filename).
         init_from_checkpoint="",
         km_tokenizer_checkpoint=str(KM_TOKENIZER_DEFAULT_CHECKPOINT),
+        global_database_path="",  # plaicraft_morgan: player-name lookup DB; "" -> dataset's own default
+        swap_test=True,  # plaicraft-debug#93: off for corpora with no swap package (e.g. plaicraft_morgan)
     )
     defaults.update(model_and_diffusion_defaults(model_type='vdt'))
     defaults.pop("keypress_loss_weight")  # sentinel-resolved post-parse, once action_encoding is known (plaicraft-debug#80)

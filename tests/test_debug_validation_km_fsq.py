@@ -71,6 +71,7 @@ def test_decode_then_encode_km_actions_round_trip():
     # A trained tokenizer should recover simple, sparse actions near-exactly.
     assert (mouse_hat - mouse_raw).abs().mean().item() < 2.0
     assert torch.equal((probs_hat > 0.5).float(), keys_hat)
+    assert dv._decode_km_actions(tokenizer, codes, all_keys=True)[2].shape == (1, 3, 79)
 
 
 def test_decode_pred_actions_returns_two_values_for_every_encoding():
@@ -123,3 +124,29 @@ def test_load_action_window_raw_ignores_action_encoding(tmp_path):
     expected_keypress, expected_mouse = da.load_or_build_raw(session_dir)
     assert torch.equal(raw_keypress, torch.from_numpy(np.asarray(expected_keypress, dtype=np.float32)))
     assert torch.equal(raw_mouse, torch.from_numpy(np.asarray(expected_mouse, dtype=np.float32)))
+
+
+def test_action_vec_to_bar_boxes_every_held_key_of_the_79():
+    from improved_diffusion.km_tokenizer.keypress_lookup import KEYPRESS_LOOKUP
+    vec = np.zeros(79)
+    vec[[KEYPRESS_LOOKUP[k] for k in ("w", "e", "1", "left", "scroll_up")]] = 1
+    assert dv._action_vec_to_bar(vec, [0.0, 0.0]) == dict(keys=["e", "w", "1", "scroll_up"], clicks=["left"], mouseDX=0.0, mouseDY=0.0)
+    assert dv._action_vec_to_bar(np.eye(8)[0], [0.0, 0.0])["keys"] == ["w"]  # debug-world bars unchanged
+
+
+def test_overlay_boxes_held_keys_top_left_and_leaves_the_frame_alone():
+    from improved_diffusion.decode_debug import DECODE_TOP_BAR_HEIGHT as H, _overlay_frame
+    frame = np.zeros((192, 320, 3), np.uint8)
+    base = dict(keys=[], clicks=[], mouseDX=0.0, mouseDY=0.0)
+    plain, named = _overlay_frame(frame, base, False), _overlay_frame(frame, {**base, "keys": ["e"]}, False)
+    assert (plain[H:] == named[H:]).all() and (plain[:H, :144] != named[:H, :144]).any()
+
+
+def test_key_boxes_shrink_until_all_77_non_mouse_keys_fit_top_left():
+    from improved_diffusion.decode_debug import DECODE_FINAL_FRAME_SIZE, DECODE_LEFT_SECTION_MAX_W, DECODE_TOP_BAR_HEIGHT, _fit_key_boxes
+    from improved_diffusion.km_tokenizer.keypress_lookup import INDEX_TO_KEYPRESS_LABEL
+    names = [n for n in INDEX_TO_KEYPRESS_LABEL.values() if not n.startswith("mouse_")]
+    w = DECODE_FINAL_FRAME_SIZE[0]
+    boxes, box_h, _, _ = _fit_key_boxes(names, w)
+    assert [b[0] for b in boxes] == names
+    assert all(x + bw <= w * DECODE_LEFT_SECTION_MAX_W and y + box_h <= DECODE_TOP_BAR_HEIGHT for _, x, y, bw, _, _ in boxes)

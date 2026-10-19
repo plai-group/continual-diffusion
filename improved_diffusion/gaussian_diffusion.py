@@ -5,6 +5,7 @@ https://github.com/hojonathanho/diffusion/blob/1e0dceb3b3495bbe19116a5e1b3596cd0
 Docstrings have been added, as well as DDIM sampling and a new collection of beta schedules.
 """
 
+import contextlib
 import enum
 import math
 
@@ -184,6 +185,9 @@ class GaussianDiffusion:
         self.pre_encoded = diffusion_space_kwargs.get("pre_encoded")
 
         self.original_dtype = None
+        # "sdxl" (per-frame 4ch latents) or "wan22" (causal 48ch video latents, 4 pixel frames per latent); plaicraft-debug#99.
+        self.vae_name = diffusion_space_kwargs.get("vae") or "sdxl"
+        self.px_per_latent = 4 if self.vae_name == "wan22" and self.diffusion_space == "latent" else 1
         self.setup_enc_dec(enable_decoding=diffusion_space_kwargs.get("enable_decoding"))
 
     def q_mean_variance(self, x_start, t):
@@ -1278,6 +1282,8 @@ class GaussianDiffusion:
             if not enable_decoding:
                 return
             print('Loading VAE encoder and decoder.')
+            if self.vae_name == "wan22":
+                return self._setup_wan22()
             from diffusers import AutoencoderKL
             self.enc_dec_dtype = th.float16
             self.vae = AutoencoderKL.from_pretrained("madebyollin/sdxl-vae-fp16-fix", torch_dtype=self.enc_dec_dtype).cuda()
@@ -1290,6 +1296,44 @@ class GaussianDiffusion:
         else:
             raise ValueError(f"Unknown diffusion space: {self.diffusion_space}")
 
+    def _setup_wan22(self):
+        from diffusers import AutoencoderKLWan
+        self.enc_dec_dtype = th.float32
+        self.vae = AutoencoderKLWan.from_pretrained("Wan-AI/Wan2.2-TI2V-5B-Diffusers", subfolder="vae", torch_dtype=self.enc_dec_dtype)
+        self.vae.eval().requires_grad_(False)  # stays on CPU; _wan_vae() borrows the GPU per call
+        self.wan_mean = th.tensor(self.vae.config.latents_mean).view(1, -1, 1, 1, 1)
+        self.wan_std = th.tensor(self.vae.config.latents_std).view(1, -1, 1, 1, 1)
+        print('Loaded Wan2.2 VAE.')
+
+    @contextlib.contextmanager
+    def _wan_vae(self):
+        """Borrow the GPU for one call, then give the memory back (training leaves ~2GiB headroom)."""
+        dev = th.device("cuda") if th.cuda.is_available() else th.device("cpu")
+        self.vae.to(dev)
+        try:
+            yield self.vae, self.wan_mean.to(dev), self.wan_std.to(dev)
+        finally:
+            self.vae.to("cpu")
+            th.cuda.empty_cache()
+
+    def _wan_decode(self, video):
+        """(B, T, 48, h, w) normalized latents -> (B, 1+4(T-1), 3, H, W) in [-1, 1]; each clip is ONE causal video."""
+        dtype, device = video.dtype, video.device
+        with self._wan_vae() as (vae, mean, std):
+            outs = []
+            for z in video:  # one sample at a time to bound peak memory
+                z = z.permute(1, 0, 2, 3).unsqueeze(0).to(vae.device, self.enc_dec_dtype) * std + mean
+                outs.append(vae.decode(z).sample.clamp(-1, 1)[0].permute(1, 0, 2, 3).cpu())
+        return th.stack(outs).to(device=device, dtype=dtype)
+
+    def _wan_encode(self, video):
+        """(B, 1+4n, 3, H, W) pixels -> (B, n+1, 48, h, w) normalized latents (latent 0 is the single first frame)."""
+        dtype, device = video.dtype, video.device
+        with self._wan_vae() as (vae, mean, std):
+            outs = [((vae.encode(v.permute(1, 0, 2, 3).unsqueeze(0).to(vae.device, self.enc_dec_dtype)).latent_dist.mode() - mean) / std)[0].permute(1, 0, 2, 3).cpu()
+                    for v in video]
+        return th.stack(outs).to(device=device, dtype=dtype)
+
     @th.no_grad()
     def encode(self, video, chunk_size=10):
         if self.diffusion_space == "pixel":
@@ -1297,6 +1341,8 @@ class GaussianDiffusion:
         elif self.diffusion_space == "latent":
             if self.pre_encoded:  # nothing to do if input is already pre encoded.
                 return video
+            if self.vae_name == "wan22":
+                return self._wan_encode(video)
             self.original_dtype = video.dtype
             original_shape, original_device = video.shape, video.device
             video = video.flatten(0, 1).to(self.enc_dec_dtype).cuda()
@@ -1315,6 +1361,8 @@ class GaussianDiffusion:
         if self.diffusion_space == "pixel":
             return video
         elif self.diffusion_space == "latent":
+            if self.vae_name == "wan22":
+                return self._wan_decode(video)
             original_shape, original_device = video.shape, video.device
             video = video.flatten(0, 1).to(self.enc_dec_dtype).to(self.vae.device)
 

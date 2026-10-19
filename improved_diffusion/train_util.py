@@ -727,11 +727,14 @@ class TrainLoop:
             if isinstance(samples, tuple):
                 samples, _ = samples
             samples = (samples.cpu() * latent_mask + batch * obs_mask).float()
+            n_obs_px = n_obs
             if self.diffusion.diffusion_space == "latent":
+                n_gen = samples.shape[1] - n_obs
                 # VAE-decode before the marker/uint8 conversion below, both of which assume
                 # 3-channel [-1, 1] pixels (plaicraft-debug#93 B3).
                 samples = self.decode(samples.to(dist_util.dev())).cpu()
-            _mark_as_observed(samples[:, :n_obs])
+                n_obs_px = samples.shape[1] - self.diffusion.px_per_latent * n_gen  # Wan decodes 4 frames per latent
+            _mark_as_observed(samples[:, :n_obs_px])
             samples = ((samples + 1) * 127.5).clamp(0, 255).to(th.uint8).cpu().numpy()
             for i, video in enumerate(samples):
                 logger.logkv(f'video-{i}', wandb.Video(video), distributed=False)

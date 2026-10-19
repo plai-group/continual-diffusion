@@ -253,7 +253,10 @@ def _decode_km_actions(tokenizer, codes, all_keys=False):
     mouse: mouse_pred summed over the tick's 8 sub-bins."""
     from .km_tokenizer.keypress_scatter import _RAW_POSITIONS
 
-    B, T, _ = codes.shape
+    B = codes.shape[0]
+    # (B, T, k*code) -> (B, k*T, code): ticks_per_latent > 1 packs k ticks' codes per latent row (plaicraft-debug#99); a no-op at k=1.
+    codes = codes.reshape(B, -1, tokenizer.config.num_tokens * tokenizer.config.fsq_dim)
+    T = codes.shape[1]
     # heun_sample's noise math can drift to float64; any parameter's dtype works, km_ctx14's
     # tokenizer has no top-level frame_pos like km_fsq's (plaicraft-debug#96).
     codes = codes.to(dtype=next(tokenizer.parameters()).dtype)
@@ -547,7 +550,8 @@ def _render_panels(frames_list, actions_list, labels, n_observed, out_path, ncol
     """
     frames_list = [np.asarray(f) for f in frames_list]
     T = frames_list[0].shape[0]
-    acts = [(_to_display_actions(k), _to_display_actions(m)) for k, m in actions_list]
+    # Right-align ticks to frames: Wan decodes 1+4(T-1) frames for k*T ticks; a no-op when they match.
+    acts = [(_to_display_actions(k)[-T:], _to_display_actions(m)[-T:]) for k, m in actions_list]
 
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -657,6 +661,8 @@ def run_debug_validation(model, diffusion, valset, device, out_dir,
     sampling_model = _guided(model, cfg_scale, label_cfg_scale)
     # Overlay mp4s must play back at the corpus's own rate, not the 12.5Hz debug-world default.
     overlay_fps = debug_actions.KM_CTX14_FPS if is_km_ctx14 else DECODE_VIDEO_FPS
+    k = getattr(_m, "ticks_per_latent", 1)  # action ticks per latent frame
+    px_per = getattr(diffusion, "px_per_latent", 1)  # decoded pixel frames per generated latent
 
     T, n_obs = valset.T, valset.n_observed
     # CorpusValidationSet (issue #81) rows carry swap_kind: their swap test targets
@@ -750,20 +756,22 @@ def run_debug_validation(model, diffusion, valset, device, out_dir,
         # decoded copies are what every downstream metric, FVD feature and overlay reads.
         x0_px = _decode_if_latent(diffusion, x0)
         samples_px = _decode_if_latent(diffusion, samples)
+        # Wan decodes ctx+GEN jointly into 1+4(T-1) frames, so GEN is the LAST px_per*n_gen of them; else this is n_obs.
+        px_obs = x0_px.shape[1] - px_per * (T - n_obs)
 
         # x0/samples are rebound each iteration, so features must be taken here, not at aggregation.
         if fvd_repeats:
             try:
                 extract = frechet_video_distance._get_video_features(device)
-                feats_real.append(extract(x0_px[:, n_obs:]))
-                feats_fake.append(extract(samples_px[:, n_obs:]))
+                feats_real.append(extract(x0_px[:, px_obs:]))
+                feats_fake.append(extract(samples_px[:, px_obs:]))
                 # Extra fake draws only: widens the generated side and is what makes kvd_std
                 # informative (it is degenerate when both sides are the same size).
                 for _ in range(fvd_repeats - 1):
                     extra = _sample_chunk()
                     extra = (extra[0] if isinstance(extra, tuple) else extra).to(device)
                     extra_px = _decode_if_latent(diffusion, extra * latent_mask + x0 * obs_mask)
-                    feats_fake.append(extract(extra_px[:, n_obs:]))
+                    feats_fake.append(extract(extra_px[:, px_obs:]))
             except Exception as e:
                 fails.record("fvd_features", step, e)
                 """Drop what was collected: a pool truncated mid-loop is indistinguishable
@@ -803,9 +811,9 @@ def run_debug_validation(model, diffusion, valset, device, out_dir,
             pred, gt = samples_px[j], x0_px[j]  # pixel space; x0/samples (latent) are for sampling only
 
             # frame 10 == first generated frame: the cleanest world-reconstruction read
-            m_next = metrics(pred[n_obs:n_obs + 1], gt[n_obs:n_obs + 1])
+            m_next = metrics(pred[px_obs:px_obs + 1], gt[px_obs:px_obs + 1])
             # the full 1s continuation: drift trend, VDT-vs-VDT only
-            m_roll = metrics(pred[n_obs:], gt[n_obs:])
+            m_roll = metrics(pred[px_obs:], gt[px_obs:])
 
             rec = {"row": row["num"], "prompt": row["prompt"], "type": row["test_type"]}
             rec.update({f"next/{k}": v for k, v in m_next.items()})
@@ -819,7 +827,7 @@ def run_debug_validation(model, diffusion, valset, device, out_dir,
             g_mouse = g_mouse_chunk[j].to(device) if p_mouse is not None else None
             if p_key is not None or p_mouse is not None or p_key_prob is not None:
                 # Row n_obs is pinned GT (the action mask lags by one row), so the first genuinely generated action is row n_obs + 1.
-                first_gen = n_obs + 1
+                first_gen = k * (n_obs + 1)  # in ticks
                 for scope, sl in (("next", slice(first_gen, first_gen + 1)),
                                   ("roll", slice(first_gen, None))):
                                   # next is just the next frame, roll is all rollout frames
@@ -855,18 +863,18 @@ def run_debug_validation(model, diffusion, valset, device, out_dir,
                     latent_mask_j = latent_mask[j:j + 1]
                     obs_act_mask_j = frame_mask_to_action_mask(obs_mask_j)
                     # Rewrite only the actions driving the generated frames: rows n_obs..T-1, the frame-mask complement, not the action-mask complement (which lags one row) -- leave the history true.
-                    intervene_on = 1.0 - obs_mask_j.reshape(
-                        obs_mask_j.shape[0], obs_mask_j.shape[1], 1)
+                    intervene_on = (1.0 - obs_mask_j.reshape(
+                        obs_mask_j.shape[0], obs_mask_j.shape[1], 1)).repeat_interleave(k, dim=1)  # per tick
                     if is_corpus_valset:
                         key_swap_j, mouse_swap_j = _swap_single_action(
-                            key_true_j, mouse_true_j, boundary_idx=n_obs,
+                            key_true_j, mouse_true_j, boundary_idx=k * n_obs,
                             swap_kind=row["swap_kind"], swap_dim=row.get("swap_dim"),
                             swap_counterpart_dim=row.get("swap_counterpart_dim"),
                         )
                     else:
                         key_swap_j, mouse_swap_j = _swap_actions(key_true_j, mouse_true_j, intervene_on)
                     if is_corpus_valset:
-                        key_zero_j, mouse_zero_j = _zero_single_action(key_true_j, mouse_true_j, boundary_idx=n_obs)
+                        key_zero_j, mouse_zero_j = _zero_single_action(key_true_j, mouse_true_j, boundary_idx=k * n_obs)
                     else:
                         key_zero_j, mouse_zero_j = _zero_actions(key_true_j, mouse_true_j, intervene_on)
                     # Same starting noise for all three passes, so only the actions tensor differs.
@@ -876,8 +884,8 @@ def run_debug_validation(model, diffusion, valset, device, out_dir,
 
                     def _sample_with_actions(key_raw, mouse_raw):
                         if is_km_fsq or is_km_ctx14:
-                            actions_in = _encode_km_actions(km_tokenizer, key_raw, mouse_raw)
-                            mouse_in = key_raw.new_zeros(key_raw.shape[0], key_raw.shape[1], 0)
+                            actions_in = _encode_km_actions(km_tokenizer, key_raw, mouse_raw).reshape(key_raw.shape[0], T, -1)  # (1, k*T, 32) -> (1, T, k*32)
+                            mouse_in = key_raw.new_zeros(key_raw.shape[0], T, 0)
                         elif is_raw_fused:
                             actions_in = th.cat([key_raw, debug_actions._symlog(mouse_raw)], dim=-1)
                             mouse_in = key_raw.new_zeros(key_raw.shape[0], key_raw.shape[1], 0)
@@ -924,10 +932,10 @@ def run_debug_validation(model, diffusion, valset, device, out_dir,
                     swap_full, swap_key, swap_mouse = _sample_with_actions(key_swap_j, mouse_swap_j)
                     zero_full, zero_key, zero_mouse = _sample_with_actions(key_zero_j, mouse_zero_j)
 
-                    true01 = _to01(true_full[n_obs:])
-                    swap01 = _to01(swap_full[n_obs:])
-                    zero01 = _to01(zero_full[n_obs:])
-                    gt01 = _to01(gt[n_obs:])
+                    true01 = _to01(true_full[px_obs:])
+                    swap01 = _to01(swap_full[px_obs:])
+                    zero01 = _to01(zero_full[px_obs:])
+                    gt01 = _to01(gt[px_obs:])
 
                     swap_rows.append(dict(
                         l2_true_swap=float(th.mean((true01 - swap01) ** 2)),
@@ -952,7 +960,7 @@ def run_debug_validation(model, diffusion, valset, device, out_dir,
                             actions_zero=((zero_key if zero_key is not None else key_zero_j[0]).cpu().numpy(),
                                           (zero_mouse if zero_mouse is not None else mouse_zero_j[0]).cpu().numpy()),
                             true_label=("GEN" if (true_key is not None or true_mouse is not None) else "TRUE"),
-                            n_observed=n_obs, out_path=str(mp4_swap), fps=overlay_fps,
+                            n_observed=px_obs, out_path=str(mp4_swap), fps=overlay_fps,
                         )
                         import wandb
                         logger.logkv(f"val/swap_overlay/{slug}", wandb.Video(str(mp4_swap)), distributed=False)
@@ -966,7 +974,7 @@ def run_debug_validation(model, diffusion, valset, device, out_dir,
                                 if p_key_chunk is not None and p_mouse_chunk is not None else gt_bars)
                     mp4 = out_dir / f"step{step}_{slug}_gen.mp4"
                     _render_panels((gt.cpu().numpy(), pred.cpu().numpy()), (gt_bars, gen_bars),
-                                   ["GT", "GEN"], n_obs, str(mp4), ncols=2, fps=overlay_fps)
+                                   ["GT", "GEN"], px_obs, str(mp4), ncols=2, fps=overlay_fps)
                     import wandb
                     logger.logkv(f"val/overlay/{slug}", wandb.Video(str(mp4)), distributed=False)
                 except Exception as e:

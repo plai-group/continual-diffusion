@@ -114,7 +114,7 @@ def main():
             args.debug_validation_dir, T=ns.T, n_observed=ns.T // 2,
             action_encoding=getattr(ns, "action_encoding", "raw"),
             tokenizer_checkpoint=getattr(ns, "km_tokenizer_checkpoint", DEFAULT_CHECKPOINT),
-            device=args.device, **plaicraft_valset_kwargs(getattr(ns, "dataset", ""), getattr(ns, "num_classes", 0),
+            device=args.device, ticks_per_latent=ns.ticks_per_latent, **plaicraft_valset_kwargs(getattr(ns, "dataset", ""), getattr(ns, "num_classes", 0),
                                                                 getattr(ns, "global_database_path", ""),
                                                                 getattr(ns, "action_encoding", "raw")),
         )

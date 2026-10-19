@@ -114,7 +114,7 @@ def main():
     }[args.diffusion_space]
     args.in_channels = {
         "pixel": 3,
-        "latent": 4,
+        "latent": 48 if args.vae == "wan22" else 4,
     }[args.diffusion_space]
     args.upper_frame_range = int(args.upper_frame_range) if args.upper_frame_range is not None else None
     args.attn_window = int(args.attn_window) if args.attn_window is not None else None
@@ -124,6 +124,7 @@ def main():
         # Loads the VAE so validation/sample-video decode (plaicraft-debug#93 B3) has one; a
         # no-op for diffusion_space=="pixel" either way.
         "enable_decoding": args.diffusion_space == "latent",
+        "vae": args.vae,
     }
     args.model_type = 'vdt'
 
@@ -174,7 +175,7 @@ def main():
         valset = CorpusValidationSet(
             args.debug_validation_dir, T=args.T, n_observed=args.T // 2,
             action_encoding=args.action_encoding, tokenizer_checkpoint=args.km_tokenizer_checkpoint,
-            device=dist_util.dev(), **plaicraft_valset_kwargs(args.dataset, args.num_classes, args.global_database_path, args.action_encoding),
+            device=dist_util.dev(), ticks_per_latent=args.ticks_per_latent, **plaicraft_valset_kwargs(args.dataset, args.num_classes, args.global_database_path, args.action_encoding),
         )
         out_dir = args.debug_validation_out or os.path.join("results", "debug_validation")
         print(f"debug validation (corpus): {len(valset.rows)} rows -> {out_dir}")
@@ -290,6 +291,7 @@ def create_argparser():
         init_from_checkpoint="",
         km_tokenizer_checkpoint="",  # sentinel-resolved post-parse by encoding (plaicraft-debug#96)
         global_database_path="",  # plaicraft_morgan: player-name lookup DB; "" -> dataset's own default
+        vae="sdxl",  # "sdxl" | "wan22": latent backend for diffusion_space=latent (wan22 = 48ch causal video latents); plaicraft-debug#99
         swap_test=True,  # plaicraft-debug#93: off for corpora with no swap package (e.g. plaicraft_morgan)
     )
     defaults.update(model_and_diffusion_defaults(model_type='vdt'))

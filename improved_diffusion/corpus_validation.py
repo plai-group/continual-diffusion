@@ -20,7 +20,7 @@ class CorpusValidationSet:
 
     def __init__(self, validation_dir, T=None, n_observed=None, action_encoding="raw",
                  tokenizer_checkpoint=None, device=None, session_root=None, action_builder="raw8",
-                 player_index_fn=None):
+                 player_index_fn=None, ticks_per_latent=1):
         self.validation_dir = Path(validation_dir)
         self.session_root = Path(session_root) if session_root else None  # set: actions come from the sessions' own caches
         self.action_builder = action_builder
@@ -44,6 +44,8 @@ class CorpusValidationSet:
         self.T = self.manifest["T"]
         self.n_observed = self.manifest["n_observed"]
         self.n_generated = self.T - self.n_observed
+        # k action ticks per latent frame (Wan: 4): npz frames are (N, T) latents, actions are (N, k*T) ticks (plaicraft-debug#99).
+        self.k = ticks_per_latent
 
         npz = np.load(npz_path, allow_pickle=False)
         self._frames = np.asarray(npz["frames"], dtype=np.float32)
@@ -58,7 +60,7 @@ class CorpusValidationSet:
                               if player_index_fn is not None else None)
         if self.session_root is not None:
             self._keypress, self._mouse = map(np.stack, zip(*(
-                (np.asarray(k[w:w + self.T], dtype=np.float32), np.asarray(m[w:w + self.T], dtype=np.float32))
+                (np.asarray(k[w:w + self.k * self.T], dtype=np.float32), np.asarray(m[w:w + self.k * self.T], dtype=np.float32))
                 for sid, w in zip(session_ids, window_start_ticks)
                 for k, m in [debug_actions.load_or_build_raw(self.session_root / sid, action_builder=self.action_builder)])))
 
@@ -70,12 +72,12 @@ class CorpusValidationSet:
             ex = by_name[name]
             window_start = int(window_start_ticks[i])
             boundary_tick = int(boundary_ticks[i])
-            offset = boundary_tick - window_start
+            offset = boundary_tick - window_start  # in ticks
             # Raises, not warns: swap hardcodes boundary_idx=n_observed; mismatch would intervene on the wrong tick silently (plaicraft-debug#81).
-            if offset != self.n_observed:
+            if offset != self.k * self.n_observed:
                 raise ValueError(
                     f"exercise {name!r}: boundary_tick - window_start = {offset}, "
-                    f"expected n_observed={self.n_observed} "
+                    f"expected ticks_per_latent*n_observed={self.k * self.n_observed} "
                     f"(window_start={window_start}, boundary_tick={boundary_tick})"
                 )
             self.rows.append(dict(
@@ -111,10 +113,11 @@ class CorpusValidationSet:
             raise ValueError(
                 f"validation.npz has {n_rows} rows but manifest lists {n_exercises} exercises"
             )
-        for name, arr in (("frames", self._frames), ("keypress", self._keypress), ("mouse", self._mouse)):
-            if arr.shape[1] != self.T:
+        for name, arr, t in (("frames", self._frames, self.T), ("keypress", self._keypress, self.k * self.T),
+                             ("mouse", self._mouse, self.k * self.T)):
+            if arr.shape[1] != t:
                 raise ValueError(
-                    f"{name}.shape={arr.shape} has T={arr.shape[1]}, expected manifest T={self.T}"
+                    f"{name}.shape={arr.shape} has T={arr.shape[1]}, expected {t} (manifest T={self.T}, ticks_per_latent={self.k})"
                 )
         if self._keypress.shape[-1] != 8:
             raise ValueError(f"keypress.shape={self._keypress.shape} must have 8 columns (raw keypress dim)")
@@ -150,6 +153,7 @@ class CorpusValidationSet:
             fused = np.concatenate([self._keypress, debug_actions._symlog(self._mouse)], axis=-1).astype(np.float32)
             empty_mouse = np.zeros((*fused.shape[:-1], 0), dtype=np.float32)
             return th.from_numpy(fused), th.from_numpy(empty_mouse)
+        assert self.k == 1 or self.action_encoding == "km_ctx14", "ticks_per_latent > 1 is only wired for km_ctx14"
         if self.action_encoding == "km_fsq" and self.session_root is not None:
             km_codes = np.stack([np.asarray(debug_actions.load_or_build(
                 self.session_root / r["session_id"], action_encoding="km_fsq", tokenizer_checkpoint=self.tokenizer_checkpoint,
@@ -176,14 +180,14 @@ class CorpusValidationSet:
                 full = np.asarray(debug_actions.load_or_build(
                     session_dir, action_encoding="km_ctx14", tokenizer_checkpoint=checkpoint,
                     device=self.device, action_builder=self.action_builder)[0], dtype=np.float32)
-                window = full[r["window_start"]:r["window_start"] + self.T].copy()
+                window = full[r["window_start"]:r["window_start"] + self.k * self.T].copy()  # per-tick codes
                 n_ctx = r["boundary_tick"] - r["window_start"]
                 # The non-causal encoder would otherwise leak the generated future into context
                 # codes near the boundary -- re-encode [window_start, boundary_tick) alone.
                 window[:n_ctx] = debug_actions.encode_km_ctx14_context(
                     session_dir, r["window_start"], r["boundary_tick"], tokenizer, self.device, self.action_builder)
                 rows.append(window)
-            km_codes = np.stack(rows)
+            km_codes = np.stack(rows).reshape(len(rows), self.T, -1)  # (N, k*T, 32) -> (N, T, k*32)
             return th.from_numpy(km_codes), th.from_numpy(np.zeros((*km_codes.shape[:2], 0), dtype=np.float32))
         raise ValueError(
             f"unknown action_encoding {self.action_encoding!r}, expected 'raw', 'km_fsq', 'raw_fused', or 'km_ctx14'"
@@ -204,7 +208,7 @@ class CorpusValidationSet:
             return None
         if getattr(self, "_keys79", None) is None:
             ticks = {sid: debug_actions.load_ticks_79(self.session_root / sid) for sid in {r["session_id"] for r in self.rows}}
-            self._keys79 = np.stack([ticks[r["session_id"]][r["window_start"]:r["window_start"] + self.T] for r in self.rows])
+            self._keys79 = np.stack([ticks[r["session_id"]][r["window_start"]:r["window_start"] + self.k * self.T] for r in self.rows])
         return th.from_numpy(self._keys79.copy())
 
 

@@ -24,6 +24,9 @@ from improved_diffusion.script_util import (
     args_to_dict,
     str2bool,
     backfill_action_encoding,
+    backfill_cond_combine,
+    backfill_label_embedding_frozen,
+    backfill_label_init_std,
 )
 from improved_diffusion.test_util import get_model_results_path, get_eval_run_identifier, Protect
 from improved_diffusion.sampling_schemes import sampling_schemes
@@ -105,6 +108,9 @@ def main(args):
         if is_vdt and not hasattr(model_args, "patch_size"):
             model_args.patch_size = 2
     backfill_action_encoding(model_args)
+    backfill_cond_combine(model_args)  # pre-#85-follow-up checkpoints predate the flag
+    backfill_label_embedding_frozen(model_args)  # pre-frozen-label checkpoints predate the flag
+    backfill_label_init_std(model_args)  # predates the flag; DiT's 0.02
     model, diffusion = create_model_and_diffusion(model_type=model_args.model_type,
         **args_to_dict(model_args, model_and_diffusion_defaults(model_type=model_args.model_type).keys())
     )

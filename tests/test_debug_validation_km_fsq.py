@@ -73,6 +73,20 @@ def test_decode_then_encode_km_actions_round_trip():
     assert torch.equal((probs_hat > 0.5).float(), keys_hat)
 
 
+def test_decode_pred_actions_returns_two_values_for_every_encoding():
+    """#86 widened _decode_km_actions to three returns and fixed its own call sites, but
+    this wrapper forwarded it straight through. Every km_fsq player-validation row then
+    raised on unpack and was swallowed, so the metric froze instead of failing loudly."""
+    tokenizer = load_tokenizer()
+    torch.manual_seed(0)
+    for encoding, act in (("km_fsq", torch.randn(1, 3, da.KM_CODE_DIM)),
+                          ("raw_fused", torch.randn(1, 3, 10)),
+                          ("raw", torch.randn(1, 3, 10))):
+        keys, mouse = dv._decode_pred_actions(act, torch.randn(1, 3, 2), encoding, tokenizer)
+        assert keys.shape[:2] == (1, 3) and mouse.shape[:2] == (1, 3), encoding
+    assert dv._decode_pred_actions(None, None, "km_fsq", tokenizer) == (None, None)
+
+
 def _make_session(tmp_path, n_ticks=3):
     session_dir = tmp_path / "sess"
     (session_dir / "encoded_video_hdf5").mkdir(parents=True)

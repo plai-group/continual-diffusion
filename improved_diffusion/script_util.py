@@ -209,6 +209,7 @@ def vdt_model_and_diffusion_defaults():
         independent_action_t=False,  # sample the action token's noise level separately from the video's; see plaicraft-debug#85
         attn_window=None,  # spatial sublayer attends across +-attn_window frames for action/mouse tokens; see plaicraft-debug#97
         pos_encoding="sincos",  # "sincos" | "rope3d" (Wan 3D RoPE for video, 1D RoPE for actions); see plaicraft-debug#99
+        attention="factorized",  # "factorized" | "full" (one attention over all frames' tokens, no temporal sublayer); see plaicraft-debug#99
         keypress_loss_weight=1.0,
         mouse_loss_weight=1.0,
         action_quantization="none",  # "none" | "codebook" | "fsq"; see plaicraft-debug#77, #80
@@ -254,6 +255,7 @@ def create_vdt_model_and_diffusion(
     independent_action_t=False,
     attn_window=None,
     pos_encoding="sincos",
+    attention="factorized",
 ):
     diffusion = create_gaussian_diffusion(
         steps=diffusion_steps,
@@ -294,6 +296,7 @@ def create_vdt_model_and_diffusion(
         independent_action_t=independent_action_t,
         attn_window=attn_window,
         pos_encoding=pos_encoding,
+        attention=attention,
     )
     return model, diffusion
 
@@ -407,6 +410,12 @@ def backfill_pos_encoding(model_args):
     """Pre-#99 checkpoints have no pos_encoding saved; they all trained sin-cos embeddings."""
     if not hasattr(model_args, "pos_encoding"):
         model_args.pos_encoding = "sincos"
+
+
+def backfill_attention(model_args):
+    """Pre-#99 checkpoints have no attention saved; they all trained factorized spatial+temporal."""
+    if not hasattr(model_args, "attention"):
+        model_args.attention = "factorized"
 
 
 def str2bool(v):

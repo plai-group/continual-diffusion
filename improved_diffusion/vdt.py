@@ -284,7 +284,7 @@ class VDTBlock(nn.Module):
     A VDT block with adaptive layer norm zero (adaLN-Zero) conditioning.
     """
     def __init__(self, hidden_size, num_heads, mlp_ratio=4.0, mode='video', num_frames=16,
-                 attn_window=None, n_patch=None, pos_encoding='sincos', **block_kwargs):
+                 attn_window=None, n_patch=None, pos_encoding='sincos', attention='factorized', **block_kwargs):
         super().__init__()
         self.norm1 = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
         self.rope = pos_encoding == 'rope3d'
@@ -304,11 +304,15 @@ class VDTBlock(nn.Module):
         self.attn_window = attn_window
         self.n_patch = n_patch
         self._window_mask_cache = None
+        # full: one attention over all (t n) tokens, no temporal sublayer (plaicraft-debug#99).
+        assert attention in ('factorized', 'full'), f"unknown attention {attention}"
+        assert attention == 'factorized' or attn_window is None, "attention=full is incompatible with attn_window"
+        self.full = attention == 'full'
 
         self.mode = mode
 
         ## Temporal Attention Parameters
-        if self.mode == 'video':
+        if self.mode == 'video' and not self.full:
             
             self.temporal_norm1 = nn.LayerNorm(hidden_size)
             self.temporal_attn = Attn(
@@ -320,7 +324,7 @@ class VDTBlock(nn.Module):
         T = self.num_frames
         K, N, M = x.shape
         B = K // T
-        if self.mode == 'video':
+        if self.mode == 'video' and not self.full:
             x = rearrange(x, '(b t) n m -> (b n) t m',b=B,t=T,n=N,m=M)
             res_temporal = self.temporal_attn(self.temporal_norm1(x), **self._rope_kw(rope, 'temporal', B))
             res_temporal = rearrange(res_temporal, '(b n) t m -> (b t) n m',b=B,t=T,n=N,m=M)
@@ -329,11 +333,11 @@ class VDTBlock(nn.Module):
             x = x + res_temporal
 
         normed = modulate(self.norm1(x), shift_msa, scale_msa, self.num_frames)
-        if self.attn_window is None:
+        if self.attn_window is None and not self.full:
             attn = self.attn(normed, **self._rope_kw(rope, 'spatial', B))
         else:
             normed = rearrange(normed, '(b t) n m -> b (t n) m', b=B, t=T, n=N, m=M)
-            mask = self._get_window_mask(T, N, normed.device)
+            mask = None if self.full else self._get_window_mask(T, N, normed.device)
             attn = rearrange(self.attn(normed, attn_mask=mask, **self._rope_kw(rope, 'flat', B)), 'b (t n) m -> (b t) n m', b=B, t=T, n=N, m=M)
         attn = rearrange(attn, '(b t) n m-> b (t n) m',b=B,t=T,n=N,m=M)
         attn = _expand_cond(gate_msa, N) * attn
@@ -441,6 +445,7 @@ class VDT(nn.Module):
         independent_action_t=False,
         attn_window=None,
         pos_encoding='sincos',
+        attention='factorized',
     ):
         super().__init__()
         self.learn_sigma = learn_sigma
@@ -534,7 +539,7 @@ class VDT(nn.Module):
 
         self.blocks = nn.ModuleList([
             VDTBlock(hidden_size, num_heads, mlp_ratio=mlp_ratio, mode=mode, num_frames=self.num_frames,
-                     attn_window=attn_window, n_patch=num_patches, pos_encoding=pos_encoding) for _ in range(depth)
+                     attn_window=attn_window, n_patch=num_patches, pos_encoding=pos_encoding, attention=attention) for _ in range(depth)
         ])
         self.final_layer = FinalLayer(hidden_size, patch_size, self.out_channels, self.num_frames)
         self.initialize_weights()

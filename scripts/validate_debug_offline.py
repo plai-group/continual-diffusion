@@ -33,6 +33,7 @@ from improved_diffusion.script_util import (
     backfill_label_init_std,
     backfill_attn_window,
     backfill_pos_encoding,
+    backfill_attention,
     create_model_and_diffusion,
     model_and_diffusion_defaults,
 )
@@ -78,6 +79,7 @@ def main():
     backfill_label_init_std(ns)  # predates the flag; DiT's 0.02
     backfill_attn_window(ns)  # predates the flag; unwindowed
     backfill_pos_encoding(ns)  # predates the flag; sincos
+    backfill_attention(ns)  # predates the flag; factorized
     model, diffusion = create_model_and_diffusion(
         model_type=ns.model_type,
         **args_to_dict(ns, model_and_diffusion_defaults(model_type=ns.model_type).keys()),

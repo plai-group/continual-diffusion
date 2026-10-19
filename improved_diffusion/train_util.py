@@ -535,6 +535,9 @@ class TrainLoop:
                 latent_mask=(1-obs_mask) if self.pad_with_random_frames else latent_mask,
                 eval_mask=latent_mask,
             )
+            probe = getattr(self.args, "grad_probe_interval", 0)
+            if probe and last_batch and self.step % probe == 0 and getattr(self.args, "generate_actions", False):
+                self._log_grad_probe(functools.partial(compute_losses.func, self.model, *compute_losses.args[1:], **compute_losses.keywords), weights)
             if last_batch or not self.use_ddp:
                 losses = compute_losses()
             else:
@@ -553,9 +556,6 @@ class TrainLoop:
             log_loss_dict(
                 self.diffusion, t, {k: v * weights for k, v in losses.items()}
             )
-            probe = getattr(self.args, "grad_probe_interval", 0)
-            if probe and last_batch and self.step % probe == 0 and "loss_action_weighted" in losses:
-                self._log_grad_probe((losses["loss_video"] * weights).mean(), (losses["loss_action_weighted"] * weights).mean())
             if self.use_fp16:
                 loss_scale = 2 ** self.lg_loss_scale
                 (loss * loss_scale).backward()
@@ -587,16 +587,25 @@ class TrainLoop:
         for rate, params in zip(self.ema_rate, self.ema_params):
             update_ema(params, self.master_params, rate=rate)
 
-    def _log_grad_probe(self, loss_video, loss_action):
-        """Per-loss gradient norms on the shared transformer blocks, before the real backward (plaicraft-debug#98)."""
+    def _log_grad_probe(self, compute_losses, weights):
+        """Per-loss gradient norms on the shared transformer blocks, before the real step (plaicraft-debug#98)."""
         params = [p for p in self.model.blocks.parameters() if p.requires_grad]
-        # Per-tensor sums, no concatenated copy: the 11 GB 2080 Tis OOM otherwise.
-        gv = th.autograd.grad(loss_video, params, retain_graph=True, allow_unused=True)
-        ga = th.autograd.grad(loss_action, params, retain_graph=True, allow_unused=True)
-        sq = lambda g: sum((x.float() ** 2).sum() for x in g if x is not None) + th.zeros((), device=params[0].device)
-        dot = sum((a.float() * b.float()).sum() for a, b in zip(gv, ga) if a is not None and b is not None) + th.zeros((), device=params[0].device)
-        nv, na = sq(gv).sqrt().item(), sq(ga).sqrt().item()
-        del gv, ga
+        cuda = th.cuda.is_available()
+        state = th.get_rng_state(), th.cuda.get_rng_state() if cuda else None
+
+        def reset():  # every pass, and the real step after, draws the same noise
+            th.set_rng_state(state[0])
+            if cuda:
+                th.cuda.set_rng_state(state[1])
+
+        def grads(key):  # one fresh graph per loss: retaining the step graph OOMs the 11 GB 2080 Tis
+            reset()
+            return [th.zeros(()) if g is None else g.float().cpu() for g in th.autograd.grad((compute_losses()[key] * weights).mean(), params, allow_unused=True)]
+
+        gv, ga = grads("loss_video"), grads("loss_action_weighted")
+        reset()
+        nv, na = sum((g ** 2).sum() for g in gv).sqrt().item(), sum((g ** 2).sum() for g in ga).sqrt().item()
+        dot = sum((a * b).sum() for a, b in zip(gv, ga))
         logger.logkv_mean("grad_norm/video_blocks", nv)
         logger.logkv_mean("grad_norm/action_blocks", na)
         logger.logkv_mean("grad_norm/action_over_video", na / max(nv, 1e-12))

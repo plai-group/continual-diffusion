@@ -1,4 +1,5 @@
 """plaicraft-debug#98: per-loss gradient norms on the shared VDT blocks."""
+import functools
 import math
 from types import SimpleNamespace
 
@@ -18,20 +19,23 @@ def _probe(w, monkeypatch):
         for p in model.parameters():
             p.normal_(0, 0.02)
     torch.manual_seed(1)
-    terms = _losses(model, diffusion, action_dim=10, keypress_loss_weight=w)
-    TrainLoop._log_grad_probe(SimpleNamespace(model=model), terms["loss_video"].mean(), terms["loss_action_weighted"].mean())
-    return terms, logged, model
+    compute = functools.partial(_losses, model, diffusion, action_dim=10, keypress_loss_weight=w)
+    TrainLoop._log_grad_probe(SimpleNamespace(model=model), compute, torch.ones(2))
+    after = torch.randn(3)
+    torch.manual_seed(1)
+    terms = compute()
+    return terms, logged, model, after
 
 
 def test_weighted_action_term_is_what_total_loss_adds(monkeypatch):
-    terms, _, _ = _probe(2.0, monkeypatch)
+    terms, _, _, _ = _probe(2.0, monkeypatch)
     assert torch.allclose(terms["loss_action_weighted"], 2.0 * terms["action_dim_ratio"] * terms["loss_action"])
     assert torch.allclose(terms["loss"], terms["loss_video"] + terms["loss_action_weighted"], atol=1e-6)
 
 
 def test_probe_logs_finite_norms_and_scales_with_weight(monkeypatch):
-    _, one, _ = _probe(1.0, monkeypatch)
-    _, two, _ = _probe(2.0, monkeypatch)
+    _, one, _, _ = _probe(1.0, monkeypatch)
+    _, two, _, _ = _probe(2.0, monkeypatch)
     assert all(math.isfinite(v) for v in one.values())
     assert one["grad_norm/video_blocks"] > 0 and one["grad_norm/action_blocks"] > 0
     assert math.isclose(two["grad_norm/action_blocks"], 2 * one["grad_norm/action_blocks"], rel_tol=1e-4)
@@ -39,10 +43,16 @@ def test_probe_logs_finite_norms_and_scales_with_weight(monkeypatch):
 
 
 def test_zero_action_weight_gives_zero_action_norm(monkeypatch):
-    _, logged, _ = _probe(0.0, monkeypatch)
+    _, logged, _, _ = _probe(0.0, monkeypatch)
     assert logged["grad_norm/action_blocks"] == 0.0
 
 
 def test_probe_leaves_param_grads_untouched(monkeypatch):
-    _, _, model = _probe(1.0, monkeypatch)
+    _, _, model, _ = _probe(1.0, monkeypatch)
     assert all(p.grad is None for p in model.parameters())
+
+
+def test_probe_restores_rng_so_the_real_step_draws_the_same_noise(monkeypatch):
+    _, _, _, after = _probe(1.0, monkeypatch)
+    torch.manual_seed(1)
+    assert torch.equal(after, torch.randn(3))

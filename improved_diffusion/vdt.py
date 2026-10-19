@@ -21,6 +21,17 @@ from timm.models.vision_transformer import PatchEmbed, Attention, Mlp
 from einops import rearrange, reduce, repeat
 
 
+def window_mask(T, N, n_tok, w, device=None):
+    """Bool mask (T*n_tok, T*n_tok), True = attend. Same frame always allowed; cross-frame
+    only within |dt|<=w and only if query or key is action-like (index >= N, patches are < N)."""
+    t_idx = torch.arange(T, device=device).repeat_interleave(n_tok)
+    is_action = (torch.arange(n_tok, device=device) >= N).repeat(T)
+    same_frame = t_idx[:, None] == t_idx[None, :]
+    near = (t_idx[:, None] - t_idx[None, :]).abs() <= w
+    either_action = is_action[:, None] | is_action[None, :]
+    return same_frame | (near & either_action)
+
+
 def _expand_cond(v, N):
     """Broadcast a conditioning tensor to (B, T*N, D). v is (B,D) [one vector per video]
     or (B,T,D) [one vector per frame]."""
@@ -211,7 +222,8 @@ class VDTBlock(nn.Module):
     """
     A VDT block with adaptive layer norm zero (adaLN-Zero) conditioning.
     """
-    def __init__(self, hidden_size, num_heads, mlp_ratio=4.0, mode='video', num_frames=16, **block_kwargs):
+    def __init__(self, hidden_size, num_heads, mlp_ratio=4.0, mode='video', num_frames=16,
+                 attn_window=None, n_patch=None, **block_kwargs):
         super().__init__()
         self.norm1 = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
         self.attn = Attention(hidden_size, num_heads=num_heads, qkv_bias=True, **block_kwargs)
@@ -224,6 +236,11 @@ class VDTBlock(nn.Module):
             nn.Linear(hidden_size, 6 * hidden_size, bias=True)
         )
         self.num_frames = num_frames
+        # Windowed cross-frame action attention (plaicraft-debug#97); None keeps the per-frame spatial path untouched.
+        assert attn_window is None or n_patch is not None, "attn_window requires n_patch"
+        self.attn_window = attn_window
+        self.n_patch = n_patch
+        self._window_mask_cache = None
 
         self.mode = mode
 
@@ -248,7 +265,13 @@ class VDTBlock(nn.Module):
             x = rearrange(x, '(b n) t m -> (b t) n m',b=B,t=T,n=N,m=M)
             x = x + res_temporal
 
-        attn = self.attn(modulate(self.norm1(x), shift_msa, scale_msa, self.num_frames))
+        normed = modulate(self.norm1(x), shift_msa, scale_msa, self.num_frames)
+        if self.attn_window is None:
+            attn = self.attn(normed)
+        else:
+            normed = rearrange(normed, '(b t) n m -> b (t n) m', b=B, t=T, n=N, m=M)
+            mask = self._get_window_mask(T, N, normed.device)
+            attn = rearrange(self.attn(normed, attn_mask=mask), 'b (t n) m -> (b t) n m', b=B, t=T, n=N, m=M)
         attn = rearrange(attn, '(b t) n m-> b (t n) m',b=B,t=T,n=N,m=M)
         attn = _expand_cond(gate_msa, N) * attn
         attn = rearrange(attn, 'b (t n) m-> (b t) n m',b=B,t=T,n=N,m=M)
@@ -261,6 +284,12 @@ class VDTBlock(nn.Module):
         x = x + mlp
 
         return x
+
+    def _get_window_mask(self, T, n_tok, device):
+        key = (T, n_tok, device)
+        if self._window_mask_cache is None or self._window_mask_cache[0] != key:
+            self._window_mask_cache = (key, window_mask(T, self.n_patch, n_tok, self.attn_window, device))
+        return self._window_mask_cache[1]
 
 class DropPath(nn.Module):
     """Drop paths (Stochastic Depth) per sample  (when applied in main path of residual blocks).
@@ -344,6 +373,7 @@ class VDT(nn.Module):
         label_init_std=LABEL_INIT_STD,
         label_frozen_scale=FROZEN_LABEL_SCALE,
         independent_action_t=False,
+        attn_window=None,
     ):
         super().__init__()
         self.learn_sigma = learn_sigma
@@ -434,7 +464,8 @@ class VDT(nn.Module):
             self.num_frames = 1
 
         self.blocks = nn.ModuleList([
-            VDTBlock(hidden_size, num_heads, mlp_ratio=mlp_ratio, mode=mode, num_frames=self.num_frames) for _ in range(depth)
+            VDTBlock(hidden_size, num_heads, mlp_ratio=mlp_ratio, mode=mode, num_frames=self.num_frames,
+                     attn_window=attn_window, n_patch=num_patches) for _ in range(depth)
         ])
         self.final_layer = FinalLayer(hidden_size, patch_size, self.out_channels, self.num_frames)
         self.initialize_weights()

@@ -590,16 +590,17 @@ class TrainLoop:
     def _log_grad_probe(self, loss_video, loss_action):
         """Per-loss gradient norms on the shared transformer blocks, before the real backward (plaicraft-debug#98)."""
         params = [p for p in self.model.blocks.parameters() if p.requires_grad]
-        flat = []
-        for l in (loss_video, loss_action):
-            g = th.autograd.grad(l, params, retain_graph=True, allow_unused=True)
-            flat.append(th.cat([(x if x is not None else th.zeros_like(p)).flatten().float() for x, p in zip(g, params)]))
-        gv, ga = flat
-        nv, na = gv.norm().item(), ga.norm().item()
+        # Per-tensor sums, no concatenated copy: the 11 GB 2080 Tis OOM otherwise.
+        gv = th.autograd.grad(loss_video, params, retain_graph=True, allow_unused=True)
+        ga = th.autograd.grad(loss_action, params, retain_graph=True, allow_unused=True)
+        sq = lambda g: sum((x.float() ** 2).sum() for x in g if x is not None) + th.zeros((), device=params[0].device)
+        dot = sum((a.float() * b.float()).sum() for a, b in zip(gv, ga) if a is not None and b is not None) + th.zeros((), device=params[0].device)
+        nv, na = sq(gv).sqrt().item(), sq(ga).sqrt().item()
+        del gv, ga
         logger.logkv_mean("grad_norm/video_blocks", nv)
         logger.logkv_mean("grad_norm/action_blocks", na)
         logger.logkv_mean("grad_norm/action_over_video", na / max(nv, 1e-12))
-        logger.logkv_mean("grad_norm/cos_action_video", th.nn.functional.cosine_similarity(gv, ga, dim=0).item())
+        logger.logkv_mean("grad_norm/cos_action_video", dot.item() / max(nv * na, 1e-12))
 
     def _log_grad_norm(self):
         sqsum = 0.0

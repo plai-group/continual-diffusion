@@ -15,6 +15,7 @@ Modified by Haoyu Lu, for video diffusion transformer
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import numpy as np
 import math
 from timm.models.vision_transformer import PatchEmbed, Attention, Mlp
@@ -30,6 +31,66 @@ def window_mask(T, N, n_tok, w, device=None):
     near = (t_idx[:, None] - t_idx[None, :]).abs() <= w
     either_action = is_action[:, None] | is_action[None, :]
     return same_frame | (near & either_action)
+
+
+def _rope_freqs(dims):
+    """Per-axis inverse frequencies (theta=10000), concatenated; sum(dims)/2 entries."""
+    return torch.cat([1.0 / 10000 ** (torch.arange(0, dm, 2, dtype=torch.float64) / dm) for dm in dims])
+
+
+def rope_tables(T, grid, extra_j, head_dim, ticks_per_latent=1, device=None):
+    """(cos, sin) of shape (T, N + len(extra_j), head_dim/2). Video tokens get Wan's 3D split
+    (t = d - 4(d//6), h = w = 2(d//6)) with t in tick units; action tokens get 1D RoPE over the
+    full head dim at tick ticks_per_latent*L + j."""
+    d, k, (gh, gw) = head_dim, ticks_per_latent, grid
+    dims = [d - 4 * (d // 6), 2 * (d // 6), 2 * (d // 6)]
+    assert all(dm % 2 == 0 for dm in dims), f"head_dim {d} gives odd rope split {dims}"
+    N, L = gh * gw, torch.arange(T, dtype=torch.float64)
+    axis = torch.cat([torch.full((dm // 2,), a) for a, dm in enumerate(dims)])
+    vid = torch.stack([(k * L)[:, None].expand(T, N),
+                       torch.arange(gh).repeat_interleave(gw).double()[None].expand(T, N),
+                       torch.arange(gw).repeat(gh).double()[None].expand(T, N)], -1)  # (T, N, 3)
+    ang = [vid[..., axis] * _rope_freqs(dims)]
+    if len(extra_j):
+        tick = k * L[:, None] + torch.tensor(extra_j, dtype=torch.float64)[None]  # (T, E)
+        ang.append(tick[..., None] * _rope_freqs([d]))
+    ang = torch.cat(ang, 1)
+    return ang.cos().float().to(device), ang.sin().float().to(device)
+
+
+def apply_rope(x, cos, sin):
+    """x: (B, H, L, d) rotated in consecutive pairs; cos/sin: (B or 1, L, d/2)."""
+    cos, sin, dt = cos.unsqueeze(1), sin.unsqueeze(1), x.dtype
+    x1, x2 = x.float()[..., 0::2], x.float()[..., 1::2]
+    return torch.stack((x1 * cos - x2 * sin, x1 * sin + x2 * cos), -1).flatten(-2).to(dt)
+
+
+def rope_view(tbl, layout, B):
+    """Arrange a (T, n, d/2) table for a sublayer: spatial rows (b t), temporal rows (b n), or flat (t n)."""
+    cos, sin = tbl
+    T, n, h = cos.shape
+    if layout == 'spatial':
+        return cos.repeat(B, 1, 1), sin.repeat(B, 1, 1)
+    if layout == 'temporal':
+        return cos.permute(1, 0, 2).repeat(B, 1, 1), sin.permute(1, 0, 2).repeat(B, 1, 1)
+    return cos.reshape(1, T * n, h), sin.reshape(1, T * n, h)
+
+
+class RopeAttention(nn.Module):
+    """timm-Attention-compatible (same qkv/proj params) with RoPE on q,k via SDPA (plaicraft-debug#99)."""
+    def __init__(self, dim, num_heads=8, qkv_bias=False):
+        super().__init__()
+        self.num_heads = num_heads
+        self.qkv = nn.Linear(dim, dim * 3, bias=qkv_bias)
+        self.proj = nn.Linear(dim, dim)
+
+    def forward(self, x, attn_mask=None, rope=None):
+        B, L, C = x.shape
+        q, k, v = self.qkv(x).reshape(B, L, 3, self.num_heads, C // self.num_heads).permute(2, 0, 3, 1, 4)
+        if rope is not None:
+            q, k = apply_rope(q, *rope), apply_rope(k, *rope)
+        x = F.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask)
+        return self.proj(x.transpose(1, 2).reshape(B, L, C))
 
 
 def _expand_cond(v, N):
@@ -223,10 +284,12 @@ class VDTBlock(nn.Module):
     A VDT block with adaptive layer norm zero (adaLN-Zero) conditioning.
     """
     def __init__(self, hidden_size, num_heads, mlp_ratio=4.0, mode='video', num_frames=16,
-                 attn_window=None, n_patch=None, **block_kwargs):
+                 attn_window=None, n_patch=None, pos_encoding='sincos', **block_kwargs):
         super().__init__()
         self.norm1 = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
-        self.attn = Attention(hidden_size, num_heads=num_heads, qkv_bias=True, **block_kwargs)
+        self.rope = pos_encoding == 'rope3d'
+        Attn = RopeAttention if self.rope else Attention
+        self.attn = Attn(hidden_size, num_heads=num_heads, qkv_bias=True, **block_kwargs)
         self.norm2 = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
         mlp_hidden_dim = int(hidden_size * mlp_ratio)
         approx_gelu = lambda: nn.GELU(approximate="tanh")
@@ -248,18 +311,18 @@ class VDTBlock(nn.Module):
         if self.mode == 'video':
             
             self.temporal_norm1 = nn.LayerNorm(hidden_size)
-            self.temporal_attn = Attention(
+            self.temporal_attn = Attn(
               hidden_size, num_heads=num_heads, qkv_bias=True)
             self.temporal_fc = nn.Linear(hidden_size, hidden_size)
 
-    def forward(self, x, c):
+    def forward(self, x, c, rope=None):
         shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = self.adaLN_modulation(c).chunk(6, dim=-1)
         T = self.num_frames
         K, N, M = x.shape
         B = K // T
         if self.mode == 'video':
             x = rearrange(x, '(b t) n m -> (b n) t m',b=B,t=T,n=N,m=M)
-            res_temporal = self.temporal_attn(self.temporal_norm1(x))
+            res_temporal = self.temporal_attn(self.temporal_norm1(x), **self._rope_kw(rope, 'temporal', B))
             res_temporal = rearrange(res_temporal, '(b n) t m -> (b t) n m',b=B,t=T,n=N,m=M)
             res_temporal = self.temporal_fc(res_temporal)
             x = rearrange(x, '(b n) t m -> (b t) n m',b=B,t=T,n=N,m=M)
@@ -267,11 +330,11 @@ class VDTBlock(nn.Module):
 
         normed = modulate(self.norm1(x), shift_msa, scale_msa, self.num_frames)
         if self.attn_window is None:
-            attn = self.attn(normed)
+            attn = self.attn(normed, **self._rope_kw(rope, 'spatial', B))
         else:
             normed = rearrange(normed, '(b t) n m -> b (t n) m', b=B, t=T, n=N, m=M)
             mask = self._get_window_mask(T, N, normed.device)
-            attn = rearrange(self.attn(normed, attn_mask=mask), 'b (t n) m -> (b t) n m', b=B, t=T, n=N, m=M)
+            attn = rearrange(self.attn(normed, attn_mask=mask, **self._rope_kw(rope, 'flat', B)), 'b (t n) m -> (b t) n m', b=B, t=T, n=N, m=M)
         attn = rearrange(attn, '(b t) n m-> b (t n) m',b=B,t=T,n=N,m=M)
         attn = _expand_cond(gate_msa, N) * attn
         attn = rearrange(attn, 'b (t n) m-> (b t) n m',b=B,t=T,n=N,m=M)
@@ -284,6 +347,9 @@ class VDTBlock(nn.Module):
         x = x + mlp
 
         return x
+
+    def _rope_kw(self, rope, layout, B):
+        return dict(rope=rope_view(rope, layout, B)) if self.rope and rope is not None else {}
 
     def _get_window_mask(self, T, n_tok, device):
         key = (T, n_tok, device)
@@ -374,6 +440,7 @@ class VDT(nn.Module):
         label_frozen_scale=FROZEN_LABEL_SCALE,
         independent_action_t=False,
         attn_window=None,
+        pos_encoding='sincos',
     ):
         super().__init__()
         self.learn_sigma = learn_sigma
@@ -381,6 +448,8 @@ class VDT(nn.Module):
         self.out_channels = in_channels * 2 if learn_sigma else in_channels
         self.patch_size = patch_size
         self.num_heads = num_heads
+        assert pos_encoding in ('sincos', 'rope3d'), f"unknown pos_encoding {pos_encoding}"
+        self.pos_encoding = pos_encoding
         # action_dim is the KEYPRESS token's dim by convention; mouse_dim is its sibling for the 2-d mouse token.
         self.action_dim = action_dim
         self.mouse_dim = mouse_dim
@@ -424,7 +493,7 @@ class VDT(nn.Module):
         if action_dim > 0:
             if generate_actions or self.action_token_cond:
                 self.action_x_embedder = nn.Linear(action_dim, hidden_size, bias=True)
-                self.action_pos_embed = nn.Parameter(torch.zeros(1, 1, hidden_size))
+                self.action_pos_embed = nn.Parameter(torch.zeros(1, 1, hidden_size)) if pos_encoding == 'sincos' else None
                 # No head in token-cond mode: there is nothing to read back out.
                 self.action_head = (ActionHead(hidden_size, action_dim, num_frames)
                                     if generate_actions else None)
@@ -443,7 +512,7 @@ class VDT(nn.Module):
         # Mouse has no legacy fold-into-c conditioning mode: token-based only, mirroring keypress's token branch.
         if mouse_dim > 0 and (self.generate_mouse or self.mouse_token_cond):
             self.mouse_x_embedder = nn.Linear(mouse_dim, hidden_size, bias=True)
-            self.mouse_pos_embed = nn.Parameter(torch.zeros(1, 1, hidden_size))
+            self.mouse_pos_embed = nn.Parameter(torch.zeros(1, 1, hidden_size)) if pos_encoding == 'sincos' else None
             self.mouse_head = ActionHead(hidden_size, mouse_dim, num_frames) if self.generate_mouse else None
         else:
             assert mouse_dim == 0, "mouse_dim > 0 requires generate_mouse or mouse_token_cond"
@@ -465,7 +534,7 @@ class VDT(nn.Module):
 
         self.blocks = nn.ModuleList([
             VDTBlock(hidden_size, num_heads, mlp_ratio=mlp_ratio, mode=mode, num_frames=self.num_frames,
-                     attn_window=attn_window, n_patch=num_patches) for _ in range(depth)
+                     attn_window=attn_window, n_patch=num_patches, pos_encoding=pos_encoding) for _ in range(depth)
         ])
         self.final_layer = FinalLayer(hidden_size, patch_size, self.out_channels, self.num_frames)
         self.initialize_weights()
@@ -579,7 +648,9 @@ class VDT(nn.Module):
         # At num_classes=0 the zeros default is exactly the pre-issue-85 behaviour.
         y = (torch.zeros(B, dtype=torch.long, device=x.device) if y is None
              else y.to(device=x.device, dtype=torch.long).reshape(B))
-        patch_tokens = self.x_embedder(x) + self.pos_embed  # (B*T, N, D), where N = (H*W) / patch_size ** 2
+        patch_tokens = self.x_embedder(x)
+        if self.pos_encoding == 'sincos':
+            patch_tokens = patch_tokens + self.pos_embed  # (B*T, N, D), where N = (H*W) / patch_size ** 2
         N = patch_tokens.shape[1]
 
         # True whenever the action rides in the sequence, denoised or not; token-cond passes no obs_action_mask/actions0, so `actions` falls through clean.
@@ -596,17 +667,21 @@ class VDT(nn.Module):
                 # Broadcast (B,1,D) over T: the action token sees its own noise level, not the video's.
                 action_tokens = action_tokens + self.t_embedder(
                     action_timesteps if action_timesteps is not None else timesteps).unsqueeze(1)
-            action_tokens = rearrange(action_tokens, 'b t d -> (b t) 1 d') + self.action_pos_embed  # (B*T, 1, D)
+            action_tokens = rearrange(action_tokens, 'b t d -> (b t) 1 d')  # (B*T, 1, D)
+            if self.action_pos_embed is not None:
+                action_tokens = action_tokens + self.action_pos_embed
             tokens.append(action_tokens)
         if use_mouse_tokens:
             if obs_mouse_mask is not None and mouse0 is not None:
                 mouse = mouse * (1 - obs_mouse_mask) + mouse0 * obs_mouse_mask
             mouse_tokens = self.mouse_x_embedder(mouse)  # (B, T, D)
-            mouse_tokens = rearrange(mouse_tokens, 'b t d -> (b t) 1 d') + self.mouse_pos_embed  # (B*T, 1, D)
+            mouse_tokens = rearrange(mouse_tokens, 'b t d -> (b t) 1 d')  # (B*T, 1, D)
+            if self.mouse_pos_embed is not None:
+                mouse_tokens = mouse_tokens + self.mouse_pos_embed
             tokens.append(mouse_tokens)
         tokens = torch.cat(tokens, dim=1) if len(tokens) > 1 else tokens[0]  # (B*T, N[+1][+1], D)
 
-        if self.mode == 'video':
+        if self.mode == 'video' and self.pos_encoding == 'sincos':
             # Temporal embed across T frames: (B*(N+1), T, D)
             tokens = rearrange(tokens, '(b t) n m -> (b n) t m', b=B, t=T)
             tokens = tokens + self.time_embed
@@ -629,8 +704,12 @@ class VDT(nn.Module):
                 t, y = self.t_cond_norm(t), self.y_cond_norm(y)
             c = self.cond_proj(torch.cat([t, y], dim=-1))  # (B, D)
 
+        rope = None
+        if self.pos_encoding == 'rope3d':
+            extra_j = [0] * (int(use_action_tokens) + int(use_mouse_tokens))
+            rope = rope_tables(T, self.x_embedder.grid_size, extra_j, tokens.shape[-1] // self.num_heads, device=tokens.device)
         for block in self.blocks:
-            tokens = block(tokens, c)            # (B*T, N+1, D) or (B*T, N, D)
+            tokens = block(tokens, c, rope=rope)            # (B*T, N+1, D) or (B*T, N, D)
 
         video_tokens = tokens[:, :N, :]
         x_out = self.final_layer(video_tokens, c) # (B*T, N, patch_size ** 2 * out_channels)

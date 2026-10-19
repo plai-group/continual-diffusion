@@ -210,7 +210,7 @@ def vdt_model_and_diffusion_defaults():
         keypress_loss_weight=1.0,
         mouse_loss_weight=1.0,
         action_quantization="none",  # "none" | "codebook" | "fsq"; see plaicraft-debug#77, #80
-        action_encoding="raw",  # "raw" | "km_fsq" | "raw_fused"; see plaicraft-debug#80, #81
+        action_encoding="raw",  # "raw" | "km_fsq" | "raw_fused" | "km_ctx14"; see plaicraft-debug#80, #81, #96
     )
 
 

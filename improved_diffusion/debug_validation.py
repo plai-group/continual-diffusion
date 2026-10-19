@@ -218,19 +218,24 @@ def _get_metrics(device):
     return _METRICS
 
 
-_KM_TOKENIZER = None
+_KM_TOKENIZERS = {}
 
 
-def _get_km_tokenizer(device, checkpoint=None):
-    """Lazily load the frozen km tokenizer once, cached like _get_metrics -- validation is
-    the only place this module needs it, for decoding a km_fsq run's generated codes and
-    for encoding a swap/zero intervention live (plaicraft-debug#80)."""
-    global _KM_TOKENIZER
-    if _KM_TOKENIZER is None:
-        from .km_tokenizer.model import DEFAULT_CHECKPOINT, load_tokenizer
+def _get_km_tokenizer(device, checkpoint=None, encoding="km_fsq"):
+    """Lazily load the frozen km tokenizer once per encoding, cached like _get_metrics --
+    validation is the only place this module needs one, for decoding a run's generated codes
+    and for encoding a swap/zero intervention live (plaicraft-debug#80, #96)."""
+    if encoding not in _KM_TOKENIZERS:
+        if encoding == "km_ctx14":
+            from .km_tokenizer.ctx14_10hz import DEFAULT_CHECKPOINT_DIR, load_ctx14_tokenizer
 
-        _KM_TOKENIZER = load_tokenizer(checkpoint_path=checkpoint or DEFAULT_CHECKPOINT, device=device)
-    return _KM_TOKENIZER
+            _KM_TOKENIZERS[encoding] = load_ctx14_tokenizer(
+                checkpoint_dir=checkpoint or DEFAULT_CHECKPOINT_DIR, device=device)
+        else:
+            from .km_tokenizer.model import DEFAULT_CHECKPOINT, load_tokenizer
+
+            _KM_TOKENIZERS[encoding] = load_tokenizer(checkpoint_path=checkpoint or DEFAULT_CHECKPOINT, device=device)
+    return _KM_TOKENIZERS[encoding]
 
 
 def _symlog(v):
@@ -249,7 +254,9 @@ def _decode_km_actions(tokenizer, codes, all_keys=False):
     from .km_tokenizer.keypress_scatter import _RAW_POSITIONS
 
     B, T, _ = codes.shape
-    codes = codes.to(dtype=tokenizer.frame_pos.dtype)  # heun_sample's noise math can drift to float64
+    # heun_sample's noise math can drift to float64; any parameter's dtype works, km_ctx14's
+    # tokenizer has no top-level frame_pos like km_fsq's (plaicraft-debug#96).
+    codes = codes.to(dtype=next(tokenizer.parameters()).dtype)
     key_logits, _mouse_logits, mouse_pred = tokenizer.decode_codes(
         codes.reshape(B, T, tokenizer.config.num_tokens, tokenizer.config.fsq_dim)
     )
@@ -270,16 +277,21 @@ def _encode_km_actions(tokenizer, keys_raw, mouse_raw):
     from .km_tokenizer.keypress_scatter import scatter_keypress
 
     B, T, _ = keys_raw.shape
-    n = SUBBINS_PER_TICK
-    dtype = tokenizer.frame_pos.dtype
+    ctx14 = not hasattr(tokenizer, "frame_pos")  # km_ctx14: 10 sub-bins, 32-d codes (plaicraft-debug#96)
+    n = 10 if ctx14 else SUBBINS_PER_TICK
+    dtype = next(tokenizer.parameters()).dtype
     keys_raw, mouse_raw = keys_raw.to(dtype=dtype), mouse_raw.to(dtype=dtype)
     keys_sub = keys_raw.unsqueeze(2).expand(B, T, n, 8).reshape(B, T * n, 8)
-    mouse_sub = (mouse_raw / n).unsqueeze(2).expand(B, T, n, 2).reshape(B, T * n, 2)
+    if ctx14:  # integer cumulative-round split, as the generator writes 10Hz rows (plaicraft-debug _split_mouse_delta)
+        cum = th.round(th.round(mouse_raw).unsqueeze(2) * th.arange(1, n + 1, dtype=dtype, device=mouse_raw.device).view(1, 1, n, 1) / n)
+        mouse_sub = th.diff(cum, dim=2, prepend=th.zeros_like(cum[:, :, :1])).reshape(B, T * n, 2)
+    else:
+        mouse_sub = (mouse_raw / n).unsqueeze(2).expand(B, T, n, 2).reshape(B, T * n, 2)
     key_press = scatter_keypress(keys_sub)
     with th.no_grad():
-        prequantized, _frame_mask, _block_mask = tokenizer._encode_prequantized(key_press, mouse_sub)
+        prequantized = tokenizer._encode_prequantized(key_press, mouse_sub)[0]
         _token_ids, codes = tokenizer._quantize(prequantized)
-    return codes.reshape(B, T, debug_actions.KM_CODE_DIM)
+    return codes.reshape(B, T, debug_actions.KM_CTX14_CODE_DIM if ctx14 else debug_actions.KM_CODE_DIM)
 
 
 class _CFGWrapper(nn.Module):
@@ -526,10 +538,12 @@ def _label_panel(panel, text):
     return panel
 
 
-def _render_panels(frames_list, actions_list, labels, n_observed, out_path, ncols):
+def _render_panels(frames_list, actions_list, labels, n_observed, out_path, ncols, fps=DECODE_VIDEO_FPS):
     """Shared writer for _render_triple_overlay: one panel per (frames, actions, label),
     arranged in an `ncols`-wide grid -- cv2's mp4v encodes fine and then will not play
-    in wandb, so this uses imageio/libx264 instead.
+    in wandb, so this uses imageio/libx264 instead. fps defaults to the 12.5Hz debug-world
+    rate; km_ctx14's 10Hz corpus passes its own (plaicraft-debug#96), else playback runs
+    ~25% fast.
     """
     frames_list = [np.asarray(f) for f in frames_list]
     T = frames_list[0].shape[0]
@@ -541,7 +555,7 @@ def _render_panels(frames_list, actions_list, labels, n_observed, out_path, ncol
     import imageio
 
     writer = imageio.get_writer(
-        str(out_path), fps=DECODE_VIDEO_FPS, codec="libx264",
+        str(out_path), fps=fps, codec="libx264",
         macro_block_size=1,
         ffmpeg_params=["-pix_fmt", "yuv420p"],
     )
@@ -562,7 +576,7 @@ def _render_panels(frames_list, actions_list, labels, n_observed, out_path, ncol
 
 def _render_triple_overlay(frames_gt, frames_true, frames_swap, frames_zero,
                            actions_gt, actions_true, actions_swap, actions_zero,
-                           n_observed, out_path, true_label="TRUE"):
+                           n_observed, out_path, true_label="TRUE", fps=DECODE_VIDEO_FPS):
     """2x2 grid mp4:  GT | TRUE  over  SWAP | ZERO.
 
     GT is included so the generated half can be judged against reality, not only
@@ -583,7 +597,7 @@ def _render_triple_overlay(frames_gt, frames_true, frames_swap, frames_zero,
         (frames_gt, frames_true, frames_swap, frames_zero),
         (actions_gt, actions_true, actions_swap, actions_zero),
         ["GT", true_label, "SWAP", "ZERO"],
-        n_observed, out_path, ncols=2,
+        n_observed, out_path, ncols=2, fps=fps,
     )
 
 
@@ -636,9 +650,13 @@ def run_debug_validation(model, diffusion, valset, device, out_dir,
     action_quantization = getattr(diffusion, "action_quantization", "none")
     action_encoding = getattr(diffusion, "action_encoding", "raw")
     is_km_fsq = action_encoding == "km_fsq"
+    is_km_ctx14 = action_encoding == "km_ctx14"
     is_raw_fused = action_encoding == "raw_fused"
-    km_tokenizer = _get_km_tokenizer(device, getattr(valset, "tokenizer_checkpoint", None)) if is_km_fsq else None
+    km_tokenizer = (_get_km_tokenizer(device, getattr(valset, "tokenizer_checkpoint", None), encoding=action_encoding)
+                    if is_km_fsq or is_km_ctx14 else None)
     sampling_model = _guided(model, cfg_scale, label_cfg_scale)
+    # Overlay mp4s must play back at the corpus's own rate, not the 12.5Hz debug-world default.
+    overlay_fps = debug_actions.KM_CTX14_FPS if is_km_ctx14 else DECODE_VIDEO_FPS
 
     T, n_obs = valset.T, valset.n_observed
     # CorpusValidationSet (issue #81) rows carry swap_kind: their swap test targets
@@ -653,7 +671,7 @@ def run_debug_validation(model, diffusion, valset, device, out_dir,
         keypress_all, mouse_all = None, None
         keypress_raw_all, mouse_raw_all = None, None
     # PLAICraft's km codes carry all 79 keys (plaicraft-debug#93): score and draw them all; elsewhere the 8 debug keys.
-    keys79_all = (valset.load_all_keys79() if is_km_fsq and keypress_raw_all is not None
+    keys79_all = (valset.load_all_keys79() if (is_km_fsq or is_km_ctx14) and keypress_raw_all is not None
                   and hasattr(valset, "load_all_keys79") else None)
     key_true_all = keys79_all if keys79_all is not None else keypress_raw_all
     # The unconditional keypress distribution over the whole pool: the fixed anchor CE has
@@ -755,11 +773,12 @@ def run_debug_validation(model, diffusion, valset, device, out_dir,
                 feats_fake.clear()
                 fvd_repeats = 0
 
-        if is_km_fsq:
+        if is_km_fsq or is_km_ctx14:
             # VDT regresses continuous codes; snap to the nearest FSQ lattice point here, at inference, never during training.
-            act_for_decode = (debug_actions.quantize_km_fsq(samples_act)
+            quantize_fn = debug_actions.quantize_km_ctx14 if is_km_ctx14 else debug_actions.quantize_km_fsq
+            act_for_decode = (quantize_fn(samples_act)
                               if action_quantization == "fsq" and samples_act is not None else samples_act)
-            all_keys = keys79_all is not None
+            all_keys = is_km_ctx14 or keys79_all is not None
             p_key_chunk, p_mouse_chunk, p_key_prob_chunk = (_decode_km_actions(km_tokenizer, act_for_decode, all_keys)
                                           if act_for_decode is not None else (None, None, None))
             g_key_chunk, g_mouse_chunk, _g_key_prob_chunk = (_decode_km_actions(km_tokenizer, keypress_chunk, all_keys)
@@ -807,7 +826,7 @@ def run_debug_validation(model, diffusion, valset, device, out_dir,
                     rec.update({f"{scope}/{k}": v
                                 for k, v in _action_metrics(p_key, g_key, p_mouse, g_mouse, sl,
                                                              metrics_quantize,
-                                                             is_km_fsq=is_km_fsq or is_raw_fused,
+                                                             is_km_fsq=is_km_fsq or is_km_ctx14 or is_raw_fused,
                                                              p_key_prob=p_key_prob,
                                                              g_key_true=g_key_true,
                                                              key_baserate_q=key_baserate_q).items()})
@@ -856,7 +875,7 @@ def run_debug_validation(model, diffusion, valset, device, out_dir,
                     swap_seed = 20250813 + int(row["num"])
 
                     def _sample_with_actions(key_raw, mouse_raw):
-                        if is_km_fsq:
+                        if is_km_fsq or is_km_ctx14:
                             actions_in = _encode_km_actions(km_tokenizer, key_raw, mouse_raw)
                             mouse_in = key_raw.new_zeros(key_raw.shape[0], key_raw.shape[1], 0)
                         elif is_raw_fused:
@@ -891,9 +910,10 @@ def run_debug_validation(model, diffusion, valset, device, out_dir,
                         # x0_j is latent (needed above for the model's own x0 kwarg); decode
                         # the merged result to pixel space before any overlay/psnr reads it.
                         video = _decode_if_latent(diffusion, s * latent_mask_j + x0_j * obs_mask_j)[0]
-                        if is_km_fsq and key_out is not None:
+                        if (is_km_fsq or is_km_ctx14) and key_out is not None:
                             # Same snap-then-decode as the main pass, still batch=1 here.
-                            act_out = debug_actions.quantize_km_fsq(key_out) if action_quantization == "fsq" else key_out
+                            snap = debug_actions.quantize_km_ctx14 if is_km_ctx14 else debug_actions.quantize_km_fsq
+                            act_out = snap(key_out) if action_quantization == "fsq" else key_out
                             key_out, mouse_out, _ = _decode_km_actions(km_tokenizer, act_out)
                         elif is_raw_fused and key_out is not None:
                             key_out, mouse_out = key_out[..., :8], debug_actions._inv_symlog(key_out[..., 8:])
@@ -932,7 +952,7 @@ def run_debug_validation(model, diffusion, valset, device, out_dir,
                             actions_zero=((zero_key if zero_key is not None else key_zero_j[0]).cpu().numpy(),
                                           (zero_mouse if zero_mouse is not None else mouse_zero_j[0]).cpu().numpy()),
                             true_label=("GEN" if (true_key is not None or true_mouse is not None) else "TRUE"),
-                            n_observed=n_obs, out_path=str(mp4_swap),
+                            n_observed=n_obs, out_path=str(mp4_swap), fps=overlay_fps,
                         )
                         import wandb
                         logger.logkv(f"val/swap_overlay/{slug}", wandb.Video(str(mp4_swap)), distributed=False)
@@ -946,7 +966,7 @@ def run_debug_validation(model, diffusion, valset, device, out_dir,
                                 if p_key_chunk is not None and p_mouse_chunk is not None else gt_bars)
                     mp4 = out_dir / f"step{step}_{slug}_gen.mp4"
                     _render_panels((gt.cpu().numpy(), pred.cpu().numpy()), (gt_bars, gen_bars),
-                                   ["GT", "GEN"], n_obs, str(mp4), ncols=2)
+                                   ["GT", "GEN"], n_obs, str(mp4), ncols=2, fps=overlay_fps)
                     import wandb
                     logger.logkv(f"val/overlay/{slug}", wandb.Video(str(mp4)), distributed=False)
                 except Exception as e:
@@ -1000,7 +1020,7 @@ def run_debug_validation(model, diffusion, valset, device, out_dir,
 
 
 def _render_player_arm_overlay(frames_gt, frames_gen, actions_gt, actions_gen,
-                               n_observed, out_path, label="P0 red"):
+                               n_observed, out_path, label="P0 red", fps=DECODE_VIDEO_FPS):
     """1x2 mp4 for ONE player: its ground truth beside its own generation.
 
     This used to pack both players into a 2x2. One file per arm makes each readable alone and
@@ -1013,7 +1033,7 @@ def _render_player_arm_overlay(frames_gt, frames_gen, actions_gt, actions_gen,
     # The GT panel is named for the player it belongs to: "P0 red" -> "GT red".
     return _render_panels(
         (frames_gt, frames_gen), (actions_gt, actions_gen),
-        [f"GT {label.split()[-1]}", label], n_observed, out_path, ncols=2,
+        [f"GT {label.split()[-1]}", label], n_observed, out_path, ncols=2, fps=fps,
     )
 
 

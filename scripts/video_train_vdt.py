@@ -22,9 +22,12 @@ from improved_diffusion.train_util import TrainLoop
 from improved_diffusion.logger import logger
 from improved_diffusion.debug_actions import validate_action_encoding
 from improved_diffusion.km_tokenizer.model import DEFAULT_CHECKPOINT as KM_TOKENIZER_DEFAULT_CHECKPOINT
+from improved_diffusion.km_tokenizer.ctx14_10hz import DEFAULT_CHECKPOINT_DIR as KM_CTX14_DEFAULT_CHECKPOINT_DIR
 
 # plaicraft-debug#80: km_fsq's single loss term must match raw's combined (8+2)/2880 contribution -- weight * 36/2880 == 10/2880.
 _KM_FSQ_KEYPRESS_LOSS_WEIGHT = 10 / 36
+# plaicraft-debug#96: same reasoning for km_ctx14's 32-d code -- weight * 32/2880 == 10/2880.
+_KM_CTX14_KEYPRESS_LOSS_WEIGHT = 10 / 32
 
 os.environ["MY_WANDB_DIR"] = "none"
 if "--unobserve" in sys.argv:
@@ -56,11 +59,26 @@ def init_wandb(config, id):
 
 
 def resolve_keypress_loss_weight(args):
-    """Sentinel default: unset (None) picks 10/36 for km_fsq, 1.0 otherwise; an explicit value always wins.
-    raw_fused takes the 1.0 branch by construction -- its single 10-dim term is already 10/10."""
+    """Sentinel default: unset (None) picks 10/36 for km_fsq, 10/32 for km_ctx14, 1.0 otherwise;
+    an explicit value always wins. raw_fused takes the 1.0 branch by construction -- its single
+    10-dim term is already 10/10."""
     if args.keypress_loss_weight is None:
-        args.keypress_loss_weight = _KM_FSQ_KEYPRESS_LOSS_WEIGHT if args.action_encoding == "km_fsq" else 1.0
+        args.keypress_loss_weight = {
+            "km_fsq": _KM_FSQ_KEYPRESS_LOSS_WEIGHT, "km_ctx14": _KM_CTX14_KEYPRESS_LOSS_WEIGHT,
+        }.get(args.action_encoding, 1.0)
     return args.keypress_loss_weight
+
+
+def resolve_km_tokenizer_checkpoint(args):
+    """Sentinel default: an empty --km_tokenizer_checkpoint picks the active encoding's own
+    tokenizer checkpoint (a bin file for km_fsq, a checkpoint dir for km_ctx14); an explicit
+    value always wins (plaicraft-debug#96)."""
+    if not args.km_tokenizer_checkpoint:
+        args.km_tokenizer_checkpoint = str(
+            KM_CTX14_DEFAULT_CHECKPOINT_DIR if args.action_encoding == "km_ctx14"
+            else KM_TOKENIZER_DEFAULT_CHECKPOINT
+        )
+    return args.km_tokenizer_checkpoint
 
 
 def num_available_cores():
@@ -110,6 +128,7 @@ def main():
 
     validate_action_encoding(args.action_encoding, action_dim=args.action_dim, mouse_dim=args.mouse_dim)
     resolve_keypress_loss_weight(args)
+    resolve_km_tokenizer_checkpoint(args)
 
     dist_util.setup_dist()
     resume = bool(args.resume_id)
@@ -154,7 +173,7 @@ def main():
         valset = CorpusValidationSet(
             args.debug_validation_dir, T=args.T, n_observed=args.T // 2,
             action_encoding=args.action_encoding, tokenizer_checkpoint=args.km_tokenizer_checkpoint,
-            device=dist_util.dev(), **plaicraft_valset_kwargs(args.dataset, args.num_classes, args.global_database_path),
+            device=dist_util.dev(), **plaicraft_valset_kwargs(args.dataset, args.num_classes, args.global_database_path, args.action_encoding),
         )
         out_dir = args.debug_validation_out or os.path.join("results", "debug_validation")
         print(f"debug validation (corpus): {len(valset.rows)} rows -> {out_dir}")
@@ -268,7 +287,7 @@ def create_argparser():
         generate_actions=False,
         # Warm start from a different architecture: step counter stays 0, optimizer/EMA stay fresh (--resume_checkpoint loads strict and reads the step from the filename).
         init_from_checkpoint="",
-        km_tokenizer_checkpoint=str(KM_TOKENIZER_DEFAULT_CHECKPOINT),
+        km_tokenizer_checkpoint="",  # sentinel-resolved post-parse by encoding (plaicraft-debug#96)
         global_database_path="",  # plaicraft_morgan: player-name lookup DB; "" -> dataset's own default
         swap_test=True,  # plaicraft-debug#93: off for corpora with no swap package (e.g. plaicraft_morgan)
     )

@@ -1,0 +1,152 @@
+"""plaicraft-debug#80: km_fsq wiring in debug_validation.py.
+
+Overlays/metrics decode through the real tokenizer; interventions stay on raw
+8+2 arrays and only ever encode LIVE (never decode-then-re-encode, see the
+module-level note above _invert_actions in debug_validation.py).
+"""
+import sqlite3
+
+import h5py
+import numpy as np
+import torch
+
+from improved_diffusion import debug_actions as da
+from improved_diffusion import debug_validation as dv
+from improved_diffusion.km_tokenizer.keypress_scatter import scatter_keypress
+from improved_diffusion.km_tokenizer.model import load_tokenizer
+
+
+def test_frame_timing_is_80ms_12_5fps():
+    assert dv.VIDEO_FPS == 12.5
+    assert dv.MS_PER_FRAME == 80.0
+    from improved_diffusion.decode_debug import DECODE_VIDEO_FPS, FRAME_DURATION_MS
+    assert DECODE_VIDEO_FPS == 12.5
+    assert FRAME_DURATION_MS == 80.0
+
+
+def test_action_vec_to_bar_passes_pixels_through_unchanged():
+    # plaicraft-debug#80: mouse is raw pixels now (B2), not symlog -- no inversion needed.
+    bar = dv._action_vec_to_bar(np.zeros(8), np.array([12.0, -7.0]))
+    assert bar["mouseDX"] == 12.0
+    assert bar["mouseDY"] == -7.0
+
+
+def test_get_km_tokenizer_is_cached_singleton():
+    dv._KM_TOKENIZERS.clear()
+    t1 = dv._get_km_tokenizer("cpu")
+    t2 = dv._get_km_tokenizer("cpu")
+    assert t1 is t2
+
+
+def test_action_metrics_symlogs_mouse_for_comparable_scale_on_km_fsq():
+    # km_fsq decodes to raw pixels, so _action_metrics symlogs them at metric time.
+    p_mouse = torch.tensor([[100.0, -100.0]])
+    g_mouse = torch.tensor([[0.0, 0.0]])
+    out = dv._action_metrics(None, None, p_mouse, g_mouse, slice(None), is_km_fsq=True)
+    expected_l1 = float(torch.log1p(torch.tensor(100.0)))
+    assert abs(out["mouse_l1"] - expected_l1) < 1e-4
+
+
+def test_action_metrics_does_not_symlog_mouse_on_raw():
+    # raw mode's mouse is already symlog-scale from debug_actions.load_or_build.
+    p_mouse = torch.tensor([[3.0, -3.0]])
+    g_mouse = torch.tensor([[0.0, 0.0]])
+    out = dv._action_metrics(None, None, p_mouse, g_mouse, slice(None), is_km_fsq=False)
+    assert abs(out["mouse_l1"] - 3.0) < 1e-6
+
+
+def test_decode_then_encode_km_actions_round_trip():
+    tokenizer = load_tokenizer()
+    torch.manual_seed(0)
+    keys_raw = (torch.rand(1, 3, 8) > 0.7).float()
+    mouse_raw = torch.randint(-20, 21, (1, 3, 2)).float()
+
+    codes = dv._encode_km_actions(tokenizer, keys_raw, mouse_raw)
+    assert codes.shape == (1, 3, da.KM_CODE_DIM)
+
+    keys_hat, mouse_hat, probs_hat = dv._decode_km_actions(tokenizer, codes)
+    assert keys_hat.shape == (1, 3, 8)
+    assert mouse_hat.shape == (1, 3, 2)
+    assert probs_hat.shape == (1, 3, 8)
+    # A trained tokenizer should recover simple, sparse actions near-exactly.
+    assert (mouse_hat - mouse_raw).abs().mean().item() < 2.0
+    assert torch.equal((probs_hat > 0.5).float(), keys_hat)
+    assert dv._decode_km_actions(tokenizer, codes, all_keys=True)[2].shape == (1, 3, 79)
+
+
+def test_decode_pred_actions_returns_two_values_for_every_encoding():
+    """#86 widened _decode_km_actions to three returns and fixed its own call sites, but
+    this wrapper forwarded it straight through. Every km_fsq player-validation row then
+    raised on unpack and was swallowed, so the metric froze instead of failing loudly."""
+    tokenizer = load_tokenizer()
+    torch.manual_seed(0)
+    for encoding, act in (("km_fsq", torch.randn(1, 3, da.KM_CODE_DIM)),
+                          ("raw_fused", torch.randn(1, 3, 10)),
+                          ("raw", torch.randn(1, 3, 10))):
+        keys, mouse = dv._decode_pred_actions(act, torch.randn(1, 3, 2), encoding, tokenizer)
+        assert keys.shape[:2] == (1, 3) and mouse.shape[:2] == (1, 3), encoding
+    assert dv._decode_pred_actions(None, None, "km_fsq", tokenizer) == (None, None)
+
+
+def _make_session(tmp_path, n_ticks=3):
+    session_dir = tmp_path / "sess"
+    (session_dir / "encoded_video_hdf5").mkdir(parents=True)
+    with h5py.File(session_dir / "encoded_video_hdf5" / "sess_encoded_video.hdf5", "w") as f:
+        f.create_dataset("frames", data=np.zeros((n_ticks, 3, 2, 2), dtype=np.float32))
+    con = sqlite3.connect(str(session_dir / "sess.db"))
+    con.execute("CREATE TABLE session (fps REAL)")
+    con.execute("INSERT INTO session VALUES (12.5)")
+    con.execute("CREATE TABLE keyboard (key_id TEXT, start_timestamp INTEGER, end_timestamp INTEGER)")
+    con.execute("CREATE TABLE mouse_click (mouse_key_type TEXT, start_timestamp INTEGER, end_timestamp INTEGER)")
+    con.execute("CREATE TABLE mouse_movement (timestamp INTEGER, mouseDX INTEGER, mouseDY INTEGER)")
+    con.execute("INSERT INTO keyboard VALUES ('87', 0, 80)")
+    for t in range(n_ticks):
+        for b in range(da.SUBBINS_PER_TICK):
+            con.execute("INSERT INTO mouse_movement VALUES (?, ?, ?)", (t * 80 + b * 10, 1, -1))
+    con.commit()
+    con.close()
+    return session_dir
+
+
+def test_load_action_window_raw_ignores_action_encoding(tmp_path):
+    session_dir = _make_session(tmp_path, n_ticks=3)
+    row = dict(num=1, session_dir=session_dir, window_start=0)
+
+    valset = dv.DebugValidationSet.__new__(dv.DebugValidationSet)
+    valset.T = 3
+    valset.action_encoding = "km_fsq"
+    valset.tokenizer_checkpoint = None
+
+    raw_keypress, raw_mouse = valset.load_action_window_raw(row)
+    assert raw_keypress.shape == (3, da.KEYPRESS_DIM)
+    assert raw_mouse.shape == (3, da.MOUSE_DIM)
+    # Same as the always-raw accessor, independent of the encoding on the object.
+    expected_keypress, expected_mouse = da.load_or_build_raw(session_dir)
+    assert torch.equal(raw_keypress, torch.from_numpy(np.asarray(expected_keypress, dtype=np.float32)))
+    assert torch.equal(raw_mouse, torch.from_numpy(np.asarray(expected_mouse, dtype=np.float32)))
+
+
+def test_action_vec_to_bar_boxes_every_held_key_of_the_79():
+    from improved_diffusion.km_tokenizer.keypress_lookup import KEYPRESS_LOOKUP
+    vec = np.zeros(79)
+    vec[[KEYPRESS_LOOKUP[k] for k in ("w", "e", "1", "left", "scroll_up")]] = 1
+    assert dv._action_vec_to_bar(vec, [0.0, 0.0]) == dict(keys=["e", "w", "1", "scroll_up"], clicks=["left"], mouseDX=0.0, mouseDY=0.0)
+    assert dv._action_vec_to_bar(np.eye(8)[0], [0.0, 0.0])["keys"] == ["w"]  # debug-world bars unchanged
+
+
+def test_overlay_boxes_held_keys_top_left_and_leaves_the_frame_alone():
+    from improved_diffusion.decode_debug import DECODE_TOP_BAR_HEIGHT as H, _overlay_frame
+    frame = np.zeros((192, 320, 3), np.uint8)
+    base = dict(keys=[], clicks=[], mouseDX=0.0, mouseDY=0.0)
+    plain, named = _overlay_frame(frame, base, False), _overlay_frame(frame, {**base, "keys": ["e"]}, False)
+    assert (plain[H:] == named[H:]).all() and (plain[:H, :144] != named[:H, :144]).any()
+
+
+def test_key_boxes_shrink_until_all_77_non_mouse_keys_fit_top_left():
+    from improved_diffusion.decode_debug import DECODE_FINAL_FRAME_SIZE, DECODE_LEFT_SECTION_MAX_W, DECODE_TOP_BAR_HEIGHT, _fit_key_boxes
+    from improved_diffusion.km_tokenizer.keypress_lookup import INDEX_TO_KEYPRESS_LABEL
+    names = [n for n in INDEX_TO_KEYPRESS_LABEL.values() if not n.startswith("mouse_")]
+    w = DECODE_FINAL_FRAME_SIZE[0]
+    boxes, box_h, _, _ = _fit_key_boxes(names, w)
+    assert [b[0] for b in boxes] == names
+    assert all(x + bw <= w * DECODE_LEFT_SECTION_MAX_W and y + box_h <= DECODE_TOP_BAR_HEIGHT for _, x, y, bw, _, _ in boxes)

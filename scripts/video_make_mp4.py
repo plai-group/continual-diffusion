@@ -9,7 +9,7 @@ import os
 
 from improved_diffusion.video_datasets import get_eval_dataset, eval_dataset_configs
 from improved_diffusion.test_util import mark_as_observed, tensor2gif, tensor2mp4, parse_eval_run_identifier
-from improved_diffusion.script_util import str2bool, create_model_and_diffusion, model_and_diffusion_defaults, args_to_dict
+from improved_diffusion.script_util import str2bool, create_model_and_diffusion, model_and_diffusion_defaults, args_to_dict, backfill_action_encoding, backfill_cond_combine, backfill_label_embedding_frozen, backfill_label_init_std, backfill_attn_window
 
 """
 Sample Command
@@ -55,11 +55,18 @@ if __name__ == "__main__":
                 model_args.input_size = model_args.image_size
             if is_vdt and not hasattr(model_args, "patch_size"):
                 model_args.patch_size = 2
+        backfill_action_encoding(model_args)
+        backfill_cond_combine(model_args)  # pre-#85-follow-up checkpoints predate the flag
+        backfill_label_embedding_frozen(model_args)  # pre-frozen-label checkpoints predate the flag
+        backfill_label_init_std(model_args)  # predates the flag; DiT's 0.02
+        backfill_attn_window(model_args)  # predates the flag; unwindowed
         # Load the dataset (to get observations from)
         eval_dataset_args = dict(dataset_name=model_args.dataset, T=T, spacing_kwargs=dict(n_data=args.num_sampled_videos),
                                  train=eval_on_train, eval_dataset_config=eval_dataset_config,
                                  frame_range=(parsed["lower_frame_range"], parsed["upper_frame_range"]),
-                                 custom_clip_path=args.custom_clip_path)
+                                 custom_clip_path=args.custom_clip_path,
+                                 action_encoding=getattr(model_args, "action_encoding", "raw"),
+                                 tokenizer_checkpoint=getattr(model_args, "km_tokenizer_checkpoint", None))
         dataset = get_eval_dataset(**eval_dataset_args)
 
     out_dir = (Path(args.out_dir) if args.out_dir is not None else Path(args.eval_dir)) / videos_prefix

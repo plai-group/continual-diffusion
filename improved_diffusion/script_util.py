@@ -191,6 +191,27 @@ def vdt_model_and_diffusion_defaults():
         rescale_learned_sigmas=True,
         use_checkpoint=False,
         use_edm_scaling=False,
+        action_dim=0,
+        mouse_dim=0,
+        action_dropout_prob=0.0,
+        generate_actions=False,
+        action_token_cond=False,
+        generate_mouse=False,
+        mouse_token_cond=False,
+        # 0 keeps y_embedder the inert constant it has always been; 2 = the issue-85 player.
+        num_classes=0,
+        class_dropout_prob=0.1,
+        # "add" | "concat" | "concat_ln": how t and y are combined into c; see plaicraft-debug#85
+        cond_combine="add",
+        label_embedding_frozen=False,  # freeze y_embedder to fixed orthogonal rows; see plaicraft-debug#85
+        label_frozen_scale=1.5,  # row norm of those orthogonal rows; inert unless frozen
+        label_init_std=0.02,  # DiT's small init; 1.0 is nn.Embedding's own default
+        independent_action_t=False,  # sample the action token's noise level separately from the video's; see plaicraft-debug#85
+        attn_window=None,  # spatial sublayer attends across +-attn_window frames for action/mouse tokens; see plaicraft-debug#97
+        keypress_loss_weight=1.0,
+        mouse_loss_weight=1.0,
+        action_quantization="none",  # "none" | "codebook" | "fsq"; see plaicraft-debug#77, #80
+        action_encoding="raw",  # "raw" | "km_fsq" | "raw_fused" | "km_ctx14"; see plaicraft-debug#80, #81, #96
     )
 
 
@@ -212,6 +233,25 @@ def create_vdt_model_and_diffusion(
     rescale_learned_sigmas,
     use_checkpoint,
     use_edm_scaling,
+    action_dim=0,
+    mouse_dim=0,
+    action_dropout_prob=0.0,
+    generate_actions=False,
+    action_token_cond=False,
+    generate_mouse=False,
+    mouse_token_cond=False,
+    keypress_loss_weight=1.0,
+    mouse_loss_weight=1.0,
+    action_quantization="none",
+    action_encoding="raw",
+    num_classes=0,
+    class_dropout_prob=0.1,
+    cond_combine="add",
+    label_embedding_frozen=False,
+    label_frozen_scale=1.5,
+    label_init_std=0.02,
+    independent_action_t=False,
+    attn_window=None,
 ):
     diffusion = create_gaussian_diffusion(
         steps=diffusion_steps,
@@ -225,6 +265,10 @@ def create_vdt_model_and_diffusion(
         timestep_respacing=timestep_respacing,
         diffusion_space_kwargs=diffusion_space_kwargs,
     )
+    diffusion.keypress_loss_weight = keypress_loss_weight
+    diffusion.mouse_loss_weight = mouse_loss_weight
+    diffusion.action_quantization = action_quantization
+    diffusion.action_encoding = action_encoding
     model = create_vdt_model(
         model_name=model_name,
         input_size=input_size,
@@ -232,6 +276,21 @@ def create_vdt_model_and_diffusion(
         in_channels=in_channels,
         num_frames=num_frames,
         learn_sigma=learn_sigma,
+        action_dim=action_dim,
+        mouse_dim=mouse_dim,
+        action_dropout_prob=action_dropout_prob,
+        generate_actions=generate_actions,
+        action_token_cond=action_token_cond,
+        generate_mouse=generate_mouse,
+        mouse_token_cond=mouse_token_cond,
+        num_classes=num_classes,
+        class_dropout_prob=class_dropout_prob,
+        cond_combine=cond_combine,
+        label_embedding_frozen=label_embedding_frozen,
+        label_frozen_scale=label_frozen_scale,
+        label_init_std=label_init_std,
+        independent_action_t=independent_action_t,
+        attn_window=attn_window,
     )
     return model, diffusion
 
@@ -307,6 +366,38 @@ def add_dict_to_argparser(parser, default_dict):
 
 def args_to_dict(args, keys):
     return {k: getattr(args, k) for k in keys}
+
+
+def backfill_action_encoding(model_args):
+    """Pre-#80 checkpoints have no action_encoding saved; default them to raw (plaicraft-debug#80)."""
+    if not hasattr(model_args, "action_encoding"):
+        model_args.action_encoding = "raw"
+
+
+def backfill_cond_combine(model_args):
+    """Checkpoints from before plaicraft-debug#85's follow-up have no cond_combine saved; they
+    all trained the additive path."""
+    if not hasattr(model_args, "cond_combine"):
+        model_args.cond_combine = "add"
+
+
+def backfill_label_embedding_frozen(model_args):
+    """Pre-frozen-label checkpoints have no label_embedding_frozen saved; they all trained a
+    learned table (plaicraft-debug#85)."""
+    if not hasattr(model_args, "label_embedding_frozen"):
+        model_args.label_embedding_frozen = False
+
+
+def backfill_label_init_std(model_args):
+    """Pre-#85-third-pass checkpoints have no label_init_std saved; they all used DiT's 0.02."""
+    if not hasattr(model_args, "label_init_std"):
+        model_args.label_init_std = 0.02
+
+
+def backfill_attn_window(model_args):
+    """Pre-#97 checkpoints have no attn_window saved; they all trained the unwindowed path."""
+    if not hasattr(model_args, "attn_window"):
+        model_args.attn_window = None
 
 
 def str2bool(v):

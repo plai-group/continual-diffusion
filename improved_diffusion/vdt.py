@@ -21,12 +21,36 @@ from timm.models.vision_transformer import PatchEmbed, Attention, Mlp
 from einops import rearrange, reduce, repeat
 
 
+def window_mask(T, N, n_tok, w, device=None):
+    """Bool mask (T*n_tok, T*n_tok), True = attend. Same frame always allowed; cross-frame
+    only within |dt|<=w and only if query or key is action-like (index >= N, patches are < N)."""
+    t_idx = torch.arange(T, device=device).repeat_interleave(n_tok)
+    is_action = (torch.arange(n_tok, device=device) >= N).repeat(T)
+    same_frame = t_idx[:, None] == t_idx[None, :]
+    near = (t_idx[:, None] - t_idx[None, :]).abs() <= w
+    either_action = is_action[:, None] | is_action[None, :]
+    return same_frame | (near & either_action)
+
+
+def _expand_cond(v, N):
+    """Broadcast a conditioning tensor to (B, T*N, D). v is (B,D) [one vector per video]
+    or (B,T,D) [one vector per frame]."""
+    if v.ndim == 2:
+        return v.unsqueeze(1)
+    return v.repeat_interleave(N, dim=1)
+
+
 def modulate(x, shift, scale, T):
 
     N, M = x.shape[-2], x.shape[-1]
     B = scale.shape[0]
     x = rearrange(x, '(b t) n m-> b (t n) m',b=B,t=T,n=N,m=M)
-    x = x * (1 + scale.unsqueeze(1)) + shift.unsqueeze(1)
+    if scale.ndim == 3:
+        shift_e = _expand_cond(shift, N)
+        scale_e = _expand_cond(scale, N)
+        x = x * (1 + scale_e) + shift_e
+    else:
+        x = x * (1 + scale.unsqueeze(1)) + shift.unsqueeze(1)
     x = rearrange(x, 'b (t n) m-> (b t) n m',b=B,t=T,n=N,m=M)
     return x
 
@@ -75,16 +99,37 @@ class TimestepEmbedder(nn.Module):
         return t_emb
 
 
+# What the learned table actually reaches under cond_combine=add (||y||=1.52 at 410k on run
+# hu9hvxqv; init would be 0.506) -- a frozen table needs to start where training would take it.
+FROZEN_LABEL_SCALE = 1.5
+
+# DiT's shared std for the small init; 1.0 restores nn.Embedding's own default, which at
+# hidden_size=640 starts ||y|| at ~25 instead of 0.51 (plaicraft-debug#85).
+LABEL_INIT_STD = 0.02
+
+
 class LabelEmbedder(nn.Module):
     """
     Embeds class labels into vector representations. Also handles label dropout for classifier-free guidance.
     """
-    def __init__(self, num_classes, hidden_size, dropout_prob):
+    def __init__(self, num_classes, hidden_size, dropout_prob, freeze=False, frozen_scale=FROZEN_LABEL_SCALE):
         super().__init__()
         use_cfg_embedding = dropout_prob > 0
         self.embedding_table = nn.Embedding(num_classes + use_cfg_embedding, hidden_size)
         self.num_classes = num_classes
         self.dropout_prob = dropout_prob
+        self.freeze = freeze
+        if freeze:
+            self._freeze_orthogonal(frozen_scale)
+
+    def _freeze_orthogonal(self, scale):
+        """Deterministic (fixed seed, not the model seed) so every run freezes the same rows."""
+        n, d = self.embedding_table.weight.shape
+        g = torch.Generator().manual_seed(85)
+        q, _ = torch.linalg.qr(torch.randn(d, n, generator=g))
+        with torch.no_grad():
+            self.embedding_table.weight.copy_(q.T * scale)
+        self.embedding_table.weight.requires_grad_(False)
 
     def token_drop(self, labels, force_drop_ids=None):
         """
@@ -92,6 +137,9 @@ class LabelEmbedder(nn.Module):
         """
         if force_drop_ids is None:
             drop_ids = torch.rand(labels.shape[0], device=labels.device) < self.dropout_prob
+        elif isinstance(force_drop_ids, bool):  # whole-batch case; mirrors ActionEmbedder
+            drop_ids = torch.full((labels.shape[0],), force_drop_ids, dtype=torch.bool,
+                                  device=labels.device)
         else:
             drop_ids = force_drop_ids == 1
         labels = torch.where(drop_ids, self.num_classes, labels)
@@ -102,8 +150,51 @@ class LabelEmbedder(nn.Module):
         if (train and use_dropout) or (force_drop_ids is not None):
             labels = self.token_drop(labels, force_drop_ids)
         embeddings = self.embedding_table(labels)
+        if self.freeze and torch.is_grad_enabled():
+            # A frozen table gets no .grad, so grad/label/* would be blank on exactly the arms
+            # whose rows we most want to compare. Re-entering the graph at the embedding OUTPUT
+            # captures the gradient that WOULD have reached it, leaving the forward value and
+            # the frozen weights untouched (issue #85).
+            embeddings = embeddings.detach().requires_grad_(True)
+            self._grad_probe = (embeddings, labels.detach())
         return embeddings
 
+
+class ActionEmbedder(nn.Module):
+    """
+    Embeds per-frame action vectors into per-frame conditioning vectors. Also handles
+    action dropout (per whole sample) for classifier-free guidance.
+    """
+    def __init__(self, action_dim, hidden_size, dropout_prob=0.0):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(action_dim, hidden_size),
+            nn.SiLU(),
+            nn.Linear(hidden_size, hidden_size),
+        )
+        self.null_embedding = nn.Parameter(torch.zeros(hidden_size))
+        self.dropout_prob = dropout_prob
+
+    def forward(self, actions, train, force_drop=None):
+        # actions: (B, T, action_dim) -> (B, T, hidden_size)
+        embeddings = self.net(actions)
+        B = actions.shape[0]
+
+        if force_drop is not None:
+            if isinstance(force_drop, bool):
+                drop_ids = torch.full((B,), force_drop, dtype=torch.bool, device=actions.device)
+            else:
+                drop_ids = force_drop.bool().to(actions.device)
+        elif train and self.dropout_prob > 0:
+            drop_ids = torch.rand(B, device=actions.device) < self.dropout_prob
+        else:
+            # All-False (not None) so null_embedding stays in the DDP graph -- see commit message.
+            drop_ids = torch.zeros(B, dtype=torch.bool, device=actions.device)
+
+        null = self.null_embedding.to(embeddings.dtype).expand_as(embeddings)
+        embeddings = torch.where(drop_ids.view(B, 1, 1), null, embeddings)
+
+        return embeddings
 
 
 def drop_path(x, drop_prob: float = 0., training: bool = False):
@@ -131,7 +222,8 @@ class VDTBlock(nn.Module):
     """
     A VDT block with adaptive layer norm zero (adaLN-Zero) conditioning.
     """
-    def __init__(self, hidden_size, num_heads, mlp_ratio=4.0, mode='video', num_frames=16, **block_kwargs):
+    def __init__(self, hidden_size, num_heads, mlp_ratio=4.0, mode='video', num_frames=16,
+                 attn_window=None, n_patch=None, **block_kwargs):
         super().__init__()
         self.norm1 = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
         self.attn = Attention(hidden_size, num_heads=num_heads, qkv_bias=True, **block_kwargs)
@@ -144,6 +236,11 @@ class VDTBlock(nn.Module):
             nn.Linear(hidden_size, 6 * hidden_size, bias=True)
         )
         self.num_frames = num_frames
+        # Windowed cross-frame action attention (plaicraft-debug#97); None keeps the per-frame spatial path untouched.
+        assert attn_window is None or n_patch is not None, "attn_window requires n_patch"
+        self.attn_window = attn_window
+        self.n_patch = n_patch
+        self._window_mask_cache = None
 
         self.mode = mode
 
@@ -156,7 +253,7 @@ class VDTBlock(nn.Module):
             self.temporal_fc = nn.Linear(hidden_size, hidden_size)
 
     def forward(self, x, c):
-        shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = self.adaLN_modulation(c).chunk(6, dim=1)
+        shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = self.adaLN_modulation(c).chunk(6, dim=-1)
         T = self.num_frames
         K, N, M = x.shape
         B = K // T
@@ -168,19 +265,31 @@ class VDTBlock(nn.Module):
             x = rearrange(x, '(b n) t m -> (b t) n m',b=B,t=T,n=N,m=M)
             x = x + res_temporal
 
-        attn = self.attn(modulate(self.norm1(x), shift_msa, scale_msa, self.num_frames))
+        normed = modulate(self.norm1(x), shift_msa, scale_msa, self.num_frames)
+        if self.attn_window is None:
+            attn = self.attn(normed)
+        else:
+            normed = rearrange(normed, '(b t) n m -> b (t n) m', b=B, t=T, n=N, m=M)
+            mask = self._get_window_mask(T, N, normed.device)
+            attn = rearrange(self.attn(normed, attn_mask=mask), 'b (t n) m -> (b t) n m', b=B, t=T, n=N, m=M)
         attn = rearrange(attn, '(b t) n m-> b (t n) m',b=B,t=T,n=N,m=M)
-        attn = gate_msa.unsqueeze(1) * attn
+        attn = _expand_cond(gate_msa, N) * attn
         attn = rearrange(attn, 'b (t n) m-> (b t) n m',b=B,t=T,n=N,m=M)
         x = x + attn
 
         mlp = self.mlp(modulate(self.norm2(x), shift_mlp, scale_mlp, self.num_frames))
         mlp = rearrange(mlp, '(b t) n m-> b (t n) m',b=B,t=T,n=N,m=M)
-        mlp = gate_mlp.unsqueeze(1) * mlp
+        mlp = _expand_cond(gate_mlp, N) * mlp
         mlp = rearrange(mlp, 'b (t n) m-> (b t) n m',b=B,t=T,n=N,m=M)
         x = x + mlp
 
         return x
+
+    def _get_window_mask(self, T, n_tok, device):
+        key = (T, n_tok, device)
+        if self._window_mask_cache is None or self._window_mask_cache[0] != key:
+            self._window_mask_cache = (key, window_mask(T, self.n_patch, n_tok, self.attn_window, device))
+        return self._window_mask_cache[1]
 
 class DropPath(nn.Module):
     """Drop paths (Stochastic Depth) per sample  (when applied in main path of residual blocks).
@@ -194,7 +303,7 @@ class DropPath(nn.Module):
 
 class FinalLayer(nn.Module):
     """
-    The final layer of VDT.
+    The final layer of VDT for predicting video.
     """
     def __init__(self, hidden_size, patch_size, out_channels, num_frames):
         super().__init__()
@@ -207,7 +316,28 @@ class FinalLayer(nn.Module):
         self.num_frames = num_frames
 
     def forward(self, x, c):
-        shift, scale = self.adaLN_modulation(c).chunk(2, dim=1)
+        shift, scale = self.adaLN_modulation(c).chunk(2, dim=-1)
+        x = modulate(self.norm_final(x), shift, scale, self.num_frames)
+        x = self.linear(x)
+        return x
+
+
+class ActionHead(nn.Module):
+    """
+    The output head of VDT for predicting actions.
+    """
+    def __init__(self, hidden_size, action_dim, num_frames):
+        super().__init__()
+        self.norm_final = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
+        self.linear = nn.Linear(hidden_size, action_dim, bias=True)
+        self.adaLN_modulation = nn.Sequential(
+            nn.SiLU(),
+            nn.Linear(hidden_size, 2 * hidden_size, bias=True)
+        )
+        self.num_frames = num_frames
+
+    def forward(self, x, c):
+        shift, scale = self.adaLN_modulation(c).chunk(2, dim=-1)
         x = modulate(self.norm_final(x), shift, scale, self.num_frames)
         x = self.linear(x)
         return x
@@ -230,7 +360,20 @@ class VDT(nn.Module):
         num_classes=1000,
         learn_sigma=True,
         mode='video',
-        num_frames=16
+        num_frames=16,
+        action_dim=0,
+        mouse_dim=0,
+        action_dropout_prob=0.0,
+        generate_actions=False,
+        action_token_cond=False,
+        generate_mouse=False,
+        mouse_token_cond=False,
+        cond_combine="add",
+        label_embedding_frozen=False,
+        label_init_std=LABEL_INIT_STD,
+        label_frozen_scale=FROZEN_LABEL_SCALE,
+        independent_action_t=False,
+        attn_window=None,
     ):
         super().__init__()
         self.learn_sigma = learn_sigma
@@ -238,10 +381,76 @@ class VDT(nn.Module):
         self.out_channels = in_channels * 2 if learn_sigma else in_channels
         self.patch_size = patch_size
         self.num_heads = num_heads
+        # action_dim is the KEYPRESS token's dim by convention; mouse_dim is its sibling for the 2-d mouse token.
+        self.action_dim = action_dim
+        self.mouse_dim = mouse_dim
+        self.generate_actions = generate_actions
+        # Lets the action token's noise level be sampled independently of the video's (issue #85).
+        self.independent_action_t = bool(independent_action_t)
+        # Token conditioning WITHOUT generation: the action rides in the sequence like a patch, but is never noised and carries no loss.
+        self.action_token_cond = bool(action_token_cond) and not generate_actions
+        # Mouse's mode is fully independent of keypress's (its own generate/token-cond pair).
+        self.generate_mouse = bool(generate_mouse)
+        self.mouse_token_cond = bool(mouse_token_cond) and not self.generate_mouse
 
         self.x_embedder = PatchEmbed(input_size, patch_size, in_channels, hidden_size, bias=True)
         self.t_embedder = TimestepEmbedder(hidden_size)
-        self.y_embedder = LabelEmbedder(num_classes, hidden_size, class_dropout_prob)
+        # Ignored when frozen -- _freeze_orthogonal sets the rows and initialize_weights skips them.
+        self.label_init_std = label_init_std
+        self.y_embedder = LabelEmbedder(num_classes, hidden_size, class_dropout_prob,
+                                       freeze=label_embedding_frozen,
+                                       frozen_scale=label_frozen_scale)
+        # "add" folds y into t, so one shared adaLN W sees only their sum and the label rides
+        # whatever magnitude the timestep needs; concat gives y its own weight block (issue #85).
+        assert cond_combine in ("add", "concat", "concat_ln"), f"unknown cond_combine {cond_combine}"
+        self.cond_combine = cond_combine
+        if cond_combine != "add":
+            # Same shape as plaicraft-model-pi0's adaln_proj. The SiLU is the point: a purely
+            # linear projection of [t; y] is only a reparametrisation of t + y, since W_y @ y
+            # spans exactly what a free embedding table already spans.
+            self.cond_proj = nn.Sequential(
+                nn.Linear(2 * hidden_size, 2 * hidden_size),
+                nn.SiLU(),
+                nn.Linear(2 * hidden_size, hidden_size),
+            )
+        else:
+            self.cond_proj = None
+        if cond_combine == "concat_ln":
+            self.t_cond_norm = nn.LayerNorm(hidden_size)
+            self.y_cond_norm = nn.LayerNorm(hidden_size)
+        else:
+            self.t_cond_norm = None
+            self.y_cond_norm = None
+        if action_dim > 0:
+            if generate_actions or self.action_token_cond:
+                self.action_x_embedder = nn.Linear(action_dim, hidden_size, bias=True)
+                self.action_pos_embed = nn.Parameter(torch.zeros(1, 1, hidden_size))
+                # No head in token-cond mode: there is nothing to read back out.
+                self.action_head = (ActionHead(hidden_size, action_dim, num_frames)
+                                    if generate_actions else None)
+                self.action_embedder = None
+            else:
+                self.action_x_embedder = None
+                self.action_pos_embed = None
+                self.action_head = None
+                self.action_embedder = ActionEmbedder(action_dim, hidden_size, action_dropout_prob)
+        else:
+            self.action_x_embedder = None
+            self.action_pos_embed = None
+            self.action_head = None
+            self.action_embedder = None
+
+        # Mouse has no legacy fold-into-c conditioning mode: token-based only, mirroring keypress's token branch.
+        if mouse_dim > 0 and (self.generate_mouse or self.mouse_token_cond):
+            self.mouse_x_embedder = nn.Linear(mouse_dim, hidden_size, bias=True)
+            self.mouse_pos_embed = nn.Parameter(torch.zeros(1, 1, hidden_size))
+            self.mouse_head = ActionHead(hidden_size, mouse_dim, num_frames) if self.generate_mouse else None
+        else:
+            assert mouse_dim == 0, "mouse_dim > 0 requires generate_mouse or mouse_token_cond"
+            self.mouse_x_embedder = None
+            self.mouse_pos_embed = None
+            self.mouse_head = None
+
         num_patches = self.x_embedder.num_patches
         # Will use fixed sin-cos embedding:
         self.pos_embed = nn.Parameter(torch.zeros(1, num_patches, hidden_size), requires_grad=False)
@@ -255,7 +464,8 @@ class VDT(nn.Module):
             self.num_frames = 1
 
         self.blocks = nn.ModuleList([
-            VDTBlock(hidden_size, num_heads, mlp_ratio=mlp_ratio, mode=mode, num_frames=self.num_frames) for _ in range(depth)
+            VDTBlock(hidden_size, num_heads, mlp_ratio=mlp_ratio, mode=mode, num_frames=self.num_frames,
+                     attn_window=attn_window, n_patch=num_patches) for _ in range(depth)
         ])
         self.final_layer = FinalLayer(hidden_size, patch_size, self.out_channels, self.num_frames)
         self.initialize_weights()
@@ -283,8 +493,29 @@ class VDT(nn.Module):
         nn.init.xavier_uniform_(w.view([w.shape[0], -1]))
         nn.init.constant_(self.x_embedder.proj.bias, 0)
 
-        # Initialize label embedding table:
-        nn.init.normal_(self.y_embedder.embedding_table.weight, std=0.02)
+        if self.action_x_embedder is not None:
+            nn.init.xavier_uniform_(self.action_x_embedder.weight)
+            nn.init.constant_(self.action_x_embedder.bias, 0)
+
+        if self.action_pos_embed is not None:
+            nn.init.normal_(self.action_pos_embed, std=0.02)
+
+        if self.mouse_x_embedder is not None:
+            nn.init.xavier_uniform_(self.mouse_x_embedder.weight)
+            nn.init.constant_(self.mouse_x_embedder.bias, 0)
+
+        if self.mouse_pos_embed is not None:
+            nn.init.normal_(self.mouse_pos_embed, std=0.02)
+
+        if self.cond_proj is not None:
+            for layer in self.cond_proj:
+                if isinstance(layer, nn.Linear):
+                    nn.init.xavier_uniform_(layer.weight)
+                    nn.init.constant_(layer.bias, 0)
+
+        # Initialize label embedding table: skip when frozen, or this clobbers the orthogonal rows.
+        if not self.y_embedder.freeze:
+            nn.init.normal_(self.y_embedder.embedding_table.weight, std=self.label_init_std)
 
         # Initialize timestep embedding MLP:
         nn.init.normal_(self.t_embedder.mlp[0].weight, std=0.02)
@@ -300,6 +531,18 @@ class VDT(nn.Module):
         nn.init.constant_(self.final_layer.adaLN_modulation[-1].bias, 0)
         nn.init.constant_(self.final_layer.linear.weight, 0)
         nn.init.constant_(self.final_layer.linear.bias, 0)
+
+        if self.action_head is not None:
+            nn.init.constant_(self.action_head.adaLN_modulation[-1].weight, 0)
+            nn.init.constant_(self.action_head.adaLN_modulation[-1].bias, 0)
+            nn.init.constant_(self.action_head.linear.weight, 0)
+            nn.init.constant_(self.action_head.linear.bias, 0)
+
+        if self.mouse_head is not None:
+            nn.init.constant_(self.mouse_head.adaLN_modulation[-1].weight, 0)
+            nn.init.constant_(self.mouse_head.adaLN_modulation[-1].bias, 0)
+            nn.init.constant_(self.mouse_head.linear.weight, 0)
+            nn.init.constant_(self.mouse_head.linear.bias, 0)
 
     def unpatchify(self, x):
         """
@@ -317,40 +560,96 @@ class VDT(nn.Module):
         imgs = x.reshape(shape=(x.shape[0], c, h * p_h, w * p_w))
         return imgs
 
-    def forward(self, x, *, x0, timesteps, frame_indices=None,
-                obs_mask=None, latent_mask=None, return_attn_weights=False):
+    def forward(self, x, timesteps=None, *, x0=None, frame_indices=None,
+                obs_mask=None, latent_mask=None, return_attn_weights=False,
+                y=None, force_label_drop=None,
+                actions=None, actions0=None, obs_action_mask=None, latent_action_mask=None,
+                force_action_drop=None, action_timesteps=None,
+                mouse=None, mouse0=None, obs_mouse_mask=None, latent_mouse_mask=None, **kwargs):
         """
         Forward pass of VDT.
-        x: (N, C, H, W) tensor of spatial inputs (images or latent representations of images)
-        t: (N,) tensor of diffusion timesteps
-        y: (N,) tensor of class labels
+        x: (B, T, C, H, W) tensor of spatial inputs (images or latent representations of images)
+        timesteps: (B,) tensor of diffusion timesteps
         """
-        B, T, C, W, H = x.shape # 32 16 4 8 8 
-        x = x*(1-obs_mask) + x0*obs_mask
+        B, T, C, H, W = x.shape
+        if obs_mask is not None and x0 is not None:
+            x = x * (1 - obs_mask) + x0 * obs_mask
 
-        x = x.contiguous().view(-1, C, W, H)
-        y = torch.zeros(B).long().to(x.device)
-        x = self.x_embedder(x) + self.pos_embed  # (N, T, D), where T = H * W / patch_size ** 2
+        x = x.contiguous().view(-1, C, H, W)
+        # At num_classes=0 the zeros default is exactly the pre-issue-85 behaviour.
+        y = (torch.zeros(B, dtype=torch.long, device=x.device) if y is None
+             else y.to(device=x.device, dtype=torch.long).reshape(B))
+        patch_tokens = self.x_embedder(x) + self.pos_embed  # (B*T, N, D), where N = (H*W) / patch_size ** 2
+        N = patch_tokens.shape[1]
+
+        # True whenever the action rides in the sequence, denoised or not; token-cond passes no obs_action_mask/actions0, so `actions` falls through clean.
+        use_action_tokens = (self.action_dim > 0 and self.action_x_embedder is not None
+                             and actions is not None)
+        use_mouse_tokens = (self.mouse_dim > 0 and self.mouse_x_embedder is not None
+                            and mouse is not None)
+        tokens = [patch_tokens]
+        if use_action_tokens:
+            if obs_action_mask is not None and actions0 is not None:
+                actions = actions * (1 - obs_action_mask) + actions0 * obs_action_mask
+            action_tokens = self.action_x_embedder(actions)  # (B, T, D)
+            if self.independent_action_t:
+                # Broadcast (B,1,D) over T: the action token sees its own noise level, not the video's.
+                action_tokens = action_tokens + self.t_embedder(
+                    action_timesteps if action_timesteps is not None else timesteps).unsqueeze(1)
+            action_tokens = rearrange(action_tokens, 'b t d -> (b t) 1 d') + self.action_pos_embed  # (B*T, 1, D)
+            tokens.append(action_tokens)
+        if use_mouse_tokens:
+            if obs_mouse_mask is not None and mouse0 is not None:
+                mouse = mouse * (1 - obs_mouse_mask) + mouse0 * obs_mouse_mask
+            mouse_tokens = self.mouse_x_embedder(mouse)  # (B, T, D)
+            mouse_tokens = rearrange(mouse_tokens, 'b t d -> (b t) 1 d') + self.mouse_pos_embed  # (B*T, 1, D)
+            tokens.append(mouse_tokens)
+        tokens = torch.cat(tokens, dim=1) if len(tokens) > 1 else tokens[0]  # (B*T, N[+1][+1], D)
+
         if self.mode == 'video':
-            # Temporal embed
-            x = rearrange(x, '(b t) n m -> (b n) t m',b=B,t=T)
-            ## Resizing time embeddings in case they don't match
-            x = x + self.time_embed
-            x = self.time_drop(x)
-            x = rearrange(x, '(b n) t m -> (b t) n m',b=B,t=T)
+            # Temporal embed across T frames: (B*(N+1), T, D)
+            tokens = rearrange(tokens, '(b t) n m -> (b n) t m', b=B, t=T)
+            tokens = tokens + self.time_embed
+            tokens = self.time_drop(tokens)
+            tokens = rearrange(tokens, '(b n) t m -> (b t) n m', b=B, t=T)
 
-        t = self.t_embedder(timesteps)           # (N, D)
-        y = self.y_embedder(y, self.training)    # (N, D)
+        t = self.t_embedder(timesteps)           # (B, D)
+        y = self.y_embedder(y, self.training, force_label_drop)  # (B, D)
 
-        c = t + y                             # (N, D)
+        if not self.generate_actions and actions is not None and self.action_embedder is not None:
+            # At num_classes=0 `y` is an inert constant kept only so y_embedder stays reachable
+            # by backward (p.grad None once crashed _log_grad_norm); at 2 it is the player.
+            assert self.cond_combine == "add", "cond_combine != add is unsupported with action_embedder"
+            c = t.unsqueeze(1) + y.unsqueeze(1) + \
+                self.action_embedder(actions, self.training, force_action_drop)  # (B, T, D)
+        elif self.cond_combine == "add":
+            c = t + y                         # (B, D)
+        else:
+            if self.cond_combine == "concat_ln":
+                t, y = self.t_cond_norm(t), self.y_cond_norm(y)
+            c = self.cond_proj(torch.cat([t, y], dim=-1))  # (B, D)
 
         for block in self.blocks:
-            x = block(x, c)                      # (N, T, D)
-        x = self.final_layer(x, c)                # (N, T, patch_size ** 2 * out_channels)
+            tokens = block(tokens, c)            # (B*T, N+1, D) or (B*T, N, D)
 
-        x = self.unpatchify(x)                   # (N, out_channels, H, W)
-        x = x.view(B, T, x.shape[-3], x.shape[-2], x.shape[-1])
-        return x, None
+        video_tokens = tokens[:, :N, :]
+        x_out = self.final_layer(video_tokens, c) # (B*T, N, patch_size ** 2 * out_channels)
+        x_out = self.unpatchify(x_out)            # (B*T, out_channels, H, W)
+        x_out = x_out.view(B, T, x_out.shape[-3], x_out.shape[-2], x_out.shape[-1])
+
+        # Token order is patch -> keypress -> mouse (vdt.py forward, per issue-71).
+        act_out, mouse_out = None, None
+        if use_action_tokens and self.action_head is not None:
+            action_tokens_out = tokens[:, N:N + 1, :]  # (B*T, 1, D)
+            act_out = self.action_head(action_tokens_out, c).view(B, T, self.action_dim)
+        if use_mouse_tokens and self.mouse_head is not None:
+            mouse_offset = N + (1 if use_action_tokens else 0)
+            mouse_tokens_out = tokens[:, mouse_offset:mouse_offset + 1, :]  # (B*T, 1, D)
+            mouse_out = self.mouse_head(mouse_tokens_out, c).view(B, T, self.mouse_dim)
+
+        # Fixed (act_out, mouse_out) pair; a 3rd generative modality would need to
+        # revisit this pair (and UNetVideoModel's matching return slot in unet.py).
+        return x_out, (act_out, mouse_out)
 
     def forward_with_cfg(self, x, t, y, cfg_scale):
         """
@@ -359,7 +658,7 @@ class VDT(nn.Module):
         # https://github.com/openai/glide-text2im/blob/main/notebooks/text2im.ipynb
         half = x[: len(x) // 2]
         combined = torch.cat([half, half], dim=0)
-        model_out = self.forward(combined, t, y)
+        model_out, _ = self.forward(combined, timesteps=t)
         # For exact reproducibility reasons, we apply classifier-free guidance on only
         # three channels by default. The standard approach to cfg applies it to all channels.
         # This can be done by uncommenting the following line and commenting-out the line following that.
@@ -436,20 +735,25 @@ def get_1d_sincos_pos_embed_from_grid(embed_dim, pos):
 #################################################################################
 
 def VDT_L_2(**kwargs):
-    return VDT(depth=28, hidden_size=1152, num_heads=16, num_classes=0, **kwargs)
+    kwargs.setdefault('num_classes', 0)
+    return VDT(depth=28, hidden_size=1152, num_heads=16, **kwargs)
 
 def VDT_M_2(**kwargs):
-    return VDT(depth=12, hidden_size=1024, num_heads=16, num_classes=0, **kwargs)
+    kwargs.setdefault('num_classes', 0)
+    return VDT(depth=12, hidden_size=1024, num_heads=16, **kwargs)
 
 def VDT_SM_2(**kwargs):
-    return VDT(depth=12, hidden_size=640, num_heads=10, num_classes=0, **kwargs)
+    kwargs.setdefault('num_classes', 0)
+    return VDT(depth=12, hidden_size=640, num_heads=10, **kwargs)
 
 def VDT_S_2(**kwargs):
-    return VDT(depth=12, hidden_size=384, num_heads=6, num_classes=1000, **kwargs)
+    kwargs.setdefault('num_classes', 1000)
+    return VDT(depth=12, hidden_size=384, num_heads=6, **kwargs)
 
 
 VDT_models = {
     'VDT-L/2':  VDT_L_2,
     'VDT-M/2':  VDT_M_2,
     'VDT-S/2':  VDT_S_2,
+    'VDT-SM/2': VDT_SM_2,
 }

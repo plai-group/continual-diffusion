@@ -1,0 +1,168 @@
+"""Swap overlay action bars: each panel must draw the actions it was actually
+generated with, so a model that generates its own actions can be read off the
+video instead of having the recorded actions painted over every panel."""
+
+import numpy as np
+
+from improved_diffusion import debug_validation as dv
+
+
+T, H, W = 6, 24, 40
+
+
+def _frames():
+    return np.zeros((T, 3, H, W), dtype=np.float32)
+
+
+def _actions(seed):
+    """(keypress, mouse): (T, 8) and (T, 2) float32."""
+    rng = np.random.RandomState(seed)
+    keypress = (rng.rand(T, 8) > 0.5).astype(np.float32)
+    mouse = rng.randn(T, 2).astype(np.float32)
+    return keypress, mouse
+
+
+class _BarRecorder:
+    """Stands in for _overlay_frame and records the bar dict each call draws."""
+
+    def __init__(self):
+        self.bars = []
+
+    def __call__(self, frame, bar, border=False):
+        self.bars.append(bar)
+        return np.zeros((10, 10, 3), dtype=np.uint8)
+
+
+def test_display_shift():
+    # _to_display_actions is dim-agnostic: it just shifts the causal cache back one frame.
+    a = np.arange(T * 8, dtype=np.float32).reshape(T, 8)
+    out = dv._to_display_actions(a)
+    assert np.allclose(out[:-1], a[1:]), "causal cache must shift back by one frame"
+    assert np.allclose(out[-1], 0), "last frame has no successor, so its bar is blank"
+    print("  [PASS] _to_display_actions shifts causal -> display convention")
+
+
+def test_action_bars_from_tensor():
+    import torch
+
+    keypress, mouse = _actions(0)
+    bars = dv._action_bars(torch.from_numpy(keypress), torch.from_numpy(mouse))
+    assert len(bars) == T
+    assert set(bars[0]) == {"keys", "clicks", "mouseDX", "mouseDY"}
+    print("  [PASS] _action_bars accepts (keypress, mouse) tensors and returns one bar per frame")
+
+
+def test_swap_overlay_draws_gt_and_generated_separately(monkeypatched=None):
+    """The reported bug: the GT and TRUE panels were fed the same array, so a
+    generated action could never differ from ground truth on screen."""
+    rec = _BarRecorder()
+    orig_overlay, orig_label = dv._overlay_frame, dv._label_panel
+    orig_writer = dv_get_writer()
+    dv._overlay_frame = rec
+    dv._label_panel = lambda panel, text: panel
+    try:
+        act_gt, act_gen = _actions(1), _actions(2)
+        dv._render_triple_overlay(
+            frames_gt=_frames(), frames_true=_frames(),
+            frames_swap=_frames(), frames_zero=_frames(),
+            actions_gt=act_gt, actions_true=act_gen,
+            actions_swap=_actions(3), actions_zero=_actions(4),
+            n_observed=3, out_path="/dev/null", true_label="GEN",
+        )
+    finally:
+        dv._overlay_frame, dv._label_panel = orig_overlay, orig_label
+        dv_restore_writer(orig_writer)
+
+    # 4 panels per frame, in order GT, GEN, SWAP, ZERO.
+    assert len(rec.bars) == 4 * T, f"expected {4*T} panel draws, got {len(rec.bars)}"
+    gt_bars = rec.bars[0::4]
+    gen_bars = rec.bars[1::4]
+    expect_gt = dv._action_bars(*act_gt)
+    expect_gen = dv._action_bars(*act_gen)
+    assert gt_bars == expect_gt, "GT panel must draw the recorded actions"
+    assert gen_bars == expect_gen, "GEN panel must draw the GENERATED actions"
+    assert gt_bars != gen_bars, "GT and GEN panels drew identical bars -- regression"
+    print("  [PASS] swap overlay draws GT and generated actions from separate arrays")
+
+
+def test_render_panels_defaults_to_the_12_5hz_debug_world_rate():
+    """plaicraft-debug#96: a caller that doesn't pass fps must stay byte-identical to pre-#96."""
+    seen = {}
+    orig = _patch_writer(seen)
+    try:
+        dv._render_panels((_frames(), _frames()), (_actions(0), _actions(1)), ["GT", "GEN"], 3, "/dev/null", ncols=2)
+    finally:
+        _unpatch_writer(orig)
+    assert seen["fps"] == dv.DECODE_VIDEO_FPS
+
+
+def test_render_panels_honours_an_explicit_fps():
+    """km_ctx14's 10Hz corpus must write its overlays at 10fps, not 12.5 (plaicraft-debug#96)."""
+    seen = {}
+    orig = _patch_writer(seen)
+    try:
+        dv._render_panels((_frames(), _frames()), (_actions(0), _actions(1)), ["GT", "GEN"], 3, "/dev/null", ncols=2, fps=10.0)
+    finally:
+        _unpatch_writer(orig)
+    assert seen["fps"] == 10.0
+
+
+def test_render_triple_overlay_and_player_arm_overlay_pass_fps_through():
+    for call in (
+        lambda fps: dv._render_triple_overlay(
+            frames_gt=_frames(), frames_true=_frames(), frames_swap=_frames(), frames_zero=_frames(),
+            actions_gt=_actions(0), actions_true=_actions(1), actions_swap=_actions(2), actions_zero=_actions(3),
+            n_observed=3, out_path="/dev/null", fps=fps),
+        lambda fps: dv._render_player_arm_overlay(
+            frames_gt=_frames(), frames_gen=_frames(), actions_gt=_actions(0), actions_gen=_actions(1),
+            n_observed=3, out_path="/dev/null", fps=fps),
+    ):
+        seen = {}
+        orig = _patch_writer(seen)
+        try:
+            call(10.0)
+        finally:
+            _unpatch_writer(orig)
+        assert seen["fps"] == 10.0
+
+
+def _patch_writer(seen):
+    import imageio
+    orig = imageio.get_writer
+
+    def _fake(*a, **k):
+        seen["fps"] = k.get("fps")
+        return _NullWriter()
+    imageio.get_writer = _fake
+    return orig
+
+
+def _unpatch_writer(orig):
+    import imageio
+    imageio.get_writer = orig
+
+
+# ---- stub out the mp4 writer; these tests are about wiring, not encoding ----
+class _NullWriter:
+    def append_data(self, frame): pass
+    def close(self): pass
+
+
+def dv_get_writer():
+    import imageio
+    orig = imageio.get_writer
+    imageio.get_writer = lambda *a, **k: _NullWriter()
+    return orig
+
+
+def dv_restore_writer(orig):
+    import imageio
+    imageio.get_writer = orig
+
+
+if __name__ == "__main__":
+    print("Running overlay action-bar tests...")
+    test_display_shift()
+    test_action_bars_from_tensor()
+    test_swap_overlay_draws_gt_and_generated_separately()
+    print("ALL OVERLAY TESTS PASSED")

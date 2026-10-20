@@ -10,7 +10,7 @@ import torch
 import torch.distributed as dist
 
 from improved_diffusion import dist_util
-from improved_diffusion.video_datasets import load_data, default_T_dict, default_full_image_size_dict
+from improved_diffusion.video_datasets import load_data, default_T_dict, default_full_image_size_dict, plaicraft_valset_kwargs
 from improved_diffusion.resample import create_named_schedule_sampler
 from improved_diffusion.script_util import (
     model_and_diffusion_defaults,
@@ -20,6 +20,14 @@ from improved_diffusion.script_util import (
 )
 from improved_diffusion.train_util import TrainLoop
 from improved_diffusion.logger import logger
+from improved_diffusion.debug_actions import validate_action_encoding
+from improved_diffusion.km_tokenizer.model import DEFAULT_CHECKPOINT as KM_TOKENIZER_DEFAULT_CHECKPOINT
+from improved_diffusion.km_tokenizer.ctx14_10hz import DEFAULT_CHECKPOINT_DIR as KM_CTX14_DEFAULT_CHECKPOINT_DIR
+
+# plaicraft-debug#80: km_fsq's single loss term must match raw's combined (8+2)/2880 contribution -- weight * 36/2880 == 10/2880.
+_KM_FSQ_KEYPRESS_LOSS_WEIGHT = 10 / 36
+# plaicraft-debug#96: same reasoning for km_ctx14's 32-d code -- weight * 32/2880 == 10/2880.
+_KM_CTX14_KEYPRESS_LOSS_WEIGHT = 10 / 32
 
 os.environ["MY_WANDB_DIR"] = "none"
 if "--unobserve" in sys.argv:
@@ -35,9 +43,11 @@ def init_wandb(config, id):
     wandb_dir = os.environ.get("MY_WANDB_DIR", "none")
     if wandb_dir == "none":
         wandb_dir = None
+    # Without resume=, wandb restarts the history file-stream at row 0 and the backend drops every colliding row, so a resumed run logs nothing.
     wandb.init(entity=os.environ['WANDB_ENTITY'],
                project=os.environ['WANDB_PROJECT'],
-               config=config, dir=wandb_dir, id=id)
+               config=config, dir=wandb_dir, id=id,
+               resume="allow" if id else None)
     print(f"Wandb run id: {wandb.run.id}")
     num_nodes = 1
     if "SLURM_JOB_NODELIST" in os.environ:
@@ -46,6 +56,29 @@ def init_wandb(config, id):
         print(f"Node list: {os.environ['SLURM_JOB_NODELIST']}")
     logger.logkv("num_nodes", num_nodes)
     print(f"Number of nodes: {num_nodes}")
+
+
+def resolve_keypress_loss_weight(args):
+    """Sentinel default: unset (None) picks 10/36 for km_fsq, 10/32 for km_ctx14, 1.0 otherwise;
+    an explicit value always wins. raw_fused takes the 1.0 branch by construction -- its single
+    10-dim term is already 10/10."""
+    if args.keypress_loss_weight is None:
+        args.keypress_loss_weight = {
+            "km_fsq": _KM_FSQ_KEYPRESS_LOSS_WEIGHT, "km_ctx14": _KM_CTX14_KEYPRESS_LOSS_WEIGHT,
+        }.get(args.action_encoding, 1.0)
+    return args.keypress_loss_weight
+
+
+def resolve_km_tokenizer_checkpoint(args):
+    """Sentinel default: an empty --km_tokenizer_checkpoint picks the active encoding's own
+    tokenizer checkpoint (a bin file for km_fsq, a checkpoint dir for km_ctx14); an explicit
+    value always wins (plaicraft-debug#96)."""
+    if not args.km_tokenizer_checkpoint:
+        args.km_tokenizer_checkpoint = str(
+            KM_CTX14_DEFAULT_CHECKPOINT_DIR if args.action_encoding == "km_ctx14"
+            else KM_TOKENIZER_DEFAULT_CHECKPOINT
+        )
+    return args.km_tokenizer_checkpoint
 
 
 def num_available_cores():
@@ -84,11 +117,19 @@ def main():
         "latent": 4,
     }[args.diffusion_space]
     args.upper_frame_range = int(args.upper_frame_range) if args.upper_frame_range is not None else None
+    args.attn_window = int(args.attn_window) if args.attn_window is not None else None
     args.diffusion_space_kwargs = {
         "diffusion_space": args.diffusion_space,
         "pre_encoded": args.diffusion_space == "latent",
+        # Loads the VAE so validation/sample-video decode (plaicraft-debug#93 B3) has one; a
+        # no-op for diffusion_space=="pixel" either way.
+        "enable_decoding": args.diffusion_space == "latent",
     }
     args.model_type = 'vdt'
+
+    validate_action_encoding(args.action_encoding, action_dim=args.action_dim, mouse_dim=args.mouse_dim)
+    resolve_keypress_loss_weight(args)
+    resolve_km_tokenizer_checkpoint(args)
 
     dist_util.setup_dist()
     resume = bool(args.resume_id)
@@ -113,7 +154,55 @@ def main():
         n_sequential=args.n_sample_stm,
         save_every=args.save_interval,
         frame_range=(0, args.upper_frame_range),
+        action_encoding=args.action_encoding,
+        tokenizer_checkpoint=args.km_tokenizer_checkpoint,
+        # >0 makes the dataset emit a player label per window, and refuse a corpus without one.
+        num_classes=args.num_classes,
+        player_homogeneous_batches=args.player_homogeneous_batches,
+        global_database_path=args.global_database_path or None,
     )
+
+    # Issue-58: fixed prompt set from the plaicraft-debug validation recording.
+    # Issue-81: --debug_validation_dir points at the frozen held-out-policy package
+    # instead, and wins if both are set (validate_debug_offline.py still needs the
+    # DebugValidationSet path to re-score old checkpoints against the human set).
+    debug_validation = None
+    if args.debug_validation_dir:
+        if args.debug_validation_db:
+            print("[video_train_vdt] --debug_validation_dir set: ignoring --debug_validation_db")
+        from improved_diffusion.corpus_validation import CorpusValidationSet
+        valset = CorpusValidationSet(
+            args.debug_validation_dir, T=args.T, n_observed=args.T // 2,
+            action_encoding=args.action_encoding, tokenizer_checkpoint=args.km_tokenizer_checkpoint,
+            device=dist_util.dev(), **plaicraft_valset_kwargs(args.dataset, args.num_classes, args.global_database_path, args.action_encoding),
+        )
+        out_dir = args.debug_validation_out or os.path.join("results", "debug_validation")
+        print(f"debug validation (corpus): {len(valset.rows)} rows -> {out_dir}")
+        debug_validation = (valset, out_dir, args.debug_validation_per_task, args.swap_test)
+    elif args.debug_validation_db:
+        from improved_diffusion.debug_validation import DebugValidationSet
+        valset = DebugValidationSet(
+            args.debug_validation_db, args.debug_validation_root,
+            T=args.T, n_observed=args.T // 2,
+            action_encoding=args.action_encoding, tokenizer_checkpoint=args.km_tokenizer_checkpoint,
+        )
+        out_dir = args.debug_validation_out or os.path.join("results", "debug_validation")
+        print(f"debug validation: {len(valset.rows)} rows -> {out_dir}")
+        debug_validation = (valset, out_dir, args.debug_validation_per_task, args.swap_test)
+
+    # Issue-85: independent of the swap validation above -- both can run, either can be off.
+    player_validation = None
+    if args.player_validation_dir:
+        from improved_diffusion.corpus_validation import PlayerValidationSet
+        player_valset = PlayerValidationSet(
+            args.player_validation_dir, T=args.T, n_observed=args.T // 2,
+            action_encoding=args.action_encoding, tokenizer_checkpoint=args.km_tokenizer_checkpoint,
+            device=dist_util.dev(),
+        )
+        player_out = args.debug_validation_out or os.path.join("results", "debug_validation")
+        player_out = os.path.join(player_out, "player")
+        print(f"player validation: {len(player_valset.rows)} rows -> {player_out}")
+        player_validation = (player_valset, player_out, args.label_cfg_scale)
 
     print("training...")
     TrainLoop(
@@ -141,7 +230,10 @@ def main():
         masking_mode=args.masking_mode,
         clip_grad=args.clip_grad,
         optimizer=args.optimizer,
+        debug_validation=debug_validation,
+        player_validation=player_validation,
         args=args,
+        video_log_every=args.video_log_every,
     ).run_loop()
 
 
@@ -168,6 +260,7 @@ def create_argparser():
         enc_dec_chunk_size=20,
         T=-1,
         sample_interval=50000,
+        video_log_every=1,  # only render/upload the overlay mp4 every Nth sample call; scalars still log every time
         stm_size=-1,  # Only used for flexible and streaming sampling (masking_mode == "flexible")
         ltm_size=-1,
         n_sample_stm=-1,
@@ -179,11 +272,31 @@ def create_argparser():
         clip_grad=None,
         optimizer="adam",
         data_seed=0,
+        # True: every gradient step draws its whole batch from one player (issue #85).
+        player_homogeneous_batches=False,
         upper_frame_range=None,
+        # Issue-58 plaicraft-debug validation set (empty db path disables it).
+        debug_validation_db="",
+        debug_validation_root="",
+        debug_validation_dir="",  # issue-81: frozen held-out-policy package; wins over debug_validation_db
+        player_validation_dir="",  # issue-85: paired player package; independent of the above
+        debug_validation_out="",
+        debug_validation_per_task=False,
+        cfg_scale=1.0,  # sampling-time only; not a model kwarg. 1.0 = no guidance.
+        # Independent of cfg_scale: guides on the issue-85 player label, not the actions.
+        label_cfg_scale=1.0,
+        generate_actions=False,
+        # Warm start from a different architecture: step counter stays 0, optimizer/EMA stay fresh (--resume_checkpoint loads strict and reads the step from the filename).
+        init_from_checkpoint="",
+        km_tokenizer_checkpoint="",  # sentinel-resolved post-parse by encoding (plaicraft-debug#96)
+        global_database_path="",  # plaicraft_morgan: player-name lookup DB; "" -> dataset's own default
+        swap_test=True,  # plaicraft-debug#93: off for corpora with no swap package (e.g. plaicraft_morgan)
     )
     defaults.update(model_and_diffusion_defaults(model_type='vdt'))
+    defaults.pop("keypress_loss_weight")  # sentinel-resolved post-parse, once action_encoding is known (plaicraft-debug#80)
     parser = argparse.ArgumentParser()
     add_dict_to_argparser(parser, defaults)
+    parser.add_argument("--keypress_loss_weight", type=float, default=None)
     return parser
 
 

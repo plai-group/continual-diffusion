@@ -379,13 +379,19 @@ def _n_ticks_from_hdf5(session_dir):
     if not matches:
         raise FileNotFoundError(f"no hdf5 file under {hdf5_dir}")
     with h5py.File(matches[0], "r") as f:
-        return f["frames"].shape[0]
+        d = f["frames"]  # latent corpora (plaicraft-debug#99) span tick_offset + ticks_per_latent * N ticks
+        return int(d.attrs.get("tick_offset", 0)) + int(d.attrs.get("ticks_per_latent", 1)) * d.shape[0]
 
 
-def _load_cached(cache_path, n_ticks, expected_dim):
+def _ticks_per_latent(session_dir):
+    with h5py.File(sorted((Path(session_dir) / "encoded_video_hdf5").glob("*.hdf5"))[0], "r") as f:
+        return int(f["frames"].attrs.get("ticks_per_latent", 1))
+
+
+def _load_cached(cache_path, n_ticks, expected_dim, slack=1):
     if cache_path.exists():
         arr = np.load(cache_path, mmap_mode="r")
-        if arr.shape[0] == n_ticks and arr.shape[1] == expected_dim:
+        if n_ticks <= arr.shape[0] < n_ticks + slack and arr.shape[1] == expected_dim:  # slack: trailing ticks past the last latent
             return arr
     return None  # missing, or stale (tick count or dim mismatch)
 
@@ -551,7 +557,7 @@ def _load_or_build_km_ctx14_codes(session_dir, tokenizer_checkpoint, device, act
         except (json.JSONDecodeError, OSError):
             sidecar = None
         if sidecar == expected_sidecar:
-            codes = _load_cached(codes_path, n_ticks, KM_CTX14_CODE_DIM)
+            codes = _load_cached(codes_path, n_ticks, KM_CTX14_CODE_DIM, slack=_ticks_per_latent(session_dir))
             if codes is not None:
                 return codes
 

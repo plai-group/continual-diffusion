@@ -158,6 +158,19 @@ def test_n_ticks_from_hdf5_accepts_non_debug_filename(tmp_path):
     assert da._n_ticks_from_hdf5(session_dir) == 4
 
 
+
+def test_n_ticks_from_hdf5_latent_corpus_and_slack(tmp_path):
+    """Wan latents (plaicraft-debug#99): n_ticks = tick_offset + 4N, and the cache may carry < 4 trailing ticks."""
+    session_dir = tmp_path / "sess"
+    (session_dir / "encoded_video_hdf5").mkdir(parents=True)
+    with h5py.File(session_dir / "encoded_video_hdf5" / "sess.hdf5", "w") as f:
+        f.create_dataset("frames", data=np.zeros((3, 48, 24, 40), dtype=np.float16))
+        f["frames"].attrs.update(tick_offset=1, ticks_per_latent=4)
+    assert da._n_ticks_from_hdf5(session_dir) == 13 and da._ticks_per_latent(session_dir) == 4
+    for rows, ok in ((13, True), (16, True), (17, False), (12, False)):
+        np.save(tmp_path / "c.npy", np.zeros((rows, 32), np.float32))
+        assert (da._load_cached(tmp_path / "c.npy", 13, 32, slack=4) is not None) == ok
+
 def test_km_codes_skip_scatter_for_raw79(tmp_path, monkeypatch):
     """raw79's key array is already 79-wide -- the km-codes path must feed it to the tokenizer
     directly, not through scatter_keypress (which would raise on a non-8-wide input)."""

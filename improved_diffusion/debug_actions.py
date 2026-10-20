@@ -77,10 +77,10 @@ _CTX14_FSQ_LEVELS = (8, 5, 5, 5)  # KmTokenizerCtx14_10HzConfig.fsq_levels
 def quantize_km_ctx14(x):
     """Same closed-form snap as quantize_km_fsq, for km_ctx14's (..., 32) codes: 8 groups of 4
     dims on the 8x5x5x5 FSQ grid (plaicraft-debug#96)."""
-    if x.shape[-1] != KM_CTX14_CODE_DIM:
-        raise ValueError(f"Expected last dim {KM_CTX14_CODE_DIM}, got {x.shape[-1]}.")
+    if x.shape[-1] % KM_CTX14_CODE_DIM:  # k*32 when ticks_per_latent packs k ticks per row (plaicraft-debug#99)
+        raise ValueError(f"Expected last dim a multiple of {KM_CTX14_CODE_DIM}, got {x.shape[-1]}.")
     orig_shape = x.shape
-    x = x.reshape(*orig_shape[:-1], KM_CTX14_CODE_DIM // 4, 4)
+    x = x.reshape(*orig_shape[:-1], x.shape[-1] // 4, 4)
     levels = torch.tensor(_CTX14_FSQ_LEVELS, dtype=x.dtype, device=x.device)
     half_width = levels // 2
     level_idx = (x * half_width + half_width).round()

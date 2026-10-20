@@ -196,3 +196,9 @@ def test_tick_rate_comes_from_the_hdf5_not_the_native_30fps_db(tmp_path):
     assert da.read_tick_fps(session_dir) == 10.0
     from improved_diffusion.km_tokenizer.keypress_lookup import KEYPRESS_LOOKUP
     assert list(np.nonzero(da.load_ticks_79(session_dir)[:, KEYPRESS_LOOKUP["87"]])[0]) == [11]
+
+
+def test_quantize_km_ctx14_packed_ticks_match_per_tick():
+    """ticks_per_latent=4 packs (T, 4*32) rows (plaicraft-debug#99); snapping must equal per-tick snapping."""
+    x = torch.rand(2, 3, 4 * 32) * 2 - 1
+    assert torch.equal(da.quantize_km_ctx14(x), da.quantize_km_ctx14(x.reshape(2, 12, 32)).reshape(2, 3, 128))

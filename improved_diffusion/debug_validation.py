@@ -35,13 +35,13 @@ VIDEO_FPS = 12.5  # plaicraft-debug#80: the corpus's session.fps
 MS_PER_FRAME = 1000.0 / VIDEO_FPS
 
 
-def _decode_if_latent(diffusion, video):
+def _decode_if_latent(diffusion, video, prefix=None):
     """VAE-decode latents to pixel space before any overlay, FVD or pixel metric
     (plaicraft-debug#93 B3); a no-op for diffusion_space=="pixel", so existing debug-world
     validation is byte-identical."""
     if getattr(diffusion, "diffusion_space", "pixel") != "latent":
         return video
-    return diffusion.decode(video)
+    return diffusion.decode(video) if prefix is None else diffusion.decode(video, prefix=prefix)
 
 # plaicraft-debug#80: a tick's raw action broadcasts across its 8 sub-bins when live-encoding an intervention.
 SUBBINS_PER_TICK = debug_actions.SUBBINS_PER_TICK
@@ -550,7 +550,7 @@ def _render_panels(frames_list, actions_list, labels, n_observed, out_path, ncol
     """
     frames_list = [np.asarray(f) for f in frames_list]
     T = frames_list[0].shape[0]
-    # Right-align ticks to frames: Wan decodes 1+4(T-1) frames for k*T ticks; a no-op when they match.
+    # Right-align ticks to frames: prefix-less Wan decodes 1+4(T-1) frames for k*T ticks; a no-op when they match (prefix: 4T frames, frame i = tick i).
     acts = [(_to_display_actions(k)[-T:], _to_display_actions(m)[-T:]) for k, m in actions_list]
 
     out_path = Path(out_path)
@@ -669,6 +669,7 @@ def run_debug_validation(model, diffusion, valset, device, out_dir,
     # only the single boundary action, not the whole generated region.
     is_corpus_valset = bool(valset.rows) and "swap_kind" in valset.rows[0]
     x0_all = valset.load_all()  # (N, T, 3, H, W) pixel space, or (N, T, 4, H, W) latents
+    prefix_all = valset.load_all_wan_prefix() if hasattr(valset, "load_all_wan_prefix") else None  # Wan image-latent prefix (N, 1, 48, h, w)
     n_rows = x0_all.shape[0]
     if actions and action_conditioned:
         keypress_all, mouse_all = valset.load_all_actions()  # native encoding: model conditioning
@@ -691,6 +692,7 @@ def run_debug_validation(model, diffusion, valset, device, out_dir,
         hi = min(lo + chunk_size, n_rows)
         x0 = x0_all[lo:hi].to(device)
         b = x0.shape[0]
+        prefix = prefix_all[lo:hi].to(device) if prefix_all is not None else None
         keypress_chunk = keypress_all[lo:hi].to(device) if keypress_all is not None else None
         mouse_chunk = mouse_all[lo:hi].to(device) if mouse_all is not None else None
         keypress_raw_chunk = keypress_raw_all[lo:hi].to(device) if keypress_raw_all is not None else None
@@ -754,9 +756,9 @@ def run_debug_validation(model, diffusion, valset, device, out_dir,
         samples = samples * latent_mask + x0 * obs_mask
         # x0/samples stay latent (the swap-test block below re-samples from them); these
         # decoded copies are what every downstream metric, FVD feature and overlay reads.
-        x0_px = _decode_if_latent(diffusion, x0)
-        samples_px = _decode_if_latent(diffusion, samples)
-        # Wan decodes ctx+GEN jointly into 1+4(T-1) frames, so GEN is the LAST px_per*n_gen of them; else this is n_obs.
+        x0_px = _decode_if_latent(diffusion, x0, prefix)
+        samples_px = _decode_if_latent(diffusion, samples, prefix)
+        # Wan decodes ctx+GEN jointly (4T frames with a prefix, else 1+4(T-1)), so GEN is the LAST px_per*n_gen of them; else this is n_obs.
         px_obs = x0_px.shape[1] - px_per * (T - n_obs)
 
         # x0/samples are rebound each iteration, so features must be taken here, not at aggregation.
@@ -770,7 +772,7 @@ def run_debug_validation(model, diffusion, valset, device, out_dir,
                 for _ in range(fvd_repeats - 1):
                     extra = _sample_chunk()
                     extra = (extra[0] if isinstance(extra, tuple) else extra).to(device)
-                    extra_px = _decode_if_latent(diffusion, extra * latent_mask + x0 * obs_mask)
+                    extra_px = _decode_if_latent(diffusion, extra * latent_mask + x0 * obs_mask, prefix)
                     feats_fake.append(extract(extra_px[:, px_obs:]))
             except Exception as e:
                 fails.record("fvd_features", step, e)
@@ -917,7 +919,7 @@ def run_debug_validation(model, diffusion, valset, device, out_dir,
                         s = s.to(device)
                         # x0_j is latent (needed above for the model's own x0 kwarg); decode
                         # the merged result to pixel space before any overlay/psnr reads it.
-                        video = _decode_if_latent(diffusion, s * latent_mask_j + x0_j * obs_mask_j)[0]
+                        video = _decode_if_latent(diffusion, s * latent_mask_j + x0_j * obs_mask_j, prefix[j:j + 1] if prefix is not None else None)[0]
                         if (is_km_fsq or is_km_ctx14) and key_out is not None:
                             # Same snap-then-decode as the main pass, still batch=1 here.
                             snap = debug_actions.quantize_km_ctx14 if is_km_ctx14 else debug_actions.quantize_km_fsq

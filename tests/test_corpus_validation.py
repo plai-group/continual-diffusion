@@ -251,3 +251,14 @@ def test_load_all_keys79_slices_each_rows_window_from_the_79key_ticks(tmp_path, 
     assert keys79.shape == (len(NAMES), T, 79)
     assert np.array_equal(keys79[2].numpy(), ticks["sess2"][300:300 + T])
     assert CorpusValidationSet(vdir, T=T, n_observed=N_OBS).load_all_keys79() is None  # debug world: 8 keys only
+
+
+def test_wan_prefix_loaded_when_present_and_none_when_absent(tmp_path):
+    vdir, *_ = _make_fixture(tmp_path)
+    assert CorpusValidationSet(vdir).load_all_wan_prefix() is None
+    npz = dict(np.load(vdir / "validation.npz"))
+    prefix = np.random.RandomState(1).randn(3, 48, 2, 2).astype(np.float16)
+    np.savez(vdir / "validation.npz", wan_prefix=prefix, **npz)
+    got = CorpusValidationSet(vdir).load_all_wan_prefix()
+    assert got.shape == (3, 1, 48, 2, 2) and got.dtype == torch.float32
+    assert torch.allclose(got[:, 0], torch.from_numpy(prefix.astype(np.float32)))

@@ -146,3 +146,39 @@ def test_corpus_validation_rejects_boundary_not_at_k_times_n_observed(tmp_path):
     vdir = _fixture(tmp_path)
     with pytest.raises(ValueError):
         CorpusValidationSet(vdir, T=T, n_observed=N_OBS)  # k=1 expects T-length action arrays
+
+
+def test_wan_decode_with_prefix_returns_4T_frames_and_drops_prefix_frame():
+    d = _wan_diffusion()
+    T, h, w = 6, 2, 3
+    z = th.stack([th.full((48, h, w), (j + 1) / 100) for j in range(T)]).unsqueeze(0)
+    prefix = th.full((1, 1, 48, h, w), 0.5)
+    px = d.decode(z, prefix=prefix)
+    assert px.shape == (1, 4 * T, 3, 4 * h, 4 * w) and d.vae.last_z.shape == (1, 48, T + 1, h, w)
+    assert th.allclose(d.vae.last_z[0, 0, 0], th.tensor(0.5 * STD + MEAN))  # prefix is latent 0 of the clip
+    for j in range(T):  # window latent j owns frames 4j..4j+3, aligned with its ticks
+        assert th.allclose(px[:, 4 * j:4 * j + 4], th.full_like(px[:, :4], (j + 1) / 100 * STD + MEAN))
+    assert d.decode(z).shape[1] == 1 + 4 * (T - 1)  # no prefix: unchanged
+
+
+def test_decode_if_latent_forwards_prefix_only_when_given():
+    class D:
+        diffusion_space = "latent"
+        def decode(self, v, chunk_size=20, prefix=None): return (v, prefix)
+    from improved_diffusion.debug_validation import _decode_if_latent
+    assert _decode_if_latent(D(), 1)[1] is None and _decode_if_latent(D(), 1, 2)[1] == 2
+
+
+def test_render_panels_with_prefix_aligns_frame_i_with_tick_i(tmp_path, monkeypatch):
+    import imageio
+
+    written = []
+    monkeypatch.setattr(imageio, "get_writer", lambda *a, **k: type("W", (), {"append_data": lambda _s, f: written.append(f), "close": lambda _s: None})())
+    seen = []
+    monkeypatch.setattr("improved_diffusion.debug_validation._action_vec_to_bar", lambda k, m: seen.append(float(k[0])))
+    monkeypatch.setattr("improved_diffusion.debug_validation._overlay_frame", lambda f, bar, border: f)
+    F = 12  # 3 latents * 4 ticks; prefix decode => frames == ticks
+    frames = np.zeros((F, 3, 24, 40), np.float32)
+    acts = (np.arange(F, dtype=np.float32)[:, None].repeat(79, 1), np.zeros((F, 2), np.float32))
+    _render_panels((frames,), (acts,), ["GT"], 4, str(tmp_path / "o.mp4"), ncols=1, fps=10)
+    assert seen[:-1] == list(range(1, F))  # frame i shows tick i's display-shifted bar (cache[i+1]); no extra right-align offset

@@ -51,6 +51,7 @@ class CorpusValidationSet:
         self._frames = np.asarray(npz["frames"], dtype=np.float32)
         self._keypress = np.asarray(npz["keypress"], dtype=np.float32) if "keypress" in npz.files else None
         self._mouse = np.asarray(npz["mouse"], dtype=np.float32) if "mouse" in npz.files else None
+        self._wan_prefix = np.asarray(npz["wan_prefix"], dtype=np.float32) if "wan_prefix" in npz.files else None  # (N, 48, h, w) image latent before each window
         names = [str(n) for n in npz["names"]]
         session_ids = [str(s) for s in npz["session_ids"]]
         window_start_ticks = npz["window_start_ticks"]
@@ -130,6 +131,10 @@ class CorpusValidationSet:
     def load_all(self):
         """(13, T, 3, H, W) float32 in [-1, 1], straight from the npz."""
         return th.from_numpy(self._frames.copy())
+
+    def load_all_wan_prefix(self):
+        """(N, 1, 48, h, w) float32 image latent of the tick before each window, or None when the package has none."""
+        return None if self._wan_prefix is None else th.from_numpy(self._wan_prefix.copy()).unsqueeze(1)
 
     def load_all_actions(self):
         """(keypress, mouse) float32, in the model's NATIVE conditioning encoding.

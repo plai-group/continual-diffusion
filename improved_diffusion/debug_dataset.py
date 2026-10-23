@@ -18,7 +18,7 @@ class ContinuousDebugDataset(Dataset):
     Sliding-window dataset over the plaicraft-debug HDF5 corpus.
 
     Layout: <dataset_path>/<session_id>/encoded_video_hdf5/<session_id>_encoded_video.hdf5
-    Each file has dataset key "frames", shape (N, 3, H, W), float32, already in [-1, 1].
+    Each file has dataset key "frames", shape (N, 3, H, W), float32, already in [-1, 1] (uint8 pixel corpora are mapped x/127.5-1).
 
     Sessions are discovered by globbing (no global_database.db dependency). The last
     (up to) 20 sessions by sorted session id are held out as the test split.
@@ -229,7 +229,8 @@ class ContinuousDebugDataset(Dataset):
 
         local_start = start_frame - fs
         handle = self._get_h5_handle(path)
-        frames = torch.from_numpy(handle["frames"][local_start:local_start + self.T]).float()
+        frames = torch.from_numpy(handle["frames"][local_start:local_start + self.T])
+        frames = frames.float() / 127.5 - 1 if frames.dtype == torch.uint8 else frames.float()  # uint8 pixel corpora (#100)
 
         if frames.shape[0] != self.T:
             raise IndexError(f"Incomplete window at index {idx}, should have been discarded.")

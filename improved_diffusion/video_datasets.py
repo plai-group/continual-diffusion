@@ -124,6 +124,16 @@ default_full_image_size_dict = {
     "plaicraft_morgan":    (24, 40),
 }
 
+def full_image_size(dataset):
+    """(H, W) for a dataset; plaicraft_morgan reads it off the corpus's `frames` shape (plaicraft-debug#100)."""
+    if dataset == "plaicraft_morgan":
+        import h5py
+        for f in sorted(Path(video_data_paths_dict[dataset]).glob("*/encoded_video_hdf5/*.hdf5"))[:1]:
+            with h5py.File(f, "r") as h:
+                return tuple(int(d) for d in h["frames"].shape[-2:])
+    return default_full_image_size_dict[dataset]
+
+
 eval_dataset_configs = {"default": "default", "continuous": "continuous", "chunked": "chunked"}
 
 

@@ -10,7 +10,7 @@ import torch
 import torch.distributed as dist
 
 from improved_diffusion import dist_util
-from improved_diffusion.video_datasets import load_data, default_T_dict, default_full_image_size_dict, plaicraft_valset_kwargs
+from improved_diffusion.video_datasets import load_data, default_T_dict, full_image_size, plaicraft_valset_kwargs
 from improved_diffusion.resample import create_named_schedule_sampler
 from improved_diffusion.script_util import (
     model_and_diffusion_defaults,
@@ -104,7 +104,7 @@ def main():
         print(f"num_workers is not specified. It is automatically set to \"number of cores - 1\" = {args.num_workers}")
 
     # Set T and image size
-    default_image_size = default_full_image_size_dict[args.dataset]
+    default_image_size = full_image_size(args.dataset)
     args.T = default_T_dict[args.dataset] if args.T == -1 else args.T
     assert args.T == args.max_frames, "T and max_frames must be equal"
     args.num_frames = args.T

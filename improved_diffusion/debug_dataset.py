@@ -122,13 +122,16 @@ class ContinuousDebugDataset(Dataset):
         self.file_boundaries = []  # list of (frame_start, frame_end, path)
         total_frames = 0
         frame_shape = None  # (C, H, W), must agree across every session
-        tick_info = None  # (ticks_per_latent, tick_offset) from the frames attrs; must agree too
+        tick_info = None  # (ticks_per_latent, tick_offset, clip layout) from the frames attrs; must agree too
         for path in session_files:
             with h5py.File(path, "r") as f:
                 n, *chw = f["frames"].shape
-                info = (int(f["frames"].attrs.get("ticks_per_latent", 1)), int(f["frames"].attrs.get("tick_offset", 0)))
+                a = f["frames"].attrs
+                clips = a.get("layout", "stream") == "clips"  # plaicraft-debug#99: independent fresh-encoded clips, frames (N, C, T, h, w)
+                info = (int(a.get("ticks_per_latent", 1)), int(a.get("tick_offset", 0)),
+                        (int(a["clip_start"]), int(a["clip_stride"]), int(a["clip_ticks"])) if clips else None)
             chw = tuple(chw)
-            assert tick_info in (None, info), f"inconsistent (ticks_per_latent, tick_offset) {tick_info} vs {info} at {path}"
+            assert tick_info in (None, info), f"inconsistent (ticks_per_latent, tick_offset, clips) {tick_info} vs {info} at {path}"
             tick_info = info
             if frame_shape is None:
                 frame_shape = chw
@@ -145,7 +148,9 @@ class ContinuousDebugDataset(Dataset):
             total_frames += n
         self.total_frames = total_frames
         self.frame_shape = frame_shape
-        self.ticks_per_latent, self.tick_offset = tick_info
+        self.ticks_per_latent, self.tick_offset, self.clips = tick_info
+        if self.clips:
+            assert frame_shape[1] == self.T, f"clip corpus has T={frame_shape[1]} latents per clip, but window_length={self.T}"
 
         self.frame_range = self.original_frame_range
         if self.frame_range[1] is None or self.frame_range[1] > total_frames:
@@ -157,13 +162,17 @@ class ContinuousDebugDataset(Dataset):
         self.window_starts = self._build_window_starts(step=1)
 
     def _build_window_starts(self, step):
-        """Valid window start positions, never straddling a session boundary."""
+        """Valid window start positions, never straddling a session boundary (clips: one window per clip index)."""
+        if self.clips:
+            step, span = 1, 1
+        else:
+            span = self.T
         starts = []
         for (fs, fe, _path) in self.file_boundaries:
             lo = max(fs, self.frame_range[0])
             hi = min(fe, self.frame_range[1])
             s = lo
-            while s + self.T <= hi:
+            while s + span <= hi:
                 starts.append(s)
                 s += step
         return starts
@@ -223,7 +232,7 @@ class ContinuousDebugDataset(Dataset):
 
     def __getitem__(self, idx):
         start_frame = self._get_start_frame_index(idx)
-        end_frame = start_frame + self.T
+        end_frame = start_frame + (1 if self.clips else self.T)
 
         for (fs, fe, path) in self.file_boundaries:
             if fs <= start_frame < fe:
@@ -234,7 +243,10 @@ class ContinuousDebugDataset(Dataset):
 
         local_start = start_frame - fs
         handle = self._get_h5_handle(path)
-        frames = torch.from_numpy(handle["frames"][local_start:local_start + self.T]).float()
+        if self.clips:
+            frames = torch.from_numpy(handle["frames"][local_start]).float().transpose(0, 1)  # (C, T, h, w) -> (T, C, h, w)
+        else:
+            frames = torch.from_numpy(handle["frames"][local_start:local_start + self.T]).float()
 
         if frames.shape[0] != self.T:
             raise IndexError(f"Incomplete window at index {idx}, should have been discarded.")
@@ -243,7 +255,7 @@ class ContinuousDebugDataset(Dataset):
         keypress_array, mouse_array = self._get_action_arrays(session_dir)
         keypress, mouse = (self._tick_slice(a, local_start) for a in (keypress_array, mouse_array))
 
-        absolute_index_map = torch.arange(start_frame, end_frame, dtype=torch.int64)
+        absolute_index_map = torch.arange(start_frame, start_frame + self.T, dtype=torch.int64)  # clips: clip index, T entries
         # Per-sequence: a window never straddles a session, so this needs no gather.
         player_id = torch.tensor(self._session_players[session_dir], dtype=torch.long)
         return frames, absolute_index_map, keypress, mouse, player_id
@@ -251,7 +263,12 @@ class ContinuousDebugDataset(Dataset):
     def _tick_slice(self, arr, local_start):
         """Latent window [ls, ls+T) -> ticks [off + k*ls, off + k*(ls+T)) reshaped to (T, k*D)."""
         k, off = self.ticks_per_latent, self.tick_offset
-        a = torch.from_numpy(np.asarray(arr[off + k * local_start:off + k * (local_start + self.T)])).float()
+        if self.clips:  # clip c: ticks [start + stride*c - (k*T - clip_ticks), +k*T), i.e. the clip plus its preceding history ticks
+            start, stride, n = self.clips
+            lo = start + stride * local_start - (k * self.T - n)
+            a = torch.from_numpy(np.asarray(arr[lo:lo + k * self.T])).float()
+        else:
+            a = torch.from_numpy(np.asarray(arr[off + k * local_start:off + k * (local_start + self.T)])).float()
         assert a.shape[0] == k * self.T, f"action array too short for window at {local_start}: {a.shape[0]} < {k * self.T}"
         return a.reshape(self.T, k * a.shape[1])
 

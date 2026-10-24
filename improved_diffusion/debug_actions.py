@@ -379,7 +379,10 @@ def _n_ticks_from_hdf5(session_dir):
     if not matches:
         raise FileNotFoundError(f"no hdf5 file under {hdf5_dir}")
     with h5py.File(matches[0], "r") as f:
-        d = f["frames"]  # latent corpora (plaicraft-debug#99) span tick_offset + ticks_per_latent * N ticks
+        d = f["frames"]
+        if d.attrs.get("layout", "stream") == "clips":  # clip corpora (plaicraft-debug#99) record the session's tick count
+            return int(d.attrs["n_ticks"])
+        # latent corpora (plaicraft-debug#99) span tick_offset + ticks_per_latent * N ticks
         return int(d.attrs.get("tick_offset", 0)) + int(d.attrs.get("ticks_per_latent", 1)) * d.shape[0]
 
 

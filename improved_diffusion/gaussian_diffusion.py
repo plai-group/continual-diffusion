@@ -1316,19 +1316,15 @@ class GaussianDiffusion:
             self.vae.to("cpu")
             th.cuda.empty_cache()
 
-    def _wan_decode(self, video, prefix=None):
-        """(B, T, 48, h, w) normalized latents -> (B, 1+4(T-1), 3, H, W) in [-1, 1]; each clip is ONE causal video.
-        With prefix (B, 1, 48, h, w), a single-frame image latent before the window: decode [prefix, video], drop frame 0 -> (B, 4T, ...)."""
+    def _wan_decode(self, video):
+        """(B, T, 48, h, w) normalized latents -> (B, 1+4(T-1), 3, H, W) in [-1, 1]; each row is ONE fresh clip (latent 0 = a single image)."""
         dtype, device = video.dtype, video.device
-        if prefix is not None:
-            video = th.cat([prefix.to(video), video], 1)
         with self._wan_vae() as (vae, mean, std):
             outs = []
             for z in video:  # one sample at a time to bound peak memory
                 z = z.permute(1, 0, 2, 3).unsqueeze(0).to(vae.device, self.enc_dec_dtype) * std + mean
                 outs.append(vae.decode(z).sample.clamp(-1, 1)[0].permute(1, 0, 2, 3).cpu())
-        out = th.stack(outs).to(device=device, dtype=dtype)
-        return out if prefix is None else out[:, 1:]
+        return th.stack(outs).to(device=device, dtype=dtype)
 
     def _wan_encode(self, video):
         """(B, 1+4n, 3, H, W) pixels -> (B, n+1, 48, h, w) normalized latents (latent 0 is the single first frame)."""
@@ -1361,12 +1357,12 @@ class GaussianDiffusion:
 
     # Make the decode method based on the above method that decodes the video.
     @th.no_grad()
-    def decode(self, video, chunk_size=20, prefix=None):
+    def decode(self, video, chunk_size=20):
         if self.diffusion_space == "pixel":
             return video
         elif self.diffusion_space == "latent":
             if self.vae_name == "wan22":
-                return self._wan_decode(video, prefix)
+                return self._wan_decode(video)
             original_shape, original_device = video.shape, video.device
             video = video.flatten(0, 1).to(self.enc_dec_dtype).to(self.vae.device)
 

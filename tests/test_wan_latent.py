@@ -100,15 +100,15 @@ K, T, N_OBS = 4, 6, 3
 NAMES = ["a", "b"]
 
 
-def _fixture(tmp_path):
+def _fixture(tmp_path, ws=(100, 200), boundary_shift=0):
     vdir = tmp_path / "validation"
-    vdir.mkdir()
+    vdir.mkdir(parents=True)
     n = len(NAMES)
-    ws = np.array([100, 200], dtype=np.int64)
+    ws = np.array(ws, dtype=np.int64)
     np.savez(vdir / "validation.npz", frames=np.zeros((n, T, 48, 2, 2), np.float32),
              keypress=np.zeros((n, K * T, 8), np.float32), mouse=np.zeros((n, K * T, 2), np.float32),
              names=np.array(NAMES), session_ids=np.array(["s0", "s1"]),
-             window_start_ticks=ws, boundary_ticks=ws + K * N_OBS)
+             window_start_ticks=ws, boundary_ticks=ws + K * N_OBS + boundary_shift)
     (vdir / "manifest.json").write_text(json.dumps({
         "schema_version": "1", "corpus_dir": str(tmp_path), "tick_ms": 100, "subbin_ms": 10, "subbin_rule_version": "1",
         "T": T, "n_observed": N_OBS, "n_held_out_sessions": 20, "built_at": "2026-01-01T00:00:00Z",
@@ -148,37 +148,42 @@ def test_corpus_validation_rejects_boundary_not_at_k_times_n_observed(tmp_path):
         CorpusValidationSet(vdir, T=T, n_observed=N_OBS)  # k=1 expects T-length action arrays
 
 
-def test_wan_decode_with_prefix_returns_4T_frames_and_drops_prefix_frame():
+CLIP_WS = [4 + 20 * c - 3 for c in (5, 10)]  # clip package: window_start = clip_start - 3, boundary = clip_start + 9
+
+
+def test_clip_rows_decode_to_21_frames_with_9_ctx_and_12_gen():
     d = _wan_diffusion()
-    T, h, w = 6, 2, 3
-    z = th.stack([th.full((48, h, w), (j + 1) / 100) for j in range(T)]).unsqueeze(0)
-    prefix = th.full((1, 1, 48, h, w), 0.5)
-    px = d.decode(z, prefix=prefix)
-    assert px.shape == (1, 4 * T, 3, 4 * h, 4 * w) and d.vae.last_z.shape == (1, 48, T + 1, h, w)
-    assert th.allclose(d.vae.last_z[0, 0, 0], th.tensor(0.5 * STD + MEAN))  # prefix is latent 0 of the clip
-    for j in range(T):  # window latent j owns frames 4j..4j+3, aligned with its ticks
-        assert th.allclose(px[:, 4 * j:4 * j + 4], th.full_like(px[:, :4], (j + 1) / 100 * STD + MEAN))
-    assert d.decode(z).shape[1] == 1 + 4 * (T - 1)  # no prefix: unchanged
+    px = d.decode(th.zeros(2, T, 48, 2, 2))
+    assert px.shape[1] == 21 and px.shape[1] - d.px_per_latent * (T - N_OBS) == 9
+    assert "prefix" not in d.decode.__code__.co_varnames and not hasattr(CorpusValidationSet, "load_all_wan_prefix")
 
 
-def test_decode_if_latent_forwards_prefix_only_when_given():
-    class D:
-        diffusion_space = "latent"
-        def decode(self, v, chunk_size=20, prefix=None): return (v, prefix)
-    from improved_diffusion.debug_validation import _decode_if_latent
-    assert _decode_if_latent(D(), 1)[1] is None and _decode_if_latent(D(), 1, 2)[1] == 2
+def test_clip_rows_require_12_ticks_between_window_start_and_boundary(tmp_path):
+    CorpusValidationSet(_fixture(tmp_path / "ok", ws=CLIP_WS), T=T, n_observed=N_OBS, ticks_per_latent=K)
+    for shift in (-1, 1):
+        with pytest.raises(ValueError, match="boundary_tick - window_start"):
+            CorpusValidationSet(_fixture(tmp_path / f"bad{shift}", ws=CLIP_WS, boundary_shift=shift), T=T, n_observed=N_OBS, ticks_per_latent=K)
 
 
-def test_render_panels_with_prefix_aligns_frame_i_with_tick_i(tmp_path, monkeypatch):
+def test_km_ctx14_context_is_tokenized_over_window_start_to_boundary(tmp_path, monkeypatch):
+    vdir = _fixture(tmp_path, ws=CLIP_WS)
+    monkeypatch.setattr(ctx14_10hz, "load_ctx14_tokenizer", lambda checkpoint_dir, device: object())
+    monkeypatch.setattr(debug_actions, "load_or_build", lambda d, **kw: (np.zeros((500, 32), np.float32), None))
+    calls = []
+    monkeypatch.setattr(debug_actions, "encode_km_ctx14_context", lambda sd, ws, b, *a: calls.append((ws, b)) or np.zeros((b - ws, 32), np.float32))
+    monkeypatch.setattr(debug_actions, "load_or_build_raw", lambda d, action_builder: (np.zeros((500, 8)), np.zeros((500, 2))))
+    vs = CorpusValidationSet(vdir, T=T, n_observed=N_OBS, action_encoding="km_ctx14", session_root=tmp_path / "c", action_builder="raw79", ticks_per_latent=K)
+    codes, _ = vs.load_all_actions()
+    assert calls == [(w, w + 12) for w in CLIP_WS] and codes.shape == (2, T, K * 32)
+
+
+def test_render_panels_shows_the_last_21_of_24_action_ticks(tmp_path, monkeypatch):
     import imageio
 
-    written = []
-    monkeypatch.setattr(imageio, "get_writer", lambda *a, **k: type("W", (), {"append_data": lambda _s, f: written.append(f), "close": lambda _s: None})())
+    monkeypatch.setattr(imageio, "get_writer", lambda *a, **k: type("W", (), {"append_data": lambda _s, f: None, "close": lambda _s: None})())
     seen = []
     monkeypatch.setattr("improved_diffusion.debug_validation._action_vec_to_bar", lambda k, m: seen.append(float(k[0])))
     monkeypatch.setattr("improved_diffusion.debug_validation._overlay_frame", lambda f, bar, border: f)
-    F = 12  # 3 latents * 4 ticks; prefix decode => frames == ticks
-    frames = np.zeros((F, 3, 24, 40), np.float32)
-    acts = (np.arange(F, dtype=np.float32)[:, None].repeat(79, 1), np.zeros((F, 2), np.float32))
-    _render_panels((frames,), (acts,), ["GT"], 4, str(tmp_path / "o.mp4"), ncols=1, fps=10)
-    assert seen[:-1] == list(range(1, F))  # frame i shows tick i's display-shifted bar (cache[i+1]); no extra right-align offset
+    acts = (np.arange(24, dtype=np.float32)[:, None].repeat(79, 1), np.zeros((24, 2), np.float32))  # 3 history ticks + 21 clip ticks
+    _render_panels((np.zeros((21, 3, 24, 40), np.float32),), (acts,), ["GT"], 9, str(tmp_path / "o.mp4"), ncols=1, fps=10)
+    assert len(seen) == 21 and seen[:-1] == list(range(4, 24))  # frame f shows tick-row 3+f, display-shifted one row (cache[i+1]); row 3 is the clip's first tick

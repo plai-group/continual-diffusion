@@ -38,10 +38,10 @@ def _rope_freqs(dims):
     return torch.cat([1.0 / 10000 ** (torch.arange(0, dm, 2, dtype=torch.float64) / dm) for dm in dims])
 
 
-def rope_tables(T, grid, extra_j, head_dim, ticks_per_latent=1, device=None):
+def rope_tables(T, grid, extra_j, head_dim, ticks_per_latent=1, device=None, action_tick_offset=0):
     """(cos, sin) of shape (T, N + len(extra_j), head_dim/2). Video tokens get Wan's 3D split
     (t = d - 4(d//6), h = w = 2(d//6)) with t in tick units; action tokens get 1D RoPE over the
-    full head dim at tick ticks_per_latent*L + j."""
+    full head dim at tick ticks_per_latent*L + j + action_tick_offset (-3 with k=4: the last action of latent L shares its frame time)."""
     d, k, (gh, gw) = head_dim, ticks_per_latent, grid
     dims = [d - 4 * (d // 6), 2 * (d // 6), 2 * (d // 6)]
     assert all(dm % 2 == 0 for dm in dims), f"head_dim {d} gives odd rope split {dims}"
@@ -52,7 +52,7 @@ def rope_tables(T, grid, extra_j, head_dim, ticks_per_latent=1, device=None):
                        torch.arange(gw).repeat(gh).double()[None].expand(T, N)], -1)  # (T, N, 3)
     ang = [vid[..., axis] * _rope_freqs(dims)]
     if len(extra_j):
-        tick = k * L[:, None] + torch.tensor(extra_j, dtype=torch.float64)[None]  # (T, E)
+        tick = k * L[:, None] + torch.tensor(extra_j, dtype=torch.float64)[None] + action_tick_offset  # (T, E)
         ang.append(tick[..., None] * _rope_freqs([d]))
     ang = torch.cat(ang, 1)
     return ang.cos().float().to(device), ang.sin().float().to(device)
@@ -447,6 +447,7 @@ class VDT(nn.Module):
         pos_encoding='sincos',
         attention='factorized',
         ticks_per_latent=1,
+        action_tick_offset=0,
     ):
         super().__init__()
         self.learn_sigma = learn_sigma
@@ -461,6 +462,7 @@ class VDT(nn.Module):
         self.ticks_per_latent = k = int(ticks_per_latent)
         assert k == 1 or mouse_dim == 0, "ticks_per_latent > 1 requires mouse_dim == 0"
         assert k == 1 or generate_actions or action_token_cond, "ticks_per_latent > 1 requires action tokens"
+        self.action_tick_offset = int(action_tick_offset)
         self.tick_action_dim = action_dim
         self.action_dim = action_dim * k
         self.mouse_dim = mouse_dim
@@ -719,7 +721,7 @@ class VDT(nn.Module):
         rope = None
         if self.pos_encoding == 'rope3d':
             extra_j = list(range(k)) * int(use_action_tokens) + [0] * int(use_mouse_tokens)
-            rope = rope_tables(T, self.x_embedder.grid_size, extra_j, tokens.shape[-1] // self.num_heads, k, device=tokens.device)
+            rope = rope_tables(T, self.x_embedder.grid_size, extra_j, tokens.shape[-1] // self.num_heads, k, device=tokens.device, action_tick_offset=self.action_tick_offset)
         for block in self.blocks:
             tokens = block(tokens, c, rope=rope)            # (B*T, N+1, D) or (B*T, N, D)
 

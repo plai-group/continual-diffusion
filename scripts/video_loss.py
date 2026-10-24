@@ -31,6 +31,7 @@ from improved_diffusion.script_util import (
     backfill_pos_encoding,
     backfill_attention,
     backfill_ticks_per_latent,
+    backfill_action_tick_offset,
 )
 from improved_diffusion.test_util import get_model_results_path, get_eval_run_identifier, Protect
 from improved_diffusion.sampling_schemes import sampling_schemes
@@ -119,6 +120,7 @@ def main(args):
     backfill_pos_encoding(model_args)  # predates the flag; sincos
     backfill_attention(model_args)  # predates the flag; factorized
     backfill_ticks_per_latent(model_args)  # predates the flag; one token per frame
+    backfill_action_tick_offset(model_args)  # predates the flag; offset 0
     model, diffusion = create_model_and_diffusion(model_type=model_args.model_type,
         **args_to_dict(model_args, model_and_diffusion_defaults(model_type=model_args.model_type).keys())
     )

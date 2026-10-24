@@ -211,6 +211,7 @@ def vdt_model_and_diffusion_defaults():
         pos_encoding="sincos",  # "sincos" | "rope3d" (Wan 3D RoPE for video, 1D RoPE for actions); see plaicraft-debug#99
         attention="factorized",  # "factorized" | "full" (one attention over all frames' tokens, no temporal sublayer); see plaicraft-debug#99
         ticks_per_latent=1,  # action ticks per latent frame (Wan: 4); the model splits k*action_dim into k tokens; see plaicraft-debug#99
+        action_tick_offset=0,  # shifts action tokens' RoPE tick (-3 with k=4: last action of latent L sits at the frame's tick); see plaicraft-debug#99
         keypress_loss_weight=1.0,
         mouse_loss_weight=1.0,
         action_quantization="none",  # "none" | "codebook" | "fsq"; see plaicraft-debug#77, #80
@@ -258,6 +259,7 @@ def create_vdt_model_and_diffusion(
     pos_encoding="sincos",
     attention="factorized",
     ticks_per_latent=1,
+    action_tick_offset=0,
 ):
     diffusion = create_gaussian_diffusion(
         steps=diffusion_steps,
@@ -300,6 +302,7 @@ def create_vdt_model_and_diffusion(
         pos_encoding=pos_encoding,
         attention=attention,
         ticks_per_latent=ticks_per_latent,
+        action_tick_offset=action_tick_offset,
     )
     return model, diffusion
 
@@ -425,6 +428,12 @@ def backfill_ticks_per_latent(model_args):
     """Pre-#99 checkpoints have no ticks_per_latent saved; they all had one action token per frame."""
     if not hasattr(model_args, "ticks_per_latent"):
         model_args.ticks_per_latent = 1
+
+
+def backfill_action_tick_offset(model_args):
+    """Pre-offset checkpoints have no action_tick_offset saved; action tokens sat at tick k*L + j."""
+    if not hasattr(model_args, "action_tick_offset"):
+        model_args.action_tick_offset = 0
 
 
 def str2bool(v):

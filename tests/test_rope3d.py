@@ -6,7 +6,7 @@ import os
 import pytest
 import torch
 
-from improved_diffusion.script_util import backfill_pos_encoding
+from improved_diffusion.script_util import backfill_action_tick_offset, backfill_pos_encoding
 from improved_diffusion.vdt import RopeAttention, VDT_S_2, apply_rope, rope_tables, rope_view
 
 KW = dict(input_size=16, patch_size=4, in_channels=3, num_frames=4, learn_sigma=False, action_dim=5, generate_actions=True)
@@ -108,3 +108,38 @@ def test_backfill_pos_encoding():
     ns.pos_encoding = "rope3d"
     backfill_pos_encoding(ns)
     assert ns.pos_encoding == "rope3d"
+
+
+def test_action_tick_offset_zero_is_identical_and_minus3_shifts_only_action_rows():
+    args, extra = (3, (2, 2), [0, 1, 2, 3], 64), 4
+    base, off0, off3 = (rope_tables(*args, ticks_per_latent=4, **kw) for kw in ({}, dict(action_tick_offset=0), dict(action_tick_offset=-3)))
+    assert all(torch.equal(a, b) for a, b in zip(base, off0))
+    n_vid = 4  # 2x2 patches precede the action rows
+    assert all(torch.equal(a[:, :n_vid], b[:, :n_vid]) for a, b in zip(base, off3)) and not torch.equal(base[0][:, n_vid:], off3[0][:, n_vid:])
+    shifted = rope_tables(3, (2, 2), [-3, -2, -1, 0], 64, ticks_per_latent=4)  # same ticks, spelled via extra_j
+    assert all(torch.equal(a, b) for a, b in zip(off3, shifted))
+    # the last action of latent L sits at the frame tick 4L, i.e. where a j=0 token of latent L sits (k=4, no offset)
+    assert torch.equal(off3[0][2, -1], rope_tables(3, (2, 2), [0], 64, ticks_per_latent=4)[0][2, -1])
+
+
+def test_vdt_action_tick_offset_plumbs_and_backfills():
+    import argparse
+    from improved_diffusion.script_util import create_model_and_diffusion, model_and_diffusion_defaults
+    kw = dict(KW, action_dim=3, ticks_per_latent=4, pos_encoding="rope3d")
+    assert VDT_S_2(**kw).action_tick_offset == 0 and VDT_S_2(action_tick_offset=-3, **kw).action_tick_offset == -3
+    assert model_and_diffusion_defaults(model_type="vdt")["action_tick_offset"] == 0
+    ns = argparse.Namespace()
+    backfill_action_tick_offset(ns)
+    assert ns.action_tick_offset == 0
+    ns.action_tick_offset = -3
+    backfill_action_tick_offset(ns)
+    assert ns.action_tick_offset == -3
+    torch.manual_seed(0)
+    a, b = VDT_S_2(**kw).eval(), VDT_S_2(action_tick_offset=-3, **kw).eval()
+    for m in (a, b):  # final layers are zero-init, which would hide any difference
+        torch.nn.init.normal_(m.final_layer.linear.weight, std=0.02)
+        for blk in m.blocks:
+            torch.nn.init.normal_(blk.adaLN_modulation[-1].weight, std=0.02)
+    b.load_state_dict(a.state_dict())
+    x, t, act = torch.randn(1, 4, 3, 16, 16), torch.tensor([10]), torch.randn(1, 4, 12)
+    assert not torch.allclose(a(x, timesteps=t, actions=act)[0], b(x, timesteps=t, actions=act)[0])

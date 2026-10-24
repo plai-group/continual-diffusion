@@ -35,6 +35,7 @@ from improved_diffusion.script_util import (
     backfill_pos_encoding,
     backfill_attention,
     backfill_ticks_per_latent,
+    backfill_action_tick_offset,
     create_model_and_diffusion,
     model_and_diffusion_defaults,
 )
@@ -82,6 +83,7 @@ def main():
     backfill_pos_encoding(ns)  # predates the flag; sincos
     backfill_attention(ns)  # predates the flag; factorized
     backfill_ticks_per_latent(ns)  # predates the flag; one token per frame
+    backfill_action_tick_offset(ns)  # predates the flag; offset 0
     model, diffusion = create_model_and_diffusion(
         model_type=ns.model_type,
         **args_to_dict(ns, model_and_diffusion_defaults(model_type=ns.model_type).keys()),

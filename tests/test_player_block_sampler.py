@@ -100,3 +100,12 @@ def test_window_players_matches_the_label_getitem_returns(tmp_path):
     assert len(labels) == len(ds)
     for i in range(0, len(ds), 7):
         assert int(ds[i][-1]) == int(labels[i])
+
+
+def test_resume_past_one_pass_wraps_instead_of_yielding_nothing():
+    # #99 job 2585417: next_index 2850006 > len(indices) left every pass empty and the loader spun.
+    fresh = DistributedOfflineSampler(_Fake(np.zeros(10)), batch_size=2, num_replicas=1, rank=0)
+    stream = list(fresh) * 3
+    resumed = DistributedOfflineSampler(_Fake(np.zeros(10)), batch_size=2, num_replicas=1, rank=0)
+    resumed.start_index = 26
+    assert list(resumed) + list(resumed) == stream[26:26 + 14 + 20]

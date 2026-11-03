@@ -162,7 +162,9 @@ class DistributedOfflineSampler(DistributedSampler):
             indices += indices[:padding_size]
         assert len(indices) % self.num_replicas == 0
 
-        local_indices = indices[self.start_index+self.rank : len(indices) : self.num_replicas]
+        # next_index never wraps, so a resume past one pass must too; later passes start from 0.
+        local_indices = indices[self.start_index % len(indices) + self.rank : len(indices) : self.num_replicas]
+        self.start_index = 0
 
         for i, idx in enumerate(local_indices):
             # Each device samples self.local_batch_size times per timestep

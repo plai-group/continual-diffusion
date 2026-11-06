@@ -335,9 +335,9 @@ class _CFGWrapper(nn.Module):
 class _IDMWrapper(nn.Module):
     """Inverse dynamics: the video token sees noise level 0 while the action token keeps the sampler's level (UWM-style independent timesteps)."""
 
-    def __init__(self, model):
+    def __init__(self, model, video_t0=True):
         super().__init__()
-        self.model = model
+        self.model, self.video_t0 = model, video_t0
 
     def __getattr__(self, name):
         try:
@@ -346,7 +346,7 @@ class _IDMWrapper(nn.Module):
             return getattr(self.model, name)
 
     def forward(self, x, timesteps, **kwargs):
-        return self.model(x, timesteps=th.zeros_like(timesteps), action_timesteps=timesteps, **kwargs)
+        return self.model(x, timesteps=th.zeros_like(timesteps) if self.video_t0 else timesteps, action_timesteps=timesteps, **kwargs)
 
 
 # _invert_actions/_swap_actions/_zero_actions operate only on RAW 8+2 arrays, never km_fsq codes or a decode/re-encode round trip -- issue-74's decode-then-reencode fed the encoder out-of-distribution logits and silently dropped shift/space swaps (fixed in 6a38b88).
@@ -648,10 +648,10 @@ def run_debug_validation(model, diffusion, valset, device, out_dir,
                          step=0, chunk_size=3, log_videos=True,
                          per_task_scalars=False, actions=True,
                          swap_test=True, cfg_scale=1.0, label_cfg_scale=1.0,
-                         teacher_force_actions=True, fvd_repeats=4, idm=False, action_samples=1):
+                         teacher_force_actions=True, fvd_repeats=4, idm=False, action_samples=1, idm_video_t0=True):
     """Sample every validation row, render overlays, log metrics to wandb.
 
-    idm=True: every frame is observed clean (video noise 0) and only the actions after the context are sampled.
+    idm=True: every frame is observed clean and only the actions after the context are sampled; idm_video_t0=False leaves the video's timestep at the sampler's instead of 0.
     action_samples=N (km encodings): key CE scores the mean decoded key probability over N samples; other metrics use the first.
 
     Returns the aggregate metric dict (also logged via ``logger.logkv``).
@@ -680,7 +680,7 @@ def run_debug_validation(model, diffusion, valset, device, out_dir,
                     if is_km_fsq or is_km_ctx14 else None)
     sampling_model = _guided(model, cfg_scale, label_cfg_scale)
     if idm:
-        sampling_model = _IDMWrapper(sampling_model)
+        sampling_model = _IDMWrapper(sampling_model, idm_video_t0)
         swap_test, fvd_repeats, log_videos = False, 0, False  # the video is GT, so these would score nothing
     # Overlay mp4s must play back at the corpus's own rate, not the 12.5Hz debug-world default.
     overlay_fps = debug_actions.KM_CTX14_FPS if is_km_ctx14 else DECODE_VIDEO_FPS

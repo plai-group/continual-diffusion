@@ -59,3 +59,9 @@ def test_idm_feeds_gt_video_everywhere_and_samples_actions(monkeypatch, tmp_path
 def test_normal_mode_still_masks_the_generated_frames(monkeypatch, tmp_path):
     _, seen, _ = _run(monkeypatch, tmp_path, idm=False)
     assert all(kw["obs_mask"][:, N_OBS:].eq(0).all() and kw.get("action_timesteps") is None for _, kw in seen)
+
+
+def test_idm_shared_t_keeps_the_sampler_timestep_for_the_video(monkeypatch, tmp_path):
+    monkeypatch.setattr(dv, "_IDMWrapper", lambda m, t0, _w=dv._IDMWrapper: _w(m, False))
+    _, seen, _ = _run(monkeypatch, tmp_path, idm=True)
+    assert any((kw["timesteps"] > 0).any() for _, kw in seen) and all(torch.equal(kw["timesteps"], kw["action_timesteps"]) for _, kw in seen)

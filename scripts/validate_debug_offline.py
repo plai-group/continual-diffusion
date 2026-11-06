@@ -56,6 +56,7 @@ def main():
                    help="Classifier-free guidance on the issue-85 player label; 1.0 = off.")
     p.add_argument("--idm", action="store_true",
                    help="inverse dynamics: all frames clean ground truth, only the actions after the context are sampled")
+    p.add_argument("--idm_shared_t", action="store_true", help="with --idm: video timestep follows the sampler instead of 0")
     p.add_argument("--action_samples", type=int, default=1,
                    help="average decoded key probabilities over N action samples per row for key CE")
     p.add_argument("--player_validation_dir", default=None,
@@ -142,7 +143,7 @@ def main():
         step=step, chunk_size=args.chunk_size, log_videos=True,
         cfg_scale=args.cfg_scale,
         label_cfg_scale=args.label_cfg_scale, idm=args.idm,
-        action_samples=args.action_samples,
+        action_samples=args.action_samples, idm_video_t0=not args.idm_shared_t,
     )
     print("\nAGGREGATE")
     for k, v in sorted(res["aggregate"].items()):

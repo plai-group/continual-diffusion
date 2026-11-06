@@ -648,10 +648,11 @@ def run_debug_validation(model, diffusion, valset, device, out_dir,
                          step=0, chunk_size=3, log_videos=True,
                          per_task_scalars=False, actions=True,
                          swap_test=True, cfg_scale=1.0, label_cfg_scale=1.0,
-                         teacher_force_actions=True, fvd_repeats=4, idm=False):
+                         teacher_force_actions=True, fvd_repeats=4, idm=False, action_samples=1):
     """Sample every validation row, render overlays, log metrics to wandb.
 
     idm=True: every frame is observed clean (video noise 0) and only the actions after the context are sampled.
+    action_samples=N (km encodings): key CE scores the mean decoded key probability over N samples; other metrics use the first.
 
     Returns the aggregate metric dict (also logged via ``logger.logkv``).
     """
@@ -816,6 +817,12 @@ def run_debug_validation(model, diffusion, valset, device, out_dir,
                                           if act_for_decode is not None else (None, None, None))
             gt_key_chunk, gt_mouse_chunk, _gt_key_prob_chunk = (_decode_km_actions(km_tokenizer, keypress_chunk, all_keys)
                                           if keypress_chunk is not None else (None, None, None))
+            if pred_key_prob_chunk is not None:
+                for _ in range(action_samples - 1):
+                    extra_act = _unpack_action_mouse_out(_sample_chunk()[1], generates_actions, generates_mouse)[0]
+                    pred_key_prob_chunk = pred_key_prob_chunk + _decode_km_actions(
+                        km_tokenizer, quantize_fn(extra_act) if action_quantization == "fsq" else extra_act, all_keys)[2]
+                pred_key_prob_chunk = pred_key_prob_chunk / action_samples
             metrics_quantize = "none"  # already hard-thresholded booleans; nothing left to snap
         elif is_raw_fused:
             # 10-dim fused token: first 8 dims are keypress, last 2 are symlog(mouse).

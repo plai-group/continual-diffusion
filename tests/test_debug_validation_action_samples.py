@@ -86,3 +86,25 @@ def test_gt_decode_floor_scores_the_gt_codes_against_true_keys(monkeypatch, tmp_
                                   swap_test=False, fvd_repeats=0)["aggregate"]
     assert agg["val/action_roll/floor_key_jaccard_distance"] == 0.0
     assert agg["val/action_roll/floor_key_cross_entropy"] < 0.1 < agg["val/action_roll/key_cross_entropy"]
+
+
+def test_per_tick_metrics_and_persistence_baseline(monkeypatch, tmp_path):
+    vs = _Valset()
+    monkeypatch.setattr(dv, "_METRICS", lambda p, g: {"psnr": 1.0})
+    monkeypatch.setattr(dv, "_get_km_tokenizer", lambda *a, **k: None)
+    monkeypatch.setattr(dv, "_decode_km_actions", lambda tok, codes, all_keys=False: (
+        (p := vs.keys79.clamp(1e-3, 1 - 1e-3)).round(), torch.zeros(N, T, 2), p) if torch.equal(codes, vs.codes) else
+        (torch.zeros(N, T, 79), torch.zeros(N, T, 2), torch.full((N, T, 79), 0.5)))
+    agg = dv.run_debug_validation(_Model(), _Diffusion(), vs, "cpu", tmp_path, chunk_size=N, log_videos=False,
+                                  swap_test=False, fvd_repeats=0)["aggregate"]
+    first = N_OBS + 1
+    assert all(f"val/action_tick/{i}/key_cross_entropy" in agg for i in range(T - first)) and f"val/action_tick/{T - first}/key_cross_entropy" not in agg
+    q = vs.keys79.reshape(-1, 79).mean(0)
+    p, last = 0.9 * vs.keys79[:, first - 1] + 0.1 * q, vs.keys79[:, first - 1]
+    for scope, ticks in (("val/action", [first]), ("val/action_tick/2", [first + 2])):
+        y = vs.keys79[:, ticks]
+        ce = -(y * p[:, None].log() + (1 - y) * (1 - p[:, None]).log()).sum(-1).mean()
+        assert abs(agg[f"{scope}/key_ce_persist"] - ce.item()) < 1e-4
+        tp, fp, fn = [((y[:, 0] == a) & (last == b)).sum(-1).float() for a, b in ((1, 1), (0, 1), (1, 0))]
+        jac = torch.where(tp + fp + fn > 0, 1 - tp / (tp + fp + fn).clamp(min=1), torch.zeros(N)).mean()
+        assert abs(agg[f"{scope}/key_jaccard_persist"] - jac.item()) < 1e-6

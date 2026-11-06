@@ -54,6 +54,8 @@ def main():
     p.add_argument("--cfg_scale", type=float, default=1.0)
     p.add_argument("--label_cfg_scale", type=float, default=1.0,
                    help="Classifier-free guidance on the issue-85 player label; 1.0 = off.")
+    p.add_argument("--idm", action="store_true",
+                   help="inverse dynamics: all frames clean ground truth, only the actions after the context are sampled")
     p.add_argument("--player_validation_dir", default=None,
                    help="paired player package (issue-85); runs the 2x2 per-player "
                         "GT-vs-generated overlay instead of the swap test")
@@ -137,7 +139,7 @@ def main():
         model, diffusion, valset, args.device, out_dir=args.out,
         step=step, chunk_size=args.chunk_size, log_videos=True,
         cfg_scale=args.cfg_scale,
-        label_cfg_scale=args.label_cfg_scale,
+        label_cfg_scale=args.label_cfg_scale, idm=args.idm,
     )
     print("\nAGGREGATE")
     for k, v in sorted(res["aggregate"].items()):

@@ -332,6 +332,23 @@ class _CFGWrapper(nn.Module):
         return eps + delta, None
 
 
+class _IDMWrapper(nn.Module):
+    """Inverse dynamics: the video token sees noise level 0 while the action token keeps the sampler's level (UWM-style independent timesteps)."""
+
+    def __init__(self, model):
+        super().__init__()
+        self.model = model
+
+    def __getattr__(self, name):
+        try:
+            return super().__getattr__(name)
+        except AttributeError:
+            return getattr(self.model, name)
+
+    def forward(self, x, timesteps, **kwargs):
+        return self.model(x, timesteps=th.zeros_like(timesteps), action_timesteps=timesteps, **kwargs)
+
+
 # _invert_actions/_swap_actions/_zero_actions operate only on RAW 8+2 arrays, never km_fsq codes or a decode/re-encode round trip -- issue-74's decode-then-reencode fed the encoder out-of-distribution logits and silently dropped shift/space swaps (fixed in 6a38b88).
 def _guided(model, cfg_scale, label_cfg_scale):
     """The model, wrapped for guidance only if some scale is actually on."""
@@ -631,8 +648,10 @@ def run_debug_validation(model, diffusion, valset, device, out_dir,
                          step=0, chunk_size=3, log_videos=True,
                          per_task_scalars=False, actions=True,
                          swap_test=True, cfg_scale=1.0, label_cfg_scale=1.0,
-                         teacher_force_actions=True, fvd_repeats=4):
+                         teacher_force_actions=True, fvd_repeats=4, idm=False):
     """Sample every validation row, render overlays, log metrics to wandb.
+
+    idm=True: every frame is observed clean (video noise 0) and only the actions after the context are sampled.
 
     Returns the aggregate metric dict (also logged via ``logger.logkv``).
     """
@@ -659,6 +678,9 @@ def run_debug_validation(model, diffusion, valset, device, out_dir,
     km_tokenizer = (_get_km_tokenizer(device, getattr(valset, "tokenizer_checkpoint", None), encoding=action_encoding)
                     if is_km_fsq or is_km_ctx14 else None)
     sampling_model = _guided(model, cfg_scale, label_cfg_scale)
+    if idm:
+        sampling_model = _IDMWrapper(sampling_model)
+        swap_test, fvd_repeats, log_videos = False, 0, False  # the video is GT, so these would score nothing
     # Overlay mp4s must play back at the corpus's own rate, not the 12.5Hz debug-world default.
     overlay_fps = debug_actions.KM_CTX14_FPS if is_km_ctx14 else DECODE_VIDEO_FPS
     k = getattr(_m, "ticks_per_latent", 1)  # action ticks per latent frame
@@ -701,6 +723,9 @@ def run_debug_validation(model, diffusion, valset, device, out_dir,
         obs_mask[:, :n_obs] = 1.0
         latent_mask = th.zeros_like(obs_mask)
         latent_mask[:, n_obs:] = 1.0
+        ctx_mask = obs_mask  # action pinning follows the context, not the all-clean IDM video
+        if idm:
+            obs_mask, latent_mask = th.ones_like(obs_mask), th.zeros_like(latent_mask)
 
         model_kwargs = {
             "frame_indices": None,
@@ -714,7 +739,7 @@ def run_debug_validation(model, diffusion, valset, device, out_dir,
         if keypress_chunk is not None:
             model_kwargs["actions"] = keypress_chunk
             if generates_actions:
-                obs_act_mask = frame_mask_to_action_mask(obs_mask)
+                obs_act_mask = frame_mask_to_action_mask(ctx_mask)
                 if not teacher_force_actions:
                     obs_act_mask = th.zeros_like(obs_act_mask)
                 model_kwargs["actions0"] = keypress_chunk
@@ -722,7 +747,7 @@ def run_debug_validation(model, diffusion, valset, device, out_dir,
         if mouse_chunk is not None:
             model_kwargs["mouse"] = mouse_chunk
             if generates_mouse:
-                obs_mouse_mask = frame_mask_to_action_mask(obs_mask)
+                obs_mouse_mask = frame_mask_to_action_mask(ctx_mask)
                 if not teacher_force_actions:
                     obs_mouse_mask = th.zeros_like(obs_mouse_mask)
                 model_kwargs["mouse0"] = mouse_chunk

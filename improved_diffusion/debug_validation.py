@@ -249,7 +249,7 @@ def _symlog(v):
 def _decode_km_actions(tokenizer, codes, all_keys=False):
     """(B, T, 36) quantized km codes -> ((B, T, K) keys bool, (B, T, 2) mouse raw pixels, (B, T, K) key probs).
     keys: sigmoid(key_logits) at _RAW_POSITIONS (K=8), or at all 79 with all_keys (PLAICraft,
-    plaicraft-debug#93), mean over the tick's 8 sub-bins, thresholded.
+    plaicraft-debug#93), max over the tick's sub-bins (GT counts a key held in ANY sub-bin), thresholded.
     mouse: mouse_pred summed over the tick's 8 sub-bins."""
     from .km_tokenizer.keypress_scatter import _RAW_POSITIONS
 
@@ -263,7 +263,7 @@ def _decode_km_actions(tokenizer, codes, all_keys=False):
     key_logits, _mouse_logits, mouse_pred = tokenizer.decode_codes(
         codes.reshape(B, T, tokenizer.config.num_tokens, tokenizer.config.fsq_dim)
     )
-    probs = th.sigmoid(key_logits if all_keys else key_logits[..., _RAW_POSITIONS]).mean(dim=2)  # (B, T, K)
+    probs = th.sigmoid(key_logits if all_keys else key_logits[..., _RAW_POSITIONS]).amax(dim=2)  # (B, T, K); mean dropped short taps: 0.29 GT round-trip Jaccard
     keys = (probs > 0.5).float()
     mouse = mouse_pred.sum(dim=2)  # (B, T, 2), raw pixels
     return keys, mouse, probs

@@ -57,3 +57,17 @@ def test_encode_km_actions_ctx14_round_trips_a_swap_intervention():
     keys_hat, mouse_hat, _ = dv._decode_km_actions(tokenizer, codes)
     assert torch.equal(keys_hat, keys)
     assert torch.allclose(mouse_hat, mouse, atol=1.0)
+
+
+def test_decode_km_actions_keeps_a_short_tap():
+    # GT keys79 is any-held over a tick's sub-bins; a mean decode dropped a 1-of-10 tap.
+    class _Tok(torch.nn.Module):
+        config = KmTokenizerCtx14_10HzConfig()
+        def __init__(self):
+            super().__init__(); self.w = torch.nn.Parameter(torch.zeros(1))
+        def decode_codes(self, codes):
+            B, T = codes.shape[:2]
+            logits = torch.full((B, T, 10, 79), -10.0); logits[:, :, 3, 5] = 10.0
+            return logits, None, torch.zeros(B, T, 10, 2)
+    keys, _, probs = dv._decode_km_actions(_Tok(), torch.zeros(1, 2, da.KM_CTX14_CODE_DIM), all_keys=True)
+    assert keys[..., 5].eq(1).all() and keys.sum() == 2 and probs[..., 5].gt(0.99).all()

@@ -485,8 +485,8 @@ _QUANTIZE_FNS = {
 }
 
 
-def _action_metrics(p_key, g_key, p_mouse, g_mouse, sl, quantize="none", is_km_fsq=False,
-                    p_key_prob=None, g_key_true=None, key_baserate_q=None):
+def _action_metrics(pred_key, gt_key, pred_mouse, gt_mouse, sl, quantize="none", is_km_fsq=False,
+                    pred_key_prob=None, gt_key_true=None, key_baserate_q=None):
     """Action metrics over one frame window, plus the all-zeros baseline.
 
     Keypress and mouse are computed independently -- either side may be None
@@ -500,37 +500,37 @@ def _action_metrics(p_key, g_key, p_mouse, g_mouse, sl, quantize="none", is_km_f
     mouse_mse's do-nothing baseline is ~3.4, so mouse keeps a *_trivial pair,
     measured from this batch's GT rows rather than hard-coded.
 
-    key_cross_entropy scores p_key_prob (a per-key probability, however the encoding
-    produced it) against g_key_true, the real multi-hot -- never a decoder round-trip.
+    key_cross_entropy scores pred_key_prob (a per-key probability, however the encoding
+    produced it) against gt_key_true, the real multi-hot -- never a decoder round-trip.
     Its key_ce_baserate partner is the same *_trivial convention: beat it or the head
     is doing no better than predicting each key's marginal.
     """
     out = {}
-    if p_key is not None and g_key is not None:
+    if pred_key is not None and gt_key is not None:
         if quantize is True:
             quantize = "codebook"
         elif quantize is False:
             quantize = "none"
         quantize_fn = _QUANTIZE_FNS[quantize]
-        p_k, g_k = quantize_fn(p_key[sl]), quantize_fn(g_key[sl])
-        tp = int(((g_k == 1) & (p_k == 1)).sum().item())
-        fp = int(((g_k == 0) & (p_k == 1)).sum().item())
-        fn = int(((g_k == 1) & (p_k == 0)).sum().item())
+        pred_k, gt_k = quantize_fn(pred_key[sl]), quantize_fn(gt_key[sl])
+        tp = int(((gt_k == 1) & (pred_k == 1)).sum().item())
+        fp = int(((gt_k == 0) & (pred_k == 1)).sum().item())
+        fn = int(((gt_k == 1) & (pred_k == 0)).sum().item())
         out["key_jaccard_distance"] = float(1 - tp / (tp + fp + fn)) if tp + fp + fn > 0 else 0.0
-    if p_mouse is not None and g_mouse is not None:
+    if pred_mouse is not None and gt_mouse is not None:
         # km_fsq and raw_fused both hand us raw-pixel mouse here (km_fsq decodes to pixels,
         # raw_fused inverts its symlog above) and need symlog at metric time; raw mode's is
         # already symlog-scale from debug_actions.load_or_build, so leave it alone (#80's B2).
-        p_m, g_m = (_symlog(p_mouse[sl]), _symlog(g_mouse[sl])) if is_km_fsq else (p_mouse[sl], g_mouse[sl])
-        out["mouse_l1"] = float((p_m - g_m).abs().mean().item())
-        out["mouse_mse"] = float(((p_m - g_m) ** 2).mean().item())
-        out["mouse_l1_trivial"] = float(g_m.abs().mean().item())
-        out["mouse_mse_trivial"] = float((g_m ** 2).mean().item())
-    if p_key_prob is not None and g_key_true is not None:
-        out["key_cross_entropy"] = float(action_ce.keypress_cross_entropy(p_key_prob[sl], g_key_true[sl]))
+        pred_m, gt_m = (_symlog(pred_mouse[sl]), _symlog(gt_mouse[sl])) if is_km_fsq else (pred_mouse[sl], gt_mouse[sl])
+        out["mouse_l1"] = float((pred_m - gt_m).abs().mean().item())
+        out["mouse_mse"] = float(((pred_m - gt_m) ** 2).mean().item())
+        out["mouse_l1_trivial"] = float(gt_m.abs().mean().item())
+        out["mouse_mse_trivial"] = float((gt_m ** 2).mean().item())
+    if pred_key_prob is not None and gt_key_true is not None:
+        out["key_cross_entropy"] = float(action_ce.keypress_cross_entropy(pred_key_prob[sl], gt_key_true[sl]))
         # q spans the whole validation set: measured from sl it is degenerate (0.0 at the
         # one-frame next scope) and window-biased at roll.
-        out["key_ce_baserate"] = float(action_ce.keypress_ce_baserate(g_key_true[sl], key_baserate_q))
+        out["key_ce_baserate"] = float(action_ce.keypress_ce_baserate(gt_key_true[sl], key_baserate_q))
     return out
 
 
@@ -787,23 +787,23 @@ def run_debug_validation(model, diffusion, valset, device, out_dir,
             act_for_decode = (quantize_fn(samples_act)
                               if action_quantization == "fsq" and samples_act is not None else samples_act)
             all_keys = is_km_ctx14 or keys79_all is not None
-            p_key_chunk, p_mouse_chunk, p_key_prob_chunk = (_decode_km_actions(km_tokenizer, act_for_decode, all_keys)
+            pred_key_chunk, pred_mouse_chunk, pred_key_prob_chunk = (_decode_km_actions(km_tokenizer, act_for_decode, all_keys)
                                           if act_for_decode is not None else (None, None, None))
-            g_key_chunk, g_mouse_chunk, _g_key_prob_chunk = (_decode_km_actions(km_tokenizer, keypress_chunk, all_keys)
+            gt_key_chunk, gt_mouse_chunk, _gt_key_prob_chunk = (_decode_km_actions(km_tokenizer, keypress_chunk, all_keys)
                                           if keypress_chunk is not None else (None, None, None))
             metrics_quantize = "none"  # already hard-thresholded booleans; nothing left to snap
         elif is_raw_fused:
             # 10-dim fused token: first 8 dims are keypress, last 2 are symlog(mouse).
-            p_key_chunk, p_mouse_chunk = ((samples_act[..., :8], debug_actions._inv_symlog(samples_act[..., 8:]))
+            pred_key_chunk, pred_mouse_chunk = ((samples_act[..., :8], debug_actions._inv_symlog(samples_act[..., 8:]))
                                           if samples_act is not None else (None, None))
-            p_key_prob_chunk = p_key_chunk  # MSE-trained toward 0/1, so already a P(pressed) estimate
-            g_key_chunk, g_mouse_chunk = ((keypress_chunk[..., :8], debug_actions._inv_symlog(keypress_chunk[..., 8:]))
+            pred_key_prob_chunk = pred_key_chunk  # MSE-trained toward 0/1, so already a P(pressed) estimate
+            gt_key_chunk, gt_mouse_chunk = ((keypress_chunk[..., :8], debug_actions._inv_symlog(keypress_chunk[..., 8:]))
                                           if keypress_chunk is not None else (None, None))
             metrics_quantize = action_quantization
         else:
-            p_key_chunk, g_key_chunk = samples_act, keypress_chunk
-            p_key_prob_chunk = p_key_chunk
-            p_mouse_chunk, g_mouse_chunk = samples_mouse, mouse_chunk
+            pred_key_chunk, gt_key_chunk = samples_act, keypress_chunk
+            pred_key_prob_chunk = pred_key_chunk
+            pred_mouse_chunk, gt_mouse_chunk = samples_mouse, mouse_chunk
             metrics_quantize = action_quantization
 
         for j in range(b):
@@ -818,25 +818,25 @@ def run_debug_validation(model, diffusion, valset, device, out_dir,
             rec = {"row": row["num"], "prompt": row["prompt"], "type": row["test_type"]}
             rec.update({f"next/{k}": v for k, v in m_next.items()})
             rec.update({f"roll/{k}": v for k, v in m_roll.items()})
-            # CE scores against the real multi-hot, not g_key -- under km_fsq that is itself a thresholded round-trip.
-            p_key_prob = p_key_prob_chunk[j].to(device) if p_key_prob_chunk is not None else None
-            g_key_true = key_true_chunk[j] if key_true_chunk is not None else None
-            p_key = p_key_chunk[j].to(device) if p_key_chunk is not None and g_key_chunk is not None else None
-            g_key = g_key_chunk[j].to(device) if p_key is not None else None
-            p_mouse = p_mouse_chunk[j].to(device) if p_mouse_chunk is not None and g_mouse_chunk is not None else None
-            g_mouse = g_mouse_chunk[j].to(device) if p_mouse is not None else None
-            if p_key is not None or p_mouse is not None or p_key_prob is not None:
+            # CE scores against the real multi-hot, not gt_key -- under km_fsq that is itself a thresholded round-trip.
+            pred_key_prob = pred_key_prob_chunk[j].to(device) if pred_key_prob_chunk is not None else None
+            gt_key_true = key_true_chunk[j] if key_true_chunk is not None else None
+            pred_key = pred_key_chunk[j].to(device) if pred_key_chunk is not None and gt_key_chunk is not None else None
+            gt_key = gt_key_chunk[j].to(device) if pred_key is not None else None
+            pred_mouse = pred_mouse_chunk[j].to(device) if pred_mouse_chunk is not None and gt_mouse_chunk is not None else None
+            gt_mouse = gt_mouse_chunk[j].to(device) if pred_mouse is not None else None
+            if pred_key is not None or pred_mouse is not None or pred_key_prob is not None:
                 # Row n_obs is pinned GT (the action mask lags by one row), so the first genuinely generated action is row n_obs + 1.
                 first_gen = k * (n_obs + 1)  # in ticks
                 for scope, sl in (("next", slice(first_gen, first_gen + 1)),
                                   ("roll", slice(first_gen, None))):
                                   # next is just the next frame, roll is all rollout frames
                     rec.update({f"{scope}/{k}": v
-                                for k, v in _action_metrics(p_key, g_key, p_mouse, g_mouse, sl,
+                                for k, v in _action_metrics(pred_key, gt_key, pred_mouse, gt_mouse, sl,
                                                              metrics_quantize,
                                                              is_km_fsq=is_km_fsq or is_km_ctx14 or is_raw_fused,
-                                                             p_key_prob=p_key_prob,
-                                                             g_key_true=g_key_true,
+                                                             pred_key_prob=pred_key_prob,
+                                                             gt_key_true=gt_key_true,
                                                              key_baserate_q=key_baserate_q).items()})
             per_row.append(rec)
 
@@ -970,8 +970,8 @@ def run_debug_validation(model, diffusion, valset, device, out_dir,
             if log_videos and not (swap_test and row_has_swap) and keypress_raw_chunk is not None:
                 try:
                     gt_bars = (key_true_chunk[j].cpu().numpy(), mouse_raw_chunk[j].cpu().numpy())
-                    gen_bars = ((p_key_chunk[j].cpu().numpy(), p_mouse_chunk[j].cpu().numpy())
-                                if p_key_chunk is not None and p_mouse_chunk is not None else gt_bars)
+                    gen_bars = ((pred_key_chunk[j].cpu().numpy(), pred_mouse_chunk[j].cpu().numpy())
+                                if pred_key_chunk is not None and pred_mouse_chunk is not None else gt_bars)
                     mp4 = out_dir / f"step{step}_{slug}_gen.mp4"
                     _render_panels((gt.cpu().numpy(), pred.cpu().numpy()), (gt_bars, gen_bars),
                                    ["GT", "GEN"], px_obs, str(mp4), ncols=2, fps=overlay_fps)

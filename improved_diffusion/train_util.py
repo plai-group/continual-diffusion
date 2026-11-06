@@ -67,6 +67,7 @@ class TrainLoop:
         debug_validation=None,
         player_validation=None,
         video_log_every=1,
+        use_bf16=False,
     ):
         # (valset, out_dir) for the issue-58 plaicraft-debug validation set, or None.
         self.debug_validation = debug_validation
@@ -87,6 +88,7 @@ class TrainLoop:
         self.save_interval = save_interval
         self.resume_checkpoint = resume_checkpoint
         self.use_fp16 = use_fp16
+        self.use_bf16 = use_bf16
         self.fp16_scale_growth = fp16_scale_growth
         self.diffusion_space_kwargs = diffusion_space_kwargs
         self.schedule_sampler = schedule_sampler or UniformSampler(diffusion)
@@ -535,11 +537,12 @@ class TrainLoop:
                 latent_mask=(1-obs_mask) if self.pad_with_random_frames else latent_mask,
                 eval_mask=latent_mask,
             )
-            if last_batch or not self.use_ddp:
-                losses = compute_losses()
-            else:
-                with self.ddp_model.no_sync():
+            with th.autocast("cuda", dtype=th.bfloat16, enabled=self.use_bf16):  # bf16 autocast, fp32 master weights (#100)
+                if last_batch or not self.use_ddp:
                     losses = compute_losses()
+                else:
+                    with self.ddp_model.no_sync():
+                        losses = compute_losses()
 
             if losses['loss'].isnan().sum() > 0:
                 raise Exception("Loss is nan.")

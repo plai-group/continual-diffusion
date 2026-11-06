@@ -217,6 +217,7 @@ def main():
         save_interval=args.save_interval,
         resume_checkpoint=args.resume_checkpoint,
         use_fp16=args.use_fp16,
+        use_bf16=args.use_bf16,
         fp16_scale_growth=args.fp16_scale_growth,
         diffusion_space_kwargs=args.diffusion_space_kwargs,
         schedule_sampler=schedule_sampler,
@@ -251,6 +252,7 @@ def create_argparser():
         save_interval=100000,
         resume_checkpoint="",
         use_fp16=False,
+        use_bf16=False,
         fp16_scale_growth=1e-3,
         diffusion_space="pixel",
         resume_id='',  # set this to a previous run's wandb id to resume training

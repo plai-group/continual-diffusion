@@ -39,30 +39,30 @@ def test_quantize_keypress_boundary_at_exactly_half():
 
 def _keys(seed=0):
     g = torch.Generator().manual_seed(seed)
-    p_key = torch.rand(1, 4, 8, generator=g)
-    g_key = (torch.rand(1, 4, 8, generator=g) > 0.5).float()
-    return p_key, g_key
+    pred_key = torch.rand(1, 4, 8, generator=g)
+    gt_key = (torch.rand(1, 4, 8, generator=g) > 0.5).float()
+    return pred_key, gt_key
 
 
 def test_action_metrics_dispatches_to_quantize_keypress_when_enabled():
-    p_key, g_key = _keys()
+    pred_key, gt_key = _keys()
     calls = []
     orig = debug_actions.quantize_keypress
     debug_actions.quantize_keypress = lambda x: calls.append(x) or orig(x)
     try:
-        _action_metrics(p_key, g_key, None, None, slice(None), quantize=True)
+        _action_metrics(pred_key, gt_key, None, None, slice(None), quantize=True)
     finally:
         debug_actions.quantize_keypress = orig
-    assert len(calls) == 2, "quantize_keypress should run on both p_key and g_key"
+    assert len(calls) == 2, "quantize_keypress should run on both pred_key and gt_key"
 
 
 def test_action_metrics_skips_quantize_keypress_when_disabled():
-    p_key, g_key = _keys()
+    pred_key, gt_key = _keys()
     calls = []
     orig = debug_actions.quantize_keypress
     debug_actions.quantize_keypress = lambda x: calls.append(x) or orig(x)
     try:
-        _action_metrics(p_key, g_key, None, None, slice(None), quantize=False)
+        _action_metrics(pred_key, gt_key, None, None, slice(None), quantize=False)
     finally:
         debug_actions.quantize_keypress = orig
     assert calls == [], "quantize=False must preserve the old inline >0.5 path"
@@ -70,13 +70,13 @@ def test_action_metrics_skips_quantize_keypress_when_disabled():
 
 def test_action_metrics_dispatches_to_quantize_km_fsq_when_fsq():
     g = torch.Generator().manual_seed(0)
-    p_key = torch.rand(1, 4, 36, generator=g)
-    g_key = torch.rand(1, 4, 36, generator=g)
+    pred_key = torch.rand(1, 4, 36, generator=g)
+    gt_key = torch.rand(1, 4, 36, generator=g)
     calls = []
     orig = debug_actions.quantize_km_fsq
     debug_actions.quantize_km_fsq = lambda x: calls.append(x) or orig(x)
     try:
-        _action_metrics(p_key, g_key, None, None, slice(None), quantize="fsq")
+        _action_metrics(pred_key, gt_key, None, None, slice(None), quantize="fsq")
     finally:
         debug_actions.quantize_km_fsq = orig
     assert len(calls) == 2

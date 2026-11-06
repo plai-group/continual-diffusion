@@ -815,7 +815,7 @@ def run_debug_validation(model, diffusion, valset, device, out_dir,
             all_keys = is_km_ctx14 or keys79_all is not None
             pred_key_chunk, pred_mouse_chunk, pred_key_prob_chunk = (_decode_km_actions(km_tokenizer, act_for_decode, all_keys)
                                           if act_for_decode is not None else (None, None, None))
-            gt_key_chunk, gt_mouse_chunk, _gt_key_prob_chunk = (_decode_km_actions(km_tokenizer, keypress_chunk, all_keys)
+            gt_key_chunk, gt_mouse_chunk, gt_key_prob_chunk = (_decode_km_actions(km_tokenizer, keypress_chunk, all_keys)
                                           if keypress_chunk is not None else (None, None, None))
             if pred_key_prob_chunk is not None:
                 for _ in range(action_samples - 1):
@@ -870,6 +870,11 @@ def run_debug_validation(model, diffusion, valset, device, out_dir,
                                                              pred_key_prob=pred_key_prob,
                                                              gt_key_true=gt_key_true,
                                                              key_baserate_q=key_baserate_q).items()})
+            if (is_km_fsq or is_km_ctx14) and gt_key is not None and gt_key_true is not None:
+                # Decode floor: the GT km codes scored against the true keys, the best any generated code can do.
+                for scope, sl in (("next", slice(first_gen, first_gen + 1)), ("roll", slice(first_gen, None))):
+                    fl = _action_metrics(gt_key, gt_key_true, None, None, sl, pred_key_prob=gt_key_prob_chunk[j].to(device), gt_key_true=gt_key_true, key_baserate_q=key_baserate_q)
+                    rec.update({f"{scope}/floor_{k}": v for k, v in fl.items() if k != "key_ce_baserate"})
             per_row.append(rec)
 
             slug = valset.slug(row)
@@ -1023,7 +1028,8 @@ def run_debug_validation(model, diffusion, valset, device, out_dir,
             if vals:
                 agg[f"{prefix}/{k}"] = float(np.mean(vals))
     ACT_METRIC_KEYS = ("key_jaccard_distance", "key_cross_entropy", "key_ce_baserate",
-                       "mouse_l1", "mouse_mse", "mouse_l1_trivial", "mouse_mse_trivial")
+                       "mouse_l1", "mouse_mse", "mouse_l1_trivial", "mouse_mse_trivial",
+                       "floor_key_jaccard_distance", "floor_key_cross_entropy")
     for scope, prefix in (("next", "val/action"), ("roll", "val/action_roll")):
         for k in ACT_METRIC_KEYS:
             vals = [r[f"{scope}/{k}"] for r in per_row if f"{scope}/{k}" in r]

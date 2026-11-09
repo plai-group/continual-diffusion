@@ -631,8 +631,10 @@ def run_debug_validation(model, diffusion, valset, device, out_dir,
                          step=0, chunk_size=3, log_videos=True,
                          per_task_scalars=False, actions=True,
                          swap_test=True, cfg_scale=1.0, label_cfg_scale=1.0,
-                         teacher_force_actions=True, fvd_repeats=4):
+                         teacher_force_actions=True, fvd_repeats=4, action_samples=1):
     """Sample every validation row, render overlays, log metrics to wandb.
+
+    action_samples=N (km encodings): key CE scores the mean decoded key probability over N samples; other metrics use the first.
 
     Returns the aggregate metric dict (also logged via ``logger.logkv``).
     """
@@ -789,8 +791,14 @@ def run_debug_validation(model, diffusion, valset, device, out_dir,
             all_keys = is_km_ctx14 or keys79_all is not None
             pred_key_chunk, pred_mouse_chunk, pred_key_prob_chunk = (_decode_km_actions(km_tokenizer, act_for_decode, all_keys)
                                           if act_for_decode is not None else (None, None, None))
-            gt_key_chunk, gt_mouse_chunk, _gt_key_prob_chunk = (_decode_km_actions(km_tokenizer, keypress_chunk, all_keys)
+            gt_key_chunk, gt_mouse_chunk, gt_key_prob_chunk = (_decode_km_actions(km_tokenizer, keypress_chunk, all_keys)
                                           if keypress_chunk is not None else (None, None, None))
+            if pred_key_prob_chunk is not None:
+                for _ in range(action_samples - 1):
+                    extra_act = _unpack_action_mouse_out(_sample_chunk()[1], generates_actions, generates_mouse)[0]
+                    pred_key_prob_chunk = pred_key_prob_chunk + _decode_km_actions(
+                        km_tokenizer, quantize_fn(extra_act) if action_quantization == "fsq" else extra_act, all_keys)[2]
+                pred_key_prob_chunk = pred_key_prob_chunk / action_samples
             metrics_quantize = "none"  # already hard-thresholded booleans; nothing left to snap
         elif is_raw_fused:
             # 10-dim fused token: first 8 dims are keypress, last 2 are symlog(mouse).
@@ -828,16 +836,22 @@ def run_debug_validation(model, diffusion, valset, device, out_dir,
             if pred_key is not None or pred_mouse is not None or pred_key_prob is not None:
                 # Row n_obs is pinned GT (the action mask lags by one row), so the first genuinely generated action is row n_obs + 1.
                 first_gen = k * (n_obs + 1)  # in ticks
+                n_t = next(t.shape[0] for t in (gt_key, gt_mouse, gt_key_true) if t is not None)
+                # Persistence copies the last pinned GT tick; its key prob is 0.9*last multi-hot + 0.1*key_baserate_q.
+                last = lambda x, p=None: None if x is None else (x[first_gen - 1:first_gen] if p is None else p * x[first_gen - 1:first_gen] + (1 - p) * key_baserate_q).expand(n_t, *x.shape[1:])
+                pers = (last(gt_key), last(gt_mouse), last(gt_key_true, 0.9) if pred_key_prob is not None else None)
                 for scope, sl in (("next", slice(first_gen, first_gen + 1)),
                                   ("roll", slice(first_gen, None))):
                                   # next is just the next frame, roll is all rollout frames
-                    rec.update({f"{scope}/{k}": v
-                                for k, v in _action_metrics(pred_key, gt_key, pred_mouse, gt_mouse, sl,
-                                                             metrics_quantize,
-                                                             is_km_fsq=is_km_fsq or is_km_ctx14 or is_raw_fused,
-                                                             pred_key_prob=pred_key_prob,
-                                                             gt_key_true=gt_key_true,
-                                                             key_baserate_q=key_baserate_q).items()})
+                    akw = dict(quantize=metrics_quantize, is_km_fsq=is_km_fsq or is_km_ctx14 or is_raw_fused, gt_key_true=gt_key_true, key_baserate_q=key_baserate_q)
+                    rec.update({f"{scope}/{k}": v for k, v in _action_metrics(pred_key, gt_key, pred_mouse, gt_mouse, sl, pred_key_prob=pred_key_prob, **akw).items()})
+                    pm = _action_metrics(pers[0], gt_key, pers[1], gt_mouse, sl, pred_key_prob=pers[2], **akw)
+                    rec.update({f"{scope}/{n}_persist": pm[k] for n, k in (("key_jaccard", "key_jaccard_distance"), ("mouse_l1", "mouse_l1"), ("key_ce", "key_cross_entropy")) if k in pm})
+            if (is_km_fsq or is_km_ctx14) and gt_key is not None and gt_key_true is not None:
+                # Decode floor: the GT km codes scored against the true keys, the best any generated code can do.
+                for scope, sl in (("next", slice(first_gen, first_gen + 1)), ("roll", slice(first_gen, None))):
+                    fl = _action_metrics(gt_key, gt_key_true, None, None, sl, pred_key_prob=gt_key_prob_chunk[j].to(device), gt_key_true=gt_key_true, key_baserate_q=key_baserate_q)
+                    rec.update({f"{scope}/floor_{k}": v for k, v in fl.items() if k != "key_ce_baserate"})
             per_row.append(rec)
 
             slug = valset.slug(row)
@@ -991,7 +1005,9 @@ def run_debug_validation(model, diffusion, valset, device, out_dir,
             if vals:
                 agg[f"{prefix}/{k}"] = float(np.mean(vals))
     ACT_METRIC_KEYS = ("key_jaccard_distance", "key_cross_entropy", "key_ce_baserate",
-                       "mouse_l1", "mouse_mse", "mouse_l1_trivial", "mouse_mse_trivial")
+                       "mouse_l1", "mouse_mse", "mouse_l1_trivial", "mouse_mse_trivial",
+                       "floor_key_jaccard_distance", "floor_key_cross_entropy",
+                       "key_jaccard_persist", "mouse_l1_persist", "key_ce_persist")
     for scope, prefix in (("next", "val/action"), ("roll", "val/action_roll")):
         for k in ACT_METRIC_KEYS:
             vals = [r[f"{scope}/{k}"] for r in per_row if f"{scope}/{k}" in r]

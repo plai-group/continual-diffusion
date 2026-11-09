@@ -73,3 +73,16 @@ def test_n_averages_key_probabilities_over_samples(monkeypatch, tmp_path):
     pred = [probs[0]] + probs[2:]  # probs[1] is the GT decode
     assert len(pred) == 4 and not torch.equal(pred[0], pred[1])
     assert torch.allclose(seen[0], torch.stack(pred).mean(0)[0], atol=1e-6)
+
+
+def test_gt_decode_floor_scores_the_gt_codes_against_true_keys(monkeypatch, tmp_path):
+    vs = _Valset()
+    monkeypatch.setattr(dv, "_METRICS", lambda p, g: {"psnr": 1.0})
+    monkeypatch.setattr(dv, "_get_km_tokenizer", lambda *a, **k: None)
+    monkeypatch.setattr(dv, "_decode_km_actions", lambda tok, codes, all_keys=False: (
+        (p := vs.keys79.clamp(1e-3, 1 - 1e-3)).round(), torch.zeros(N, T, 2), p) if torch.equal(codes, vs.codes) else
+        (torch.zeros(N, T, 79), torch.zeros(N, T, 2), torch.full((N, T, 79), 0.5)))
+    agg = dv.run_debug_validation(_Model(), _Diffusion(), vs, "cpu", tmp_path, chunk_size=N, log_videos=False,
+                                  swap_test=False, fvd_repeats=0)["aggregate"]
+    assert agg["val/action_roll/floor_key_jaccard_distance"] == 0.0
+    assert agg["val/action_roll/floor_key_cross_entropy"] < 0.1 < agg["val/action_roll/key_cross_entropy"]
